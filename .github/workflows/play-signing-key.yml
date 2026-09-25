@@ -29,7 +29,7 @@ jobs:
       # Google's key for encrypting exported signing keys: 4 bytes of identity
       # followed by a 64-byte P-256 point, the value the console shows next to
       # the pepk command. A public key, so it can live here.
-      PLAY_ENCRYPTION_KEY_HEX: eb10fe8f7c7c9df715022017b00c6471f8ba8170b13049a11e6c09ffe3056a104a3bbe4ac5a955f4ba4fe93fc8cef27558a3eb9d2a529a2092761fb833b656cd48b9de6a
+      PLAY_ENCRYPTION_KEY_HEX: ${{ secrets.PLAY_ENCRYPTION_KEY_HEX }}
 
     steps:
       - name: Checkout olcbox
