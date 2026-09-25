@@ -30,6 +30,15 @@ class XrayConfigDumpTest {
         dump("vless-xhttp", XrayConfig.buildXhttp(spec))
     }
 
+    @Test fun dumpVlessXhttpExtra() {
+        val withExtra = link.replace(
+            "#FI-xhttp",
+            "&extra=%7B%22xPaddingBytes%22%3A%22400-600%22%7D#FI-xhttp"
+        )
+        val spec = LinkParser.parse(withExtra) as OutboundSpec.Vless
+        dump("vless-xhttp-extra", XrayConfig.buildXhttp(spec))
+    }
+
     /**
      * The iOS shapes behind a tun2socks, where Xray answers DNS itself: Global,
      * and Bypass Russia with the bundled lists inline. `xray -test` is what
