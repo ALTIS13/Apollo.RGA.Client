@@ -1,6 +1,7 @@
 package org.olcbox.app.net
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlin.io.encoding.Base64
@@ -57,20 +58,30 @@ object LinkParser {
         val p = splitLink(s, "vless://") ?: return null
         val type = p.query["type"]?.trim().orEmpty().ifEmpty { "tcp" }.lowercase()
         val transport = when (type) {
-            "xhttp" -> TransportSpec.Xhttp(
-                path = p.query["path"] ?: "/",
-                host = p.query["host"] ?: p.query["sni"].orEmpty(),
-                mode = p.query["mode"] ?: "auto",
-            )
+            "xhttp" -> {
+                val extra = if ("extra" in p.query) {
+                    val raw = p.query.getValue("extra")
+                    if (raw.length !in 2..MAX_XHTTP_EXTRA_LENGTH) return null
+                    runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+                        ?: return null
+                } else {
+                    null
+                }
+                TransportSpec.Xhttp(
+                    path = p.query["path"] ?: "/",
+                    host = p.query["host"] ?: p.query["sni"].orEmpty(),
+                    mode = p.query["mode"] ?: "auto",
+                    extra = extra,
+                )
+            }
             "grpc" -> TransportSpec.Grpc(
                 p.query["serviceName"] ?: p.query["servicename"].orEmpty()
             )
             "ws", "httpupgrade" -> streamTransport(type, p.query)!!
             "tcp", "raw" -> TransportSpec.Tcp
-            // Keep older unsupported rows readable and stored. They remain
-            // visible instead of disappearing during normalization after an
-            // application update; transport support is added explicitly above.
-            else -> TransportSpec.Tcp
+            // Treat an unsupported transport as an incompatible link, not as
+            // a plausible TCP host that will fail only after connecting.
+            else -> return null
         }
         return OutboundSpec.Vless(
             uuid = p.userinfo,
@@ -242,6 +253,8 @@ object LinkParser {
                 urlDecode(it.substring(0, eq)) to urlDecode(it.substring(eq + 1))
             }
         }.toMap()
+
+    private const val MAX_XHTTP_EXTRA_LENGTH = 16_384
 
     /**
      * Percent-decoding that survives anything outside ASCII.

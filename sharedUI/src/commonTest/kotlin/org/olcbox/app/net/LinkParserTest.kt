@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class LinkParserTest {
     @Test fun parsesVlessReality() {
@@ -33,6 +35,23 @@ class LinkParserTest {
         assertNull(s.flow) // xhttp is incompatible with flow
     }
 
+    @Test fun parsesVlessXhttpExtraWithoutLosingOptions() {
+        val link = "vless://22222222-2222-2222-2222-222222222222@1.2.3.4:443" +
+            "?type=xhttp&security=reality&pbk=PBK&sni=sni.example&path=%2Fdownload&mode=packet-up" +
+            "&extra=%7B%22xPaddingBytes%22%3A%22400-600%22%2C%22headers%22%3A%7B%22X-Test%22%3A%221%22%7D%7D#FI"
+        val parsed = LinkParser.parse(link)
+        assertIs<OutboundSpec.Vless>(parsed)
+        val transport = assertIs<TransportSpec.Xhttp>(parsed.transport)
+        assertEquals("400-600", transport.extra?.get("xPaddingBytes")?.jsonPrimitive?.content)
+        assertEquals("1", transport.extra?.get("headers")?.jsonObject?.get("X-Test")?.jsonPrimitive?.content)
+    }
+
+    @Test fun rejectsMalformedOrNonObjectXhttpExtra() {
+        val prefix = "vless://22222222-2222-2222-2222-222222222222@1.2.3.4:443?type=xhttp&path=%2Fdownload&extra="
+        assertNull(LinkParser.parse(prefix + "%7Bnot-json%7D#FI"))
+        assertNull(LinkParser.parse(prefix + "%5B1%5D#FI"))
+    }
+
     @Test fun parsesVlessGrpcAndDropsTcpOnlyFlow() {
         val link = "vless://33333333-3333-3333-3333-333333333333@grpc.example:2053" +
             "?type=grpc&serviceName=rutube&security=reality&pbk=PBK&flow=xtls-rprx-vision#KZ"
@@ -42,16 +61,15 @@ class LinkParserTest {
         assertNull(spec.flow)
     }
 
-    @Test fun emptyAndUnknownTransportsRemainReadableAsTcp() {
+    @Test fun emptyTransportDefaultsToTcpButUnknownIsRejected() {
         val prefix = "vless://44444444-4444-4444-4444-444444444444@host:443"
         val empty = LinkParser.parse("$prefix?type=&sni=host")
         assertIs<OutboundSpec.Vless>(empty)
         assertEquals(TransportSpec.Tcp, empty.transport)
 
-        // ws was the example here until WebSocket became supported (LinkParserProtocolsTest).
+        // An unsupported transport must not become a believable but broken TCP host.
         val unknown = "$prefix?type=kcp&sni=host"
-        val preserved = assertIs<OutboundSpec.Vless>(LinkParser.parse(unknown))
-        assertEquals(TransportSpec.Tcp, preserved.transport)
+        assertNull(LinkParser.parse(unknown))
     }
 
     @Test fun parsesHysteria2() {

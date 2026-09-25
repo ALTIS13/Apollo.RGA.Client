@@ -1,6 +1,7 @@
 package org.olcbox.app.net
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 enum class LocationKind { Olcrtc, Vless, Hysteria2, Trojan, Shadowsocks, Vmess }
@@ -8,7 +9,7 @@ enum class LocationKind { Olcrtc, Vless, Hysteria2, Trojan, Shadowsocks, Vmess }
 sealed interface TransportSpec {
     data object Tcp : TransportSpec
     data class Grpc(val serviceName: String) : TransportSpec
-    data class Xhttp(val path: String, val host: String, val mode: String) : TransportSpec
+    data class Xhttp(val path: String, val host: String, val mode: String, val extra: JsonObject? = null) : TransportSpec
     /** WebSocket (`type=ws`); [host] is the Host header, empty for the server's own name. */
     data class Ws(val path: String, val host: String) : TransportSpec
     /** HTTP upgrade (`type=httpupgrade`), the lighter WebSocket handshake. */
