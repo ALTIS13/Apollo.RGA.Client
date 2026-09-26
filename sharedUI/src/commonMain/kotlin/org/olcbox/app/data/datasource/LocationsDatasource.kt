@@ -413,27 +413,32 @@ class LocationsRepositoryImpl(
                     refreshedEndpointCounts[subscriptionSignature(selectedPrevious.location)] != 1)
             ) {
                 // The new profiles cannot be mapped to the selected old one. Do
-                // not swap endpoints or advance the rejected refresh timestamp,
-                // but a valid response can still revoke access for the whole list.
+                // not swap endpoints or advance the rejected refresh timestamp.
+                // Still keep tighter subscription-wide limits from a valid reply:
+                // a future earlier expiry matters when that future arrives.
                 val fresh = source.profile
-                val limited = fresh?.let {
-                    it.quotaKnown && it.totalBytes != null && it.totalBytes > 0 &&
-                        it.usedBytes != null && it.usedBytes >= it.totalBytes
-                } == true
-                val expired = fresh?.let {
-                    it.expiryKnown && it.expiresAtEpochMs != null && refreshTimestamp >= it.expiresAtEpochMs
-                } == true
-                val denialProfile = if (limited || expired) SubscriptionProfile(
-                    usedBytes = fresh.usedBytes.takeIf { limited },
-                    totalBytes = fresh.totalBytes.takeIf { limited },
-                    quotaKnown = limited,
-                    expiresAtEpochMs = fresh.expiresAtEpochMs.takeIf { expired },
-                    expiryKnown = expired
-                ) else null
-                val retained = if (denialProfile == null) previousEntries else previousEntries.map { entry ->
+                val freshQuota = fresh?.let { profile ->
+                    val used = profile.usedBytes
+                    val total = profile.totalBytes
+                    if (profile.quotaKnown && used != null && total != null && total > 0) used to total else null
+                }
+                val freshExpiry = fresh?.let { profile ->
+                    profile.expiresAtEpochMs.takeIf { profile.expiryKnown }
+                }
+                val retained = if (freshQuota == null && freshExpiry == null) previousEntries else previousEntries.map { entry ->
                     val metadata = entry.metadata ?: LocationMetadata()
+                    val previous = metadata.subscription
+                    val stricter = SubscriptionProfile(
+                        usedBytes = freshQuota?.let { maxOf(previous?.usedBytes ?: 0L, it.first) },
+                        totalBytes = freshQuota?.let { quota ->
+                            previous?.totalBytes?.takeIf { it > 0 }?.let { minOf(it, quota.second) } ?: quota.second
+                        },
+                        quotaKnown = freshQuota != null,
+                        expiresAtEpochMs = freshExpiry?.let { minOf(previous?.expiresAtEpochMs ?: it, it) },
+                        expiryKnown = freshExpiry != null
+                    )
                     entry.copy(metadata = metadata.copy(
-                        subscription = metadata.subscription.withProfile(denialProfile)
+                        subscription = previous.withProfile(stricter)
                     ))
                 }
                 metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
