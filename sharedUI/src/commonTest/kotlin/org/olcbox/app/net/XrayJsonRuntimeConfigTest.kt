@@ -67,7 +67,41 @@ class XrayJsonRuntimeConfigTest {
 
     @Test fun rejectsReferencedHttpInsteadOfChangingRuleMeaning() {
         val body = XrayJsonSubscriptionFixtures.vless.replace("\"inboundTag\":[\"local-socks\"]", "\"inboundTag\":[\"local-http\"]")
-        assertFailsWith<XrayJsonRuntimeConfig.Rejected> { XrayJsonRuntimeConfig.adapt(config(body), 32001, login) }
+        val error = assertFailsWith<XrayJsonRuntimeConfig.Rejected> { XrayJsonRuntimeConfig.adapt(config(body), 32001, login) }
+        assertEquals(XrayJsonRuntimeConfig.Reason.REFERENCED_HTTP_INBOUND, error.reason)
+    }
+
+    @Test fun sniffedHttpProtocolNameIsNotAReferenceToRemovedHttpInbound() {
+        for (body in listOf(XrayJsonSubscriptionFixtures.vless, XrayJsonSubscriptionFixtures.hysteria)) {
+            val input = config(body.replace("\"tag\":\"local-http\"", "\"tag\":\"http\""))
+            val adapted = XrayJsonRuntimeConfig.adapt(input, 32001, login).config
+            val originalSocks = input.getValue("inbounds").jsonArray[0].jsonObject
+            val runtimeSocks = adapted.getValue("inbounds").jsonArray.single().jsonObject
+            assertEquals(originalSocks.getValue("sniffing"), runtimeSocks.getValue("sniffing"))
+            assertEquals("http", input.getValue("inbounds").jsonArray[1].jsonObject.getValue("tag").jsonPrimitive.content)
+            assertEquals("local-socks", runtimeSocks.getValue("tag").jsonPrimitive.content)
+            assertEquals(input.getValue("outbounds"), adapted.getValue("outbounds"))
+        }
+    }
+
+    @Test fun opaqueRetainedValueMatchingRemovedHttpTagStillRejects() {
+        val body = XrayJsonSubscriptionFixtures.vless
+            .replace("\"tag\":\"local-http\"", "\"tag\":\"http\"")
+            .replace("\"maxConcurrency\":8", "\"maxConcurrency\":8,\"opaqueInboundTag\":\"http\"")
+        val error = assertFailsWith<XrayJsonRuntimeConfig.Rejected> {
+            XrayJsonRuntimeConfig.adapt(config(body), 32001, login)
+        }
+        assertEquals(XrayJsonRuntimeConfig.Reason.REFERENCED_HTTP_INBOUND, error.reason)
+    }
+
+    @Test fun onlySniffingDestOverrideIsExcludedFromReferenceScan() {
+        val body = XrayJsonSubscriptionFixtures.vless
+            .replace("\"tag\":\"local-http\"", "\"tag\":\"http\"")
+            .replace("\"destOverride\":[\"http\",\"tls\",\"quic\"]", "\"destOverride\":[\"http\",\"tls\",\"quic\"],\"domainsExcluded\":[\"http\"]")
+        val error = assertFailsWith<XrayJsonRuntimeConfig.Rejected> {
+            XrayJsonRuntimeConfig.adapt(config(body), 32001, login)
+        }
+        assertEquals(XrayJsonRuntimeConfig.Reason.REFERENCED_HTTP_INBOUND, error.reason)
     }
 
     @Test fun revalidatesTamperedStoredConfigAndMalformedInbounds() {

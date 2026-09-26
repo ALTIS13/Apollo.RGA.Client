@@ -30,6 +30,16 @@ class XrayJsonRuntimeConfigDumpTest {
             )
             assertEquals(missingBlackholeSettings["outbounds"], adaptedMissing.config["outbounds"])
             File(dir, "$name-no-blackhole-settings.json").writeText(adaptedMissing.config.toString())
+
+            val collisionInbounds = missingBlackholeSettings.getValue("inbounds").jsonArray.toMutableList()
+            val http = collisionInbounds[1].jsonObject
+            collisionInbounds[1] = JsonObject(http + ("tag" to JsonPrimitive("http")))
+            val collision = JsonObject(missingBlackholeSettings + ("inbounds" to JsonArray(collisionInbounds)))
+            val adaptedCollision = XrayJsonRuntimeConfig.adapt(
+                collision, 32001, SocksLogin("local-user", "synthetic-secret")
+            )
+            assertEquals(collision["outbounds"], adaptedCollision.config["outbounds"])
+            File(dir, "$name-http-tag-collision-no-blackhole-settings.json").writeText(adaptedCollision.config.toString())
         }
     }
 }

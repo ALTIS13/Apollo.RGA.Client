@@ -32,10 +32,14 @@ internal object XrayJsonRuntimeConfig {
         val http = inbounds.singleOrNull { it.getValue("protocol").jsonPrimitive.content == "http" }
         if (http != null) {
             val tag = http.getValue("tag").jsonPrimitive.content
-            // Check the entire retained object, including opaque core-owned extensions:
-            // do not assume routing.inboundTag is the only possible reference.
-            val retained = JsonObject(config + ("inbounds" to JsonArray(listOf(socks))))
-            requireSafe(!containsString(retained, tag), Reason.REFERENCED_HTTP_INBOUND)
+            // Xray treats sniffing.destOverride as protocol names, not inbound tags.
+            // Exclude only that path from the conservative scan; all other retained
+            // values, including opaque core-owned extensions, must remain checked.
+            val scanSocks = socks["sniffing"]?.jsonObject?.let { sniffing ->
+                JsonObject(socks + ("sniffing" to JsonObject(sniffing - "destOverride")))
+            } ?: socks
+            val referenceScan = JsonObject(config + ("inbounds" to JsonArray(listOf(scanSocks))))
+            requireSafe(!containsString(referenceScan, tag), Reason.REFERENCED_HTTP_INBOUND)
         }
         val settings = JsonObject(socks.getValue("settings").jsonObject + mapOf(
             "auth" to JsonPrimitive("password"),
