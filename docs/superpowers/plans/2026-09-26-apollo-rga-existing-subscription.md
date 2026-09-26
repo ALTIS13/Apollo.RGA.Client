@@ -47,17 +47,27 @@
 - [ ] Integrate codec, serialize exact profile, make Android write crash-safe, preserve last valid version only while entitlement state permits. GREEN and related repository/storage tests.
 - [ ] Check focused diff for URL/key logging, run `git diff --check`. Commit: `feat(rga): store Xray subscriptions atomically`.
 
-### Task 3: Запуск точного Xray-профиля
+### Task 3: Обновлённое Android-ядро для Hy2 и XHTTP
+
+**Files:** `sharedUI/src/commonMain/kotlin/org/olcbox/app/net/XrayConfig.kt` (pin), `.github/workflows/pr-checks.yml`, `.github/workflows/release.yml`, `.github/workflows/singbox-verify.yml`, core packaging script/version declarations, tests and ignored build artifacts. No bundled binary in git unless that is the existing repo policy.
+
+**Interfaces:** Replace Android Xray 25.3.6, which cannot parse Hysteria v2/TLS, with a pinned, reproducible and patched Xray version at least 26.7.11. Preserve XHTTP functionality. Keep iOS/desktop pins unchanged unless their own compatibility requires a separate explicit task.
+
+- [ ] Select the exact upstream tag after reading its official release/security notes; record tag, source commit and artifact hash. 26.7.11 is the minimum for `pinnedPeerCertSha256` security fix ([advisory](https://github.com/XTLS/Xray-core/security/advisories/GHSA-5wf9-h793-w73c)); newer prereleases require focused testing, not an assumption of stability.
+- [ ] First RED: pinned Android 25.3.6 rejects sanitized Hy2/TLS-pin configuration. Build/stage the replacement arm64 binary with existing project pipeline; run `xray test` on that exact build in isolated Android execution and verify XHTTP/Reality too. A Windows x64 binary passing is insufficient.
+- [ ] Update matching CI/release pins, 16 KB ELF alignment check and app packaging tests; run focused build/verification. Do not install on the user's Nothing Phone yet or alter an active VPN. Commit: `build(rga): pin Android Xray with Hy2 support`.
+
+### Task 4: Запуск точного Xray-профиля
 
 **Files:** новый `sharedUI/src/commonMain/kotlin/org/olcbox/app/net/XrayJsonRuntimeConfig.kt`, `sharedUI/src/androidMain/kotlin/org/olcbox/app/vpn/service/OlcboxVpnService.kt`, `sharedUI/src/commonTest/kotlin/org/olcbox/app/net/XrayJsonRuntimeConfigTest.kt`, targeted Android tests.
 
 **Interfaces:** Preserve input DNS/routing/outbounds byte/semantic content and adapt only loopback SOCKS inbound/tag/auth for Android TUN→hev/mapdns→SOCKS. Start through actual `OlcboxVpnService.startCore`, not unused `EngineDispatcher`. No local Bypass Russia substitution.
 
 - [ ] RED tests: exact DNS/routing/outbound preservation, tag graph validation, a malformed inbound and a changed XHTTP/Hy2 field cause failure.
-- [ ] Run `xray test` with packaged pinned Android core on sanitized XHTTP and Hy2/TLS-pin fixtures. If Hy2 unsupported, release stays blocked; do not route via lossy sing-box converter.
+- [ ] Reuse Task 3 evidence that the packaged pinned Android core accepts sanitized XHTTP and Hy2/TLS-pin fixtures. If real Hy2 traffic remains unusable, release stays blocked; do not route via lossy sing-box converter.
 - [ ] Implement runtime adapter/Android branch, GREEN, focused Xray validation, and no secret logging. Physical RU DIRECT/foreign egress/DNS/IPv4/IPv6 remains a release gate. Commit: `feat(rga): run validated Xray subscription profiles`.
 
-### Task 4: Release-hide OlcRTC и понятная модель подписки/хоста
+### Task 5: Release-hide OlcRTC и понятная модель подписки/хоста
 
 **Files:** variant policy в `androidApp`/`sharedUI`, `LocationsDatasource.kt`, `OlcboxVpnService.kt`, новые presenter-модели в `sharedUI/src/commonMain/kotlin/org/olcbox/app/ui/`, tests under `sharedUI/src/commonTest`.
 
@@ -66,7 +76,7 @@
 - [ ] RED tests for composite flag (`🇳🇱`), long host name + comment, storage-injected OlcRTC in release, expired/limited status, missing usage headers and failed refresh.
 - [ ] Implement policy/presenters; GREEN + related tests; check no URL/UUID in UI output or logs. Commit: `feat(rga): gate experimental mode and present subscription status`.
 
-### Task 5: Apollo Orbit Android UI
+### Task 6: Apollo Orbit Android UI
 
 **Files:** `sharedUI/src/commonMain/kotlin/org/olcbox/app/ui/features/onboarding/OnboardingScreen.kt`, `.../features/home/HomeScreen.kt`, `HomeScreenContent.kt`, `.../components/LocationSelection.kt`, theme/colors/typography, Android activity resources; tests for presenter/composables as applicable.
 
@@ -76,7 +86,7 @@
 - [ ] Написать/обновить RED presenter/UI tests для host/status/onboarding/hidden mode. Реализовать Material 3 Apollo Orbit screen, нативные back/insets/touch targets; GREEN.
 - [ ] Android build + screenshot/visual review на контролируемой среде; проверить крупный шрифт и длинные названия. Commit: `feat(rga): present Apollo subscription home`.
 
-### Task 6: Импорт из страницы и выпускной барьер
+### Task 7: Импорт из страницы и выпускной барьер
 
 **Files:** `androidApp/src/main/AndroidManifest.xml`, Android import handler/test, release notes, `docs/` handoff; production subpage/Response Rules не менять.
 
