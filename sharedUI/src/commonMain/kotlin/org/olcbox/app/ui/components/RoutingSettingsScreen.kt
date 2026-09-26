@@ -50,6 +50,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -77,6 +78,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -96,11 +98,14 @@ fun RoutingSettingsScreen(
     enabled: Boolean,
     availableModes: List<RoutingMode> = RoutingMode.entries,
     unavailableReason: String? = null,
+    showCustomRules: Boolean = true,
+    titleOverride: String? = null,
+    customRulesWarning: String? = null,
     onChanged: (RoutingSettings) -> Unit,
     onBack: () -> Unit
 ) {
     var selectingRegion by remember { mutableStateOf(false) }
-    if (selectingRegion) {
+    if (showCustomRules && selectingRegion) {
         AlertDialog(
             onDismissRequest = { selectingRegion = false },
             title = { Text(stringResource(Res.string.routing_region)) },
@@ -141,7 +146,7 @@ fun RoutingSettingsScreen(
             .padding(horizontal = 24.dp)
             .padding(bottom = 32.dp)
     ) {
-        PkScreenHeader(title = stringResource(Res.string.settings_routing), subtitle = settings.mode.localizedHubSummary(), onBack = onBack)
+        PkScreenHeader(title = titleOverride ?: stringResource(Res.string.settings_routing), subtitle = settings.mode.localizedHubSummary(), onBack = onBack)
         Spacer(Modifier.height(20.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -150,18 +155,45 @@ fun RoutingSettingsScreen(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Column {
-                RoutingValueRow(
-                    icon = PkIcons.SwapVert,
-                    title = stringResource(Res.string.routing_region),
-                    subtitle = stringResource(Res.string.routing_region_subtitle),
-                    value = settings.mode.regionLabel(),
-                    enabled = enabled,
-                    onClick = { selectingRegion = true }
-                )
+                if (showCustomRules) {
+                    RoutingValueRow(
+                        icon = PkIcons.SwapVert,
+                        title = stringResource(Res.string.routing_region),
+                        subtitle = stringResource(Res.string.routing_region_subtitle),
+                        value = settings.mode.regionLabel(),
+                        enabled = enabled,
+                        onClick = { selectingRegion = true }
+                    )
+                } else {
+                    availableModes.forEachIndexed { index, mode ->
+                        RoutingChoiceRow(
+                            selected = settings.mode == mode,
+                            icon = if (mode == RoutingMode.Global) PkIcons.Public else PkIcons.SwapVert,
+                            title = mode.localizedTitle(),
+                            subtitle = mode.localizedSummary(),
+                            maxSummaryLines = Int.MAX_VALUE,
+                            enabled = enabled,
+                            onClick = { onChanged(settings.copy(mode = mode)) }
+                        )
+                        if (index != availableModes.lastIndex) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                    }
+                }
             }
         }
-        Spacer(Modifier.height(16.dp))
-        CustomRulesCard(settings = settings, enabled = enabled, onChanged = onChanged)
+        if (showCustomRules) {
+            Spacer(Modifier.height(16.dp))
+            if (customRulesWarning != null) {
+                Text(
+                    text = customRulesWarning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+            CustomRulesCard(settings = settings, enabled = enabled, onChanged = onChanged)
+        }
         Spacer(Modifier.height(16.dp))
         Text(
             text = unavailableReason
@@ -176,19 +208,22 @@ fun RoutingSettingsScreen(
 }
 
 @Composable
-private fun RoutingChoiceRow(selected: Boolean, icon: ImageVector, title: String, subtitle: String, enabled: Boolean, onClick: () -> Unit) {
+private fun RoutingChoiceRow(selected: Boolean, icon: ImageVector, title: String, subtitle: String,
+                             enabled: Boolean, maxSummaryLines: Int = 2, onClick: () -> Unit) {
     val alpha = if (enabled) 1f else 0.42f
     Row(
         modifier = Modifier.fillMaxWidth()
             .background(if (selected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f) else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 14.dp, vertical = 11.dp),
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, null, tint = (if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = alpha), modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+                fontSize = 12.sp, maxLines = maxSummaryLines, overflow = TextOverflow.Ellipsis)
         }
         if (selected) Icon(Icons.Rounded.Check, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = alpha), modifier = Modifier.size(20.dp))
     }

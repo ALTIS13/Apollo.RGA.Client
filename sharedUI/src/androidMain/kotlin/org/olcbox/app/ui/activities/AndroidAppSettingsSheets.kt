@@ -5,7 +5,6 @@ import multiplatform_app.sharedui.generated.resources.router_export
 import org.olcbox.app.ui.components.offersRouterExport
 import multiplatform_app.sharedui.generated.resources.action_cancel
 import multiplatform_app.sharedui.generated.resources.action_check_now
-import multiplatform_app.sharedui.generated.resources.action_qr_share
 import multiplatform_app.sharedui.generated.resources.action_refresh
 import multiplatform_app.sharedui.generated.resources.action_remove
 import multiplatform_app.sharedui.generated.resources.action_save
@@ -22,7 +21,6 @@ import multiplatform_app.sharedui.generated.resources.connection_mode
 import multiplatform_app.sharedui.generated.resources.connection_mode_local_socks
 import multiplatform_app.sharedui.generated.resources.connection_mode_proxy
 import multiplatform_app.sharedui.generated.resources.connection_settings_android_value
-import multiplatform_app.sharedui.generated.resources.connection_settings_title
 import multiplatform_app.sharedui.generated.resources.default_interval
 import multiplatform_app.sharedui.generated.resources.every_hours
 import multiplatform_app.sharedui.generated.resources.field_generated_password
@@ -65,10 +63,17 @@ import multiplatform_app.sharedui.generated.resources.ru_bypass_none_selected
 import multiplatform_app.sharedui.generated.resources.ru_bypass_on
 import multiplatform_app.sharedui.generated.resources.saving_restarts_connection
 import multiplatform_app.sharedui.generated.resources.search_apps
-import multiplatform_app.sharedui.generated.resources.server_lists_sharing_title
 import multiplatform_app.sharedui.generated.resources.settings_app_log_value
 import multiplatform_app.sharedui.generated.resources.settings_app_updates_value
+import multiplatform_app.sharedui.generated.resources.settings_advanced
+import multiplatform_app.sharedui.generated.resources.settings_advanced_connection
+import multiplatform_app.sharedui.generated.resources.settings_manual_routing_rules
+import multiplatform_app.sharedui.generated.resources.settings_manual_routing_summary
+import multiplatform_app.sharedui.generated.resources.settings_manual_routing_warning
+import multiplatform_app.sharedui.generated.resources.settings_essentials
 import multiplatform_app.sharedui.generated.resources.settings_routing
+import multiplatform_app.sharedui.generated.resources.settings_share_access_qr
+import multiplatform_app.sharedui.generated.resources.settings_share_access_warning
 import multiplatform_app.sharedui.generated.resources.settings_server_list_updates
 import multiplatform_app.sharedui.generated.resources.settings_server_lists
 import multiplatform_app.sharedui.generated.resources.settings_title
@@ -126,9 +131,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutLinearInEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -310,8 +312,10 @@ internal fun AppSettingsSheet(
             is AppSettingsRoute.AppList -> AppSettingsRoute.SplitTunneling
             AppSettingsRoute.ConnectionMode,
             AppSettingsRoute.SocksProxy,
-            AppSettingsRoute.Routing,
+            AppSettingsRoute.AdvancedRoutingRules,
             AppSettingsRoute.SplitTunneling -> AppSettingsRoute.ConnectionSettings
+
+            AppSettingsRoute.Routing -> AppSettingsRoute.Hub
 
             else -> AppSettingsRoute.Hub
         }
@@ -340,27 +344,13 @@ internal fun AppSettingsSheet(
                 targetState = route,
                 transitionSpec = {
                     fadeIn(
-                        animationSpec = tween(
-                            durationMillis = 180,
-                            delayMillis = 60,
-                            easing = LinearOutSlowInEasing
-                        )
+                        animationSpec = tween(durationMillis = 120)
                     ).togetherWith(
-                        fadeOut(
-                            animationSpec = tween(
-                                durationMillis = 90,
-                                easing = FastOutLinearInEasing
-                            )
-                        )
+                        fadeOut(animationSpec = tween(durationMillis = 90))
                     ).using(
                         SizeTransform(
                             clip = false,
-                            sizeAnimationSpec = { _, _ ->
-                                tween(
-                                    durationMillis = 320,
-                                    easing = FastOutSlowInEasing
-                                )
-                            }
+                            sizeAnimationSpec = { _, _ -> tween(durationMillis = 150) }
                         )
                     )
                 },
@@ -378,8 +368,10 @@ internal fun AppSettingsSheet(
                         updateSettings = updateSettings,
                         showUpdates = showUpdates,
                         subscriptionsCount = subscriptions.size,
+                        routingSettings = routingSettings,
                         enabled = enabled,
                         onConnectionSettingsClick = { route = AppSettingsRoute.ConnectionSettings },
+                        onRoutingClick = { route = AppSettingsRoute.Routing },
                         onSubscriptionsSharingClick = { route = AppSettingsRoute.SubscriptionsSharing },
                         onSubscriptionOptionsClick = { route = AppSettingsRoute.SubscriptionOptions },
                         subscriptionSettings = subscriptionSettings,
@@ -395,8 +387,7 @@ internal fun AppSettingsSheet(
                         onBack = { route = AppSettingsRoute.Hub },
                         onConnectionModeClick = { route = AppSettingsRoute.ConnectionMode },
                         onProxySettingsClick = { route = AppSettingsRoute.SocksProxy },
-                        routingSettings = routingSettings,
-                        onRoutingClick = { route = AppSettingsRoute.Routing },
+                        onAdvancedRoutingClick = { route = AppSettingsRoute.AdvancedRoutingRules },
                         onSplitTunnelingClick = { route = AppSettingsRoute.SplitTunneling }
                     )
 
@@ -419,6 +410,19 @@ internal fun AppSettingsSheet(
                     AppSettingsRoute.Routing -> RoutingSettingsScreen(
                         settings = routingSettings,
                         enabled = enabled,
+                        availableModes = listOf(RoutingMode.BypassRussia, RoutingMode.Global).let { usual ->
+                            if (routingSettings.mode in usual) usual else listOf(routingSettings.mode) + usual
+                        },
+                        showCustomRules = false,
+                        onBack = { route = AppSettingsRoute.Hub },
+                        onChanged = onRoutingSettingsChanged
+                    )
+
+                    AppSettingsRoute.AdvancedRoutingRules -> RoutingSettingsScreen(
+                        settings = routingSettings,
+                        enabled = enabled,
+                        titleOverride = stringResource(Res.string.settings_manual_routing_rules),
+                        customRulesWarning = stringResource(Res.string.settings_manual_routing_warning),
                         onBack = { route = AppSettingsRoute.ConnectionSettings },
                         onChanged = onRoutingSettingsChanged
                     )
@@ -489,61 +493,111 @@ private fun AppSettingsHubContent(
     showUpdates: Boolean,
     subscriptionsCount: Int,
     subscriptionSettings: SubscriptionSettings,
+    routingSettings: RoutingSettings,
     enabled: Boolean,
     onConnectionSettingsClick: () -> Unit,
+    onRoutingClick: () -> Unit,
     onSubscriptionsSharingClick: () -> Unit,
     onSubscriptionOptionsClick: () -> Unit,
     onUpdatesClick: () -> Unit,
     onApplicationLogsClick: () -> Unit
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp)
             .padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        SettingsNavigationRow(
-            title = stringResource(Res.string.connection_settings_title),
-            value = stringResource(Res.string.connection_settings_android_value),
-            icon = selectedMode.icon(),
-            enabled = enabled,
-            onClick = onConnectionSettingsClick
-        )
+        SettingsSectionLabel(stringResource(Res.string.settings_essentials))
 
-        SettingsNavigationRow(
-            title = stringResource(Res.string.settings_server_list_updates),
-            value = subscriptionSettings.hubSummary(),
-            icon = Icons.Outlined.Refresh,
-            enabled = enabled,
-            onClick = onSubscriptionOptionsClick
-        )
-
-        SettingsNavigationRow(
-            title = stringResource(Res.string.server_lists_sharing_title),
-            value = subscriptionsCount.subscriptionSummary(),
-            icon = Icons.Outlined.Share,
-            enabled = true,
-            onClick = onSubscriptionsSharingClick
-        )
-
-        if (showUpdates) {
-            SettingsNavigationRow(
-                title = stringResource(Res.string.update_settings),
-                value = stringResource(Res.string.settings_app_updates_value, updateSettings.intervalHours),
-                icon = Icons.Outlined.Refresh,
-                enabled = true,
-                onClick = onUpdatesClick
-            )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column {
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.settings_routing),
+                    value = routingSettings.mode.localizedHubSummary(),
+                    icon = PkIcons.SwapVert,
+                    enabled = enabled,
+                    grouped = true,
+                    onClick = onRoutingClick
+                )
+                HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.settings_server_list_updates),
+                    value = subscriptionSettings.hubSummary(),
+                    icon = Icons.Outlined.Refresh,
+                    enabled = enabled,
+                    grouped = true,
+                    onClick = onSubscriptionOptionsClick
+                )
+                HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.always_on_vpn),
+                    value = stringResource(Res.string.always_on_vpn_value),
+                    icon = PkIcons.PowerSettingsNew,
+                    enabled = enabled,
+                    grouped = true,
+                    onClick = { openSystemVpnSettings(context) }
+                )
+                HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.settings_server_lists),
+                    value = subscriptionsCount.subscriptionSummary(),
+                    icon = Icons.Outlined.Share,
+                    enabled = true,
+                    grouped = true,
+                    onClick = onSubscriptionsSharingClick
+                )
+            }
         }
 
-        SettingsNavigationRow(
-            title = stringResource(Res.string.app_logs_title),
-            value = stringResource(Res.string.settings_app_log_value),
-            icon = PkIcons.History,
-            enabled = true,
-            onClick = onApplicationLogsClick
-        )
+        Spacer(Modifier.height(8.dp))
+        SettingsSectionLabel(stringResource(Res.string.settings_advanced))
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column {
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.settings_advanced_connection),
+                    value = stringResource(Res.string.connection_settings_android_value),
+                    icon = selectedMode.icon(),
+                    enabled = enabled,
+                    grouped = true,
+                    onClick = onConnectionSettingsClick
+                )
+                if (showUpdates) {
+                    HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    SettingsNavigationRow(
+                        title = stringResource(Res.string.update_settings),
+                        value = stringResource(Res.string.settings_app_updates_value, updateSettings.intervalHours),
+                        icon = Icons.Outlined.Refresh,
+                        enabled = true,
+                        grouped = true,
+                        onClick = onUpdatesClick
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                SettingsNavigationRow(
+                    title = stringResource(Res.string.app_logs_title),
+                    value = stringResource(Res.string.settings_app_log_value),
+                    icon = PkIcons.History,
+                    enabled = true,
+                    grouped = true,
+                    onClick = onApplicationLogsClick
+                )
+            }
+        }
 
         Box(
             modifier = Modifier
@@ -569,8 +623,7 @@ private fun ConnectionSettingsContent(
     onBack: () -> Unit,
     onConnectionModeClick: () -> Unit,
     onProxySettingsClick: () -> Unit,
-    routingSettings: RoutingSettings,
-    onRoutingClick: () -> Unit,
+    onAdvancedRoutingClick: () -> Unit,
     onSplitTunnelingClick: () -> Unit
 ) {
     Column(
@@ -580,7 +633,7 @@ private fun ConnectionSettingsContent(
             .padding(top = 16.dp, bottom = 32.dp)
     ) {
         SettingsDetailHeader(
-            title = stringResource(Res.string.connection_settings_title),
+            title = stringResource(Res.string.settings_advanced_connection),
             subtitle = selectedMode.settingsSummary(),
             onBack = onBack
         )
@@ -595,16 +648,19 @@ private fun ConnectionSettingsContent(
                 enabled = enabled,
                 onClick = onConnectionModeClick
             )
-            // Android's own always-on: the system starts the VPN at boot and
-            // brings it back when it drops, and "Block connections without VPN"
-            // sits beside it. Both are the system's to set, on its VPN screen.
-            val context = LocalContext.current
             SettingsNavigationRow(
-                title = stringResource(Res.string.always_on_vpn),
-                value = stringResource(Res.string.always_on_vpn_value),
-                icon = PkIcons.PowerSettingsNew,
+                title = stringResource(Res.string.split_tunneling_title),
+                value = splitTunnelSettings.settingsSummary(),
+                icon = PkIcons.Apps,
                 enabled = enabled,
-                onClick = { openSystemVpnSettings(context) }
+                onClick = onSplitTunnelingClick
+            )
+            SettingsNavigationRow(
+                title = stringResource(Res.string.settings_manual_routing_rules),
+                value = stringResource(Res.string.settings_manual_routing_summary),
+                icon = PkIcons.SwapVert,
+                enabled = enabled,
+                onClick = onAdvancedRoutingClick
             )
             // Editing the local proxy credentials/port is plumbing: admin-only.
             if (AdminState.configuratorVisible) {
@@ -616,20 +672,6 @@ private fun ConnectionSettingsContent(
                     onClick = onProxySettingsClick
                 )
             }
-            SettingsNavigationRow(
-                title = stringResource(Res.string.settings_routing),
-                value = routingSettings.mode.localizedHubSummary(),
-                icon = PkIcons.SwapVert,
-                enabled = enabled,
-                onClick = onRoutingClick
-            )
-            SettingsNavigationRow(
-                title = stringResource(Res.string.split_tunneling_title),
-                value = splitTunnelSettings.settingsSummary(),
-                icon = PkIcons.Apps,
-                enabled = enabled,
-                onClick = onSplitTunnelingClick
-            )
         }
     }
 }
@@ -1301,7 +1343,7 @@ private fun SubscriptionsSharingSettingsContent(
             .padding(top = 16.dp, bottom = 12.dp)
     ) {
         SettingsDetailHeader(
-            title = stringResource(Res.string.server_lists_sharing_title),
+            title = stringResource(Res.string.settings_server_lists),
             subtitle = subscriptions.size.subscriptionSummary(),
             onBack = onBack
         )
@@ -1316,6 +1358,12 @@ private fun SubscriptionsSharingSettingsContent(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             SettingsSectionLabel(stringResource(Res.string.settings_server_lists))
+
+            Text(
+                text = stringResource(Res.string.settings_share_access_warning),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             if (subscriptions.isEmpty()) {
                 EmptyAppsState(
@@ -1418,7 +1466,7 @@ private fun SubscriptionShareRow(
             // Wraps: four buttons in a language with long words do not fit one line.
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onShareClick) {
-                    Text(stringResource(Res.string.action_qr_share))
+                    Text(stringResource(Res.string.settings_share_access_qr))
                 }
                 onRouterClick?.let { onClick ->
                     TextButton(onClick = onClick) {
@@ -1428,6 +1476,9 @@ private fun SubscriptionShareRow(
                 TextButton(onClick = onRefreshClick) {
                     Text(stringResource(Res.string.action_refresh))
                 }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = { confirmDelete = true }) {
                     Text(stringResource(Res.string.action_remove), color = MaterialTheme.colorScheme.error)
                 }
@@ -1443,24 +1494,26 @@ private fun SettingsNavigationRow(
     icon: ImageVector,
     enabled: Boolean,
     showChevron: Boolean = true,
+    grouped: Boolean = false,
     onClick: () -> Unit
 ) {
     // No round icon chip, for the reason given on the shared screen: a column of
     // filled circles is the Material settings signature this redesign is not
     // wearing. The icon stays, small and plain.
+    val shape = RoundedCornerShape(if (grouped) 0.dp else 16.dp)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(shape)
             .clickable(enabled = enabled, onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        shape = shape,
+        color = if (grouped) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer,
+        border = if (grouped) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
             modifier = Modifier
-                .defaultMinSize(minHeight = 60.dp)
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .defaultMinSize(minHeight = if (grouped) 56.dp else 60.dp)
+                .padding(horizontal = 14.dp, vertical = if (grouped) 10.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -1478,13 +1531,13 @@ private fun SettingsNavigationRow(
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(3.dp))
                 Text(
                     text = value,
-                    style = pkMono(10, 0.5),
+                    style = MaterialTheme.typography.bodySmall,
                     color = LocalPkPalette.current.textDim,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
@@ -2329,6 +2382,7 @@ private sealed class AppSettingsRoute(val depth: Int) {
     object ConnectionMode : AppSettingsRoute(1)
     object SocksProxy : AppSettingsRoute(1)
     object Routing : AppSettingsRoute(1)
+    object AdvancedRoutingRules : AppSettingsRoute(2)
     object SplitTunneling : AppSettingsRoute(1)
     object SubscriptionsSharing : AppSettingsRoute(1)
     object SubscriptionOptions : AppSettingsRoute(1)

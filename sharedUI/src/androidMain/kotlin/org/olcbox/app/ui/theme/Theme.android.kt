@@ -13,17 +13,21 @@ actual fun AppTheme(
     useDynamicColor: Boolean,
     content: @Composable () -> Unit
 ) {
-    // The approved Apollo Orbit direction uses a fixed navy field on Android.
+    // Keep Android on Apollo's graphite/violet field regardless of system dynamic color.
     val isDarkState = remember { mutableStateOf(true) }
     val typography = getAppTypography()
 
     CompositionLocalProvider(
         LocalThemeIsDark provides isDarkState,
         LocalPkPalette provides PkPalette(
-            accent = Color(0xFF33E6FF), accentSoft = Color(0x1A33E6FF),
-            accent2 = Color(0xFF3187FF), accent2Soft = Color(0x1A3187FF),
-            link = Color(0xFF8DB8FF), textDim = Color(0xFFD1E2F4),
-            textMuted = Color(0xFF9DB7D2), hairline = Color(0xFF36516F)
+            accent = Color(0xFF8256EE), accentSoft = Color(0x1A8B5CF6),
+            accent2 = Color(0xFFB9A4FF), accent2Soft = Color(0x1AB9A4FF),
+            success = Color(0xFF3DDC97), successSoft = Color(0x1A3DDC97),
+            warning = Color(0xFFF5B13D), danger = Color(0xFFF4635F),
+            textDim = Color(0xFFAAB6C8), textMuted = Color(0xFF93A0B4),
+            gridLine = Color(0x0EFFFFFF),
+            seatFree = Color(0xFF0C1017), seatOther = Color(0xFF69758A),
+            link = Color(0xFFB9A4FF), hairline = Color(0xFF212936)
         )
     ) {
         MaterialTheme(
