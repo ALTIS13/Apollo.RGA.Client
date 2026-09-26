@@ -21,4 +21,5 @@ class AndroidXrayController(context: Context) : XrayController {
     fun isRunning(): Boolean = proc.isRunning()
     /** What the core said, for the app log when the SOCKS port never opens. */
     fun diagnostics(): String = proc.diagnostics()
+    fun redactedDiagnostics(): String = proc.diagnostics(includeRawLogs = false)
 }

@@ -81,6 +81,8 @@ import org.olcbox.app.net.TransportSpec
 import org.olcbox.app.net.TunnelExit
 import org.olcbox.app.net.TunnelVerifier
 import org.olcbox.app.net.XrayConfig
+import org.olcbox.app.net.XrayJsonRuntimeConfig
+import org.olcbox.app.net.SubscriptionTunnelAccess
 import org.olcbox.app.vpn.AndroidConnectionMode
 import org.olcbox.app.vpn.AndroidSocksProxySettings
 import org.olcbox.app.vpn.AndroidSplitTunnelMode
@@ -128,6 +130,7 @@ class OlcboxVpnService : VpnService() {
 
     private var startupJob: Job? = null
     private var watchdogJob: Job? = null
+    private var connectedStorageId: String? = null
     private var cleanupJob: Job? = null
     private var networkLossJob: Job? = null
     private var recoveryJob: Job? = null
@@ -249,6 +252,15 @@ class OlcboxVpnService : VpnService() {
         }
 
         private fun handleNetworkChange(network: Network, reason: String) {
+            scope.launch {
+                tunnelMutex.withLock {
+                    if (denyConnectedSubscriptionIfNeeded()) return@withLock
+                    handleAllowedNetworkChange(network, reason)
+                }
+            }
+        }
+
+        private fun handleAllowedNetworkChange(network: Network, reason: String) {
             val caps = connectivityManager.getNetworkCapabilities(network) ?: return
             if (!caps.isUsableUpstream()) return
             networkLossJob?.cancel()
@@ -518,7 +530,15 @@ class OlcboxVpnService : VpnService() {
                     coroutineContext.ensureActive()
                     if (requestedGeneration != generation) return@withLock
 
-                    val active = repository.getActiveLocation()
+                    val bundle = repository.getBundle()
+                    val denial = SubscriptionTunnelAccess.denial(bundle, bundle.activeLocationId, System.currentTimeMillis())
+                    if (denial != null) {
+                        setStatus(VpnStatus.Error(denial))
+                        updateNotification(denial)
+                        stopTransportProcesses(closeTun = true, waitForSocksPort = false)
+                        return@withLock
+                    }
+                    val active = bundle.locations.firstOrNull { it.storageId == bundle.activeLocationId }
                     val location = active?.location?.normalized()
                     if (location == null || !location.isComplete()) {
                         setStatus(VpnStatus.Error("No active location"))
@@ -527,6 +547,7 @@ class OlcboxVpnService : VpnService() {
                         return@withLock
                     }
                     OlcboxVpnState.activeLocation = location.normalized()
+                    connectedStorageId = active.storageId
                     val routingSettings = repository.getRoutingSettings()
                     routingMode = routingSettings.mode
                     this@OlcboxVpnService.routingSettings = routingSettings
@@ -721,7 +742,7 @@ class OlcboxVpnService : VpnService() {
         updateNotification("Verifying tunnel...")
         val (username, password) = upstreamLogin()
         return TunnelVerifier.verify(
-            socksHost = AndroidSocksProxySettings.connectHost(socksListenHost),
+            socksHost = socksConnectHost(),
             socksPort = activeCorePort ?: socksListenPort,
             username = username,
             password = password
@@ -765,6 +786,11 @@ class OlcboxVpnService : VpnService() {
         setErrorOnFailure: Boolean,
         reuseBridge: Boolean = false
     ): Boolean {
+        // Persisted Xray profiles already own DNS and routing. Never ask the
+        // local routing builder or choose a lossy URI/sing-box fallback here.
+        if (location.xrayConfig != null) {
+            return startCore(location, setErrorOnFailure, Routing.Global, reuseBridge)
+        }
         val routing = routingFor(upstream)
         return if (location.kind == LocationKind.Olcrtc) {
             activeCorePort = null
@@ -794,6 +820,9 @@ class OlcboxVpnService : VpnService() {
         reuseBridge: Boolean
     ): Boolean {
         val tun = connectionMode == AndroidConnectionMode.Tun
+        if (location.xrayConfig != null) {
+            return startExactXrayCore(location, setErrorOnFailure, reuseBridge)
+        }
         return try {
             val port = TunBridgePortPolicy.corePortForStart(
                 tunMode = tun,
@@ -894,6 +923,54 @@ class OlcboxVpnService : VpnService() {
             stopCoreProcesses()
             if (setErrorOnFailure) {
                 setStatus(VpnStatus.Error(msg))
+                updateNotification("Connection failed")
+            }
+            false
+        }
+    }
+
+    private suspend fun startExactXrayCore(
+        location: LocationConfig,
+        setErrorOnFailure: Boolean,
+        reuseBridge: Boolean
+    ): Boolean {
+        return try {
+            val port = TunBridgePortPolicy.corePortForStart(
+                tunMode = connectionMode == AndroidConnectionMode.Tun,
+                reuseBridge = reuseBridge,
+                bridgePort = tun2socksBackendPort,
+                freshPort = if (!reuseBridge) freeLoopbackPort() else null,
+                proxyPort = socksListenPort
+            ) ?: throw XrayJsonRuntimeConfig.Rejected(XrayJsonRuntimeConfig.Reason.INVALID_PORT)
+            val login = SocksLogin.of(socksUsername, socksPassword)
+            val adapted = XrayJsonRuntimeConfig.adapt(
+                location.xrayConfig!!, port, login,
+                tunMode = connectionMode == AndroidConnectionMode.Tun
+            )
+            stopCoreProcesses()
+            waitForSocksPortReleased(port, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
+            check(!isLocalSocksPortOpen(port))
+            xrayCore.start(adapted.config.toString())
+            activeCorePort = port
+            activeCoreLogin = login
+            if (!waitForSocksPortOpen(port, MOBILE_READY_TIMEOUT_MS) || !xrayCore.isRunning()) {
+                addLog(xrayCore.redactedDiagnostics())
+                error("Xray core not ready")
+            }
+            coroutineContext.ensureActive()
+            addLog("Xray subscription profile ready")
+            true
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) { stopCoreProcesses() }
+            throw e
+        } catch (e: Exception) {
+            // Exceptions from process/config/core can contain credentials. Only
+            // our closed reason enum is safe; never forward arbitrary messages.
+            val message = if (e is XrayJsonRuntimeConfig.Rejected) e.message!! else "Xray subscription transport failed"
+            addLog(message)
+            stopCoreProcesses()
+            if (setErrorOnFailure) {
+                setStatus(VpnStatus.Error(message))
                 updateNotification("Connection failed")
             }
             false
@@ -1222,6 +1299,7 @@ class OlcboxVpnService : VpnService() {
         watchdogJob = scope.launch {
             while (isActive && OlcboxVpnState.status.value is VpnStatus.Connected) {
                 delay(WATCHDOG_INTERVAL_MS)
+                if (tunnelMutex.withLock { denyConnectedSubscriptionIfNeeded() }) return@launch
                 when {
                     !isActiveTransportRunning() -> {
                         val what = activeTransportLabel()
@@ -1283,9 +1361,28 @@ class OlcboxVpnService : VpnService() {
      * an empty string that reads like a core with nothing to report.
      */
     private fun activeCoreDiagnostics(): String = when {
+        OlcboxVpnState.activeLocation?.xrayConfig != null -> xrayCore.redactedDiagnostics()
         xrayCore.isRunning() -> xrayCore.diagnostics()
         singBoxCore.isRunning() -> singBoxCore.diagnostics()
         else -> "no core process is running"
+    }
+
+    /** Called under tunnelMutex on every watchdog tick and benign network restore. */
+    private suspend fun denyConnectedSubscriptionIfNeeded(): Boolean {
+        val status = OlcboxVpnState.status.value
+        if (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) return false
+        val id = connectedStorageId ?: return false
+        val denial = SubscriptionTunnelAccess.denial(repository.getBundle(), id, System.currentTimeMillis()) ?: return false
+        ++generation
+        startupJob?.cancel()
+        recoveryJob?.cancel()
+        recoveryJob = null
+        networkLossJob?.cancel()
+        setStatus(VpnStatus.Error(denial))
+        updateNotification(denial)
+        addLog(denial)
+        stopTransportProcesses(closeTun = true, waitForSocksPort = false)
+        return true
     }
 
     private fun cleanup(stopService: Boolean = true) {
@@ -1455,6 +1552,7 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun socksConnectHost(): String {
+        if (OlcboxVpnState.activeLocation?.xrayConfig != null) return "127.0.0.1"
         return AndroidSocksProxySettings.connectHost(socksListenHost)
     }
 
@@ -1960,7 +2058,7 @@ class OlcboxVpnService : VpnService() {
         if (status is VpnStatus.Connected) {
             val (username, password) = upstreamLogin()
             OlcboxVpnState.channelProxy = org.olcbox.app.data.repository.SubscriptionFetchProxy(
-                AndroidSocksProxySettings.connectHost(socksListenHost), activeCorePort ?: socksListenPort,
+                socksConnectHost(), activeCorePort ?: socksListenPort,
                 username,
                 password
             )

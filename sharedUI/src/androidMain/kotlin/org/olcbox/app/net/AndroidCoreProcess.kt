@@ -94,7 +94,7 @@ internal class AndroidCoreProcess(
      * nothing at all did not get far enough to complain, which points at the exec
      * rather than at the config.
      */
-    fun diagnostics(maxLines: Int = 12): String {
+    fun diagnostics(maxLines: Int = 12, includeRawLogs: Boolean = true): String {
         val log = File(workDir(), "$label.log")
         val state = process?.let { p ->
             try {
@@ -103,6 +103,10 @@ internal class AndroidCoreProcess(
                 "still running"
             }
         } ?: "was never started"
+
+        // Subscription profiles may make Xray print arbitrary keys/URLs in
+        // startup and traffic errors. Do not even read their raw log tail.
+        if (!includeRawLogs) return "$label $state; raw diagnostics withheld"
 
         val tail = try {
             readLogTail(log, maxLines)
