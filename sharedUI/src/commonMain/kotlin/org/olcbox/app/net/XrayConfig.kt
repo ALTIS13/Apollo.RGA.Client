@@ -14,7 +14,8 @@ import kotlinx.serialization.json.putJsonObject
  * via `sing-box check`), so xhttp locations are handled by Xray-core instead; the
  * existing tun→SOCKS bridge feeds this SOCKS inbound exactly like the sing-box path.
  *
- * The JSON schema is tied to the pinned Xray release [XRAY_VERSION]; validated in
+ * The desktop JSON schema is tied to [XRAY_VERSION]; Android's separately pinned
+ * Hy2-capable build is declared in scripts/android-xray-pins.json. Validated in
  * CI with `xray test` against the real binary.
  */
 object XrayConfig {

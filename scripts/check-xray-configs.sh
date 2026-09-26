@@ -13,3 +13,6 @@ fi
 for config in "${configs[@]}"; do
   "$bin" run -test -c "$config"
 done
+if [ "${1:-}" = "--android" ]; then
+  "$bin" run -test -c "$root/scripts/fixtures/xray-android-hysteria2.json"
+fi

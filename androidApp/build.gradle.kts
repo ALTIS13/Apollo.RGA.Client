@@ -129,6 +129,8 @@ android {
         // instrumented sources cannot silently stop being compiled.
         getByName("androidTest") {
             java.srcDirs("src/androidTest/kotlin")
+            // Only invented schema fixtures; never subscription payloads.
+            assets.srcDir(rootProject.file("scripts/fixtures"))
         }
     }
 
@@ -146,6 +148,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // Executable Go cores are already stripped by the pinned build.
+            // Preserve their reviewed bytes for final APK/AAB provenance checks.
+            keepDebugSymbols += setOf("**/libsingboxcore.so", "**/libxraycore.so")
         }
     }
 }

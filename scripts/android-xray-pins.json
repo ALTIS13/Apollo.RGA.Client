@@ -1,0 +1,6 @@
+{
+  "version": "26.9.9",
+  "commit": "52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120",
+  "go": "1.27.1",
+  "status": "upstream-prerelease-device-network-acceptance-required"
+}

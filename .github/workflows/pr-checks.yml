@@ -113,7 +113,7 @@ jobs:
       # The release the app pins (SingBoxConfig.SINGBOX_VERSION); every config
       # the builders emit is checked against this exact binary below.
       SINGBOX_VERSION: "1.13.14"
-      XRAY_VERSION: "25.3.6"
+      XRAY_VERSION: "25.3.6" # Desktop schema remains unchanged.
       # crypt1/admin secrets (baked into GeneratedAppInfo). Absent on fork PRs ⇒
       # features compile but stay disabled; jvmTest uses its own explicit key.
       OLCBOX_CRYPT_KEY_V1: ${{ secrets.OLCBOX_CRYPT_KEY_V1 }}
@@ -207,32 +207,15 @@ jobs:
             ./cmd/sing-box
 
       - name: Build pinned Xray for Android arm64
+        working-directory: olcbox
         run: |
-          set -euo pipefail
-          git clone --depth 1 --branch "v${XRAY_VERSION}" \
-            https://github.com/XTLS/Xray-core.git "${RUNNER_TEMP}/xray"
-          cd "${RUNNER_TEMP}/xray"
-          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          OUT="${GITHUB_WORKSPACE}/olcbox/androidApp/jniLibs/arm64-v8a"
-          mkdir -p "${OUT}"
-          CGO_ENABLED=1 GOOS=android GOARCH=arm64 GOARM=7 \
-          CC="${NDK_BIN}/aarch64-linux-android23-clang" \
-          CXX="${NDK_BIN}/aarch64-linux-android23-clang++" \
-          go build -trimpath -buildvcs=false -o "${OUT}/libxraycore.so" \
-            -ldflags "-X github.com/xtls/xray-core/core.build=v${XRAY_VERSION} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
-            ./main
+          python3 scripts/build-xray-android.py --abis arm64-v8a \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
 
       - name: Verify Android cores have 16 KB alignment
         working-directory: olcbox
         run: |
-          set -euo pipefail
-          for core in androidApp/jniLibs/arm64-v8a/libsingboxcore.so androidApp/jniLibs/arm64-v8a/libxraycore.so; do
-            align="$(readelf -lW "$core" | awk '/^  LOAD/{print $NF; exit}')"
-            if [ -z "$align" ] || [ $(( align % 16384 )) -ne 0 ]; then
-              echo "Android core is not 16 KB aligned: ${core} (${align})" >&2
-              exit 1
-            fi
-          done
+          python3 scripts/verify-android-cores.py --abis arm64-v8a
 
       - name: Run checks
         working-directory: olcbox
@@ -250,6 +233,7 @@ jobs:
           apk=$(find androidApp/build/outputs/apk/github/debug -maxdepth 1 -type f -name '*.apk' | sort | head -n 1)
           test -n "$apk"
           python3 tools/check-android-compose-assets.py "$apk"
+          python3 scripts/verify-android-cores.py --abis arm64-v8a --archive "$apk"
 
       - name: Download pinned sing-box
         run: |
@@ -271,6 +255,14 @@ jobs:
           curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" -o "$RUNNER_TEMP/xray.zip"
           unzip -qo "$RUNNER_TEMP/xray.zip" -d "$RUNNER_TEMP/xray-check"
           XRAY_BIN="$RUNNER_TEMP/xray-check/xray" bash scripts/check-xray-configs.sh
+
+      - name: Validate Android Xray schema (host check, not device traffic)
+        working-directory: olcbox
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("scripts/android-xray-pins.json"))["version"])')
+          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-64.zip" -o "$RUNNER_TEMP/xray-android-check.zip"
+          unzip -qo "$RUNNER_TEMP/xray-android-check.zip" -d "$RUNNER_TEMP/xray-android-check"
+          XRAY_BIN="$RUNNER_TEMP/xray-android-check/xray" bash scripts/check-xray-configs.sh --android
 
       - name: Upload generated core configurations and test results
         if: always()
@@ -294,7 +286,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Offline tests
-        run: python3 scripts/test_gate_scripts.py
+        run: |
+          python3 scripts/test_gate_scripts.py
+          python3 scripts/test_android_cores.py
 
       # The runner's own shellcheck: Ubuntu 24.04's 0.9.0, older than a pip or
       # brew install and stricter in places (SC2015 on `a && b || c`), so check

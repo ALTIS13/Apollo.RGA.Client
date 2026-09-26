@@ -1,0 +1,16 @@
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"tag": "socks", "listen": "127.0.0.1", "port": 10810, "protocol": "socks", "settings": {"udp": true}}],
+  "outbounds": [{
+    "tag": "proxy", "protocol": "hysteria",
+    "settings": {"address": "192.0.2.1", "port": 8443, "version": 2},
+    "streamSettings": {
+      "network": "hysteria", "security": "tls",
+      "hysteriaSettings": {"version": 2, "auth": "SYNTHETIC_AUTH_NOT_REAL"},
+      "tlsSettings": {
+        "serverName": "example.invalid", "alpn": ["h3"],
+        "pinnedPeerCertSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  }]
+}

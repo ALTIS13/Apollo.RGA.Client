@@ -816,10 +816,9 @@ jobs:
       OLCBOX_VERSION: ${{ needs.release_version.outputs.version }}
       OLCBOX_VERSION_CODE: ${{ needs.release_version.outputs.version_code }}
       ANDROID_NDK_VERSION: "28.2.13676358"
-      # Same pins as the desktop job and singbox-verify.yml. All three have to
-      # move together: a config this app writes is validated against one schema.
+      # Android Xray is independently pinned in scripts/android-xray-pins.json.
+      # Its Go toolchain is process-local; shared Go/OlcRTC/sing-box stay unchanged.
       SINGBOX_VERSION: "1.13.14"
-      XRAY_VERSION: "25.3.6"
       ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
       ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
       ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
@@ -1013,29 +1012,10 @@ jobs:
       # already here for gomobile and for sing-box, so the same shape serves both
       # cores and there is one way this job builds a core rather than two.
       - name: Build Xray for Android with 16 KB page alignment
+        working-directory: olcbox
         run: |
-          set -euo pipefail
-          git clone --depth 1 --branch "v${XRAY_VERSION}" \
-            https://github.com/XTLS/Xray-core.git "${RUNNER_TEMP}/xray"
-          cd "${RUNNER_TEMP}/xray"
-          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          OUT="${GITHUB_WORKSPACE}/olcbox/androidApp/jniLibs"
-
-          build_xray() {      # $1 = GOARCH, $2 = NDK triple, $3 = android ABI
-            mkdir -p "${OUT}/$3"
-            CGO_ENABLED=1 GOOS=android GOARCH="$1" GOARM=7 \
-            CC="${NDK_BIN}/$2-clang" CXX="${NDK_BIN}/$2-clang++" \
-            go build -v -trimpath -buildvcs=false -o "${OUT}/$3/libxraycore.so" \
-              -ldflags "-X github.com/xtls/xray-core/core.build=v${XRAY_VERSION} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
-              ./main
-          }
-
-          build_xray arm64 aarch64-linux-android23    arm64-v8a
-          build_xray arm   armv7a-linux-androideabi23 armeabi-v7a
-          build_xray amd64 x86_64-linux-android23     x86_64
-
-          echo "== staged cores =="
-          ls -la "${OUT}"/*/
+          python3 scripts/build-xray-android.py \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
 
       # The build flags above are requests, not guarantees: Go's linker passes its
       # own -z max-page-size and whichever lands last wins, and its segment rounding
@@ -1045,21 +1025,7 @@ jobs:
       - name: Verify cores are 16 KB aligned
         working-directory: olcbox
         run: |
-          set -euo pipefail
-          bad=0
-          for f in androidApp/jniLibs/*/lib*core.so; do
-            align="$(readelf -lW "$f" | awk '/^  LOAD/{print $NF; exit}')"
-            if [ $(( align % 16384 )) -ne 0 ]; then
-              echo "MISALIGNED ${f} (${align})"; bad=1
-            else
-              echo "ok         ${f} (${align})"
-            fi
-          done
-          [ "$bad" -eq 0 ] || {
-            echo "A core with sub-16 KB LOAD alignment cannot be mapped on a" >&2
-            echo "16 KB-page device: it dies before executing anything, silently." >&2
-            exit 1
-          }
+          python3 scripts/verify-android-cores.py --abis arm64-v8a armeabi-v7a x86_64
 
       - name: Build production APK
         working-directory: olcbox
@@ -1095,6 +1061,7 @@ jobs:
           fi
           aab="dist/Ghostlane-${OLCBOX_VERSION}-android-play.aab"
           cp "${bundle}" "$aab"
+          python3 scripts/verify-android-cores.py --abis arm64-v8a armeabi-v7a x86_64 --archive "$aab"
 
           # What makes this bundle the Play one: the two permissions Play refuses
           # at upload are gone (src/play/AndroidManifest.xml), and the cores are
@@ -1131,21 +1098,7 @@ jobs:
         run: |
           set -euo pipefail
           apk="dist/Ghostlane-${OLCBOX_VERSION}-android-release.apk"
-          missing=0
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            for core in libsingboxcore.so libxraycore.so; do
-              if unzip -l "$apk" | grep -q "lib/${abi}/${core}"; then
-                echo "ok   ${abi}/${core}"
-              else
-                echo "MISSING ${abi}/${core}"; missing=1
-              fi
-            done
-          done
-          [ "$missing" -eq 0 ] || {
-            echo "Cores are missing from the APK — every Reality/Hysteria2/XHTTP" >&2
-            echo "location would fail to start. Refusing to publish." >&2
-            exit 1
-          }
+          python3 scripts/verify-android-cores.py --abis arm64-v8a armeabi-v7a x86_64 --archive "$apk"
 
       - name: Build armeabi-v7a production APK
         working-directory: olcbox
@@ -1170,11 +1123,7 @@ jobs:
         run: |
           set -euo pipefail
           apk="dist/Ghostlane-${OLCBOX_VERSION}-android-armeabi-v7a-release.apk"
-          for core in libsingboxcore.so libxraycore.so; do
-            unzip -l "$apk" | grep -q "lib/armeabi-v7a/${core}" \
-              || { echo "MISSING armeabi-v7a/${core}" >&2; exit 1; }
-            echo "ok   armeabi-v7a/${core}"
-          done
+          python3 scripts/verify-android-cores.py --abis armeabi-v7a --archive "$apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -1878,4 +1827,3 @@ jobs:
           done
 
           gh release edit "$OLCBOX_NIGHTLY_TAG" --draft=false --prerelease
-

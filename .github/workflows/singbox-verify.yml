@@ -19,7 +19,7 @@ permissions:
 
 env:
   SINGBOX_VERSION: "1.13.14"
-  XRAY_VERSION: "25.3.6"
+  XRAY_VERSION: "25.3.6" # Desktop schema only; Android uses scripts/android-xray-pins.json.
   ANDROID_NDK_VERSION: "28.2.13676358"
 
 # Superseded pushes stop paying: a new commit cancels the run for the previous one.
@@ -28,16 +28,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Task 8 (Android): both cores publish prebuilt android binaries, so we exec
-  # them from nativeLibraryDir (the v2rayNG pattern) instead of gomobile libbox/
-  # libXray — unified with the desktop controllers. This job proves the prebuilt
-  # binaries download + are valid android arm64 executables, and packages them as
-  # jniLibs (lib*.so) for the app build. (gomobile libbox also builds — verified
-  # in history — but exec-binary is simpler and needs no AAR.)
+  # Xray uses the same exact source/toolchain as PR/release. This legacy job
+  # still downloads sing-box; its alignment is NOT release acceptance. The
+  # release/PR paths build both cores and check all LOADs and archive bytes.
   android-cores:
     name: fetch + verify android core binaries
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
       - name: Download sing-box android arm64
         run: |
           url="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-android-arm64.tar.gz"
@@ -45,12 +52,11 @@ jobs:
           tar xzf sb.tgz
           find . -name 'sing-box' -maxdepth 2 -exec cp {} sing-box-android \;
           file sing-box-android
-      - name: Download xray android arm64
+      - name: Build pinned Xray Android arm64
         run: |
-          url="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
-          curl -fsSL "$url" -o xray.zip
-          mkdir -p xray-a && (cd xray-a && unzip -o ../xray.zip)
-          cp xray-a/xray xray-android
+          python3 scripts/build-xray-android.py --abis arm64-v8a \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          cp androidApp/jniLibs/arm64-v8a/libxraycore.so xray-android
           file xray-android
       - name: Verify both are ARM aarch64 executables
         run: |
@@ -97,7 +103,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.5'
           cache-dependency-path: olcrtc/go.sum
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -132,12 +138,8 @@ jobs:
           sb=$(find . -maxdepth 2 -type f -name sing-box | head -1)
           echo "found sing-box at: $sb"
           cp "$sb" "$dest/libsingboxcore.so"
-          # xray (zip)
-          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-android-arm64-v8a.zip" -o xray.zip
-          rm -rf xray-a && mkdir -p xray-a && (cd xray-a && unzip -o ../xray.zip)
-          xr=$(find xray-a -maxdepth 2 -type f -name xray | head -1)
-          echo "found xray at: $xr"
-          cp "$xr" "$dest/libxraycore.so"
+          python3 scripts/build-xray-android.py --abis arm64-v8a \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           test -f "$dest/libsingboxcore.so" && test -f "$dest/libxraycore.so"
           ls -la "$dest"
       - name: Assemble android (compiles controllers, packages cores)
@@ -152,6 +154,7 @@ jobs:
         run: |
           apk=$(find androidApp/build/outputs/apk -name '*.apk' | head -1)
           echo "APK: $apk"
+          python3 scripts/verify-android-cores.py --abis arm64-v8a --core libxraycore.so --archive "$apk"
           unzip -l "$apk" | grep -E 'lib/arm64-v8a/(libsingboxcore|libxraycore)\.so' || \
             { echo "core binaries missing from APK"; exit 1; }
           echo "sing-box + xray cores packaged OK"
@@ -182,7 +185,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.5'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup Android SDK
@@ -263,16 +266,11 @@ jobs:
         working-directory: olcbox
         run: sing-box check -c sharedUI/build/singbox-configs/desktop-tun-native.json
 
-      - name: Download Xray-core (pinned, fallback to latest)
+      - name: Download desktop Xray-core (exact pin, fail closed)
         run: |
           set -e
           url="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip"
-          echo "Trying pinned $url"
-          if ! curl -fsSL "$url" -o xray.zip; then
-            latest=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
-            echo "Pinned v${XRAY_VERSION} not found; falling back to latest $latest"
-            curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/${latest}/Xray-linux-64.zip" -o xray.zip
-          fi
+          curl -fsSL "$url" -o xray.zip
           mkdir -p xray-bin && (cd xray-bin && unzip -o ../xray.zip)
           chmod +x xray-bin/xray
           echo "USING XRAY:"; ./xray-bin/xray version | head -1
@@ -289,6 +287,14 @@ jobs:
         run: |
           ${{ github.workspace }}/xray-bin/xray run -c sharedUI/build/xray-configs/vless-xhttp-answers-dns.json -test
           ${{ github.workspace }}/xray-bin/xray run -c sharedUI/build/xray-configs/vless-xhttp-bypass-russia.json -test
+
+      - name: Android Xray Hy2 and XHTTP schema (host only)
+        working-directory: olcbox
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("scripts/android-xray-pins.json"))["version"])')
+          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-64.zip" -o "$RUNNER_TEMP/xray-android-check.zip"
+          unzip -qo "$RUNNER_TEMP/xray-android-check.zip" -d "$RUNNER_TEMP/xray-android-check"
+          XRAY_BIN="$RUNNER_TEMP/xray-android-check/xray" bash scripts/check-xray-configs.sh --android
 
       # End-to-end tunnel proof for the olcrtc-socks chain: a backing SOCKS server
       # stands in for the olcrtc engine; our generated config chains
@@ -389,7 +395,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.5'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup Android SDK
@@ -428,11 +434,8 @@ jobs:
           curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-android-amd64.tar.gz" -o sb.tgz
           tar xzf sb.tgz
           cp "$(find . -maxdepth 2 -type f -name sing-box | head -1)" "$dest/libsingboxcore.so"
-          # Xray has no android-x86_64 asset; its linux-64 build is a static Go
-          # binary and runs on Android x86_64 unchanged.
-          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" -o xray.zip
-          rm -rf xray-x && mkdir -p xray-x && (cd xray-x && unzip -o ../xray.zip)
-          cp "$(find xray-x -maxdepth 2 -type f -name xray | head -1)" "$dest/libxraycore.so"
+          python3 scripts/build-xray-android.py --abis x86_64 \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           ls -la "$dest"
 
       - name: Enable KVM

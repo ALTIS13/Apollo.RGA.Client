@@ -92,6 +92,24 @@ class CorePackagingTest {
     }
 
     @Test
+    fun hysteria2TlsPinConfigIsValidForShippedXray() {
+        val fixture = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("xray-android-hysteria2.json").bufferedReader().use { it.readText() }
+        val config = File(context.cacheDir, "instrumented-xray-hy2.json")
+        try {
+            config.writeText(fixture)
+            val process = ProcessBuilder(
+                coreBinary("libxraycore.so").absolutePath, "run", "-test", "-config", config.absolutePath
+            ).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            val exit = process.waitFor()
+            assertTrue("Xray rejected synthetic Hy2/TLS-pin config (exit $exit): $output", exit == 0)
+        } finally {
+            config.delete()
+        }
+    }
+
+    @Test
     fun generatedXhttpConfigIsValidForShippedXray() {
         val spec = LinkParser.parse(SAMPLE_XHTTP_LINK) as? OutboundSpec.Vless
         assertTrue("sample XHTTP link no longer parses", spec != null)
