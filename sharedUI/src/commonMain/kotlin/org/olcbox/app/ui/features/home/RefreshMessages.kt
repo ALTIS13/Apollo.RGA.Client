@@ -6,6 +6,7 @@ import multiplatform_app.sharedui.generated.resources.refresh_bulk_none
 import multiplatform_app.sharedui.generated.resources.refresh_bulk_partial
 import multiplatform_app.sharedui.generated.resources.refresh_bulk_updated
 import multiplatform_app.sharedui.generated.resources.refresh_empty
+import multiplatform_app.sharedui.generated.resources.refresh_device_denied
 import multiplatform_app.sharedui.generated.resources.refresh_rejected
 import multiplatform_app.sharedui.generated.resources.refresh_server_error
 import multiplatform_app.sharedui.generated.resources.refresh_unchanged
@@ -15,6 +16,12 @@ import org.jetbrains.compose.resources.getString
 import org.olcbox.app.data.repository.SubscriptionRefreshError
 import org.olcbox.app.data.repository.SubscriptionRefreshFailure
 import org.olcbox.app.data.repository.SubscriptionRefreshReport
+
+/** An explicit refusal is actionable once, not on every background retry. */
+internal fun SubscriptionRefreshReport.hasNewDeviceDenial(deniedBefore: Set<String>): Boolean =
+    failures.any { failure ->
+        failure.error == SubscriptionRefreshError.DeviceDenied && failure.url.trim() !in deniedBefore
+    }
 
 /**
  * A refresh's outcome in the user's language. The report keeps a closed set of
@@ -42,6 +49,7 @@ suspend fun SubscriptionRefreshReport.localizedBulkMessage(): String = when {
 suspend fun SubscriptionRefreshFailure.localizedMessage(): String {
     val status = statusCode?.let { " ($it)" }.orEmpty()
     return when (error) {
+        SubscriptionRefreshError.DeviceDenied -> getString(Res.string.refresh_device_denied)
         SubscriptionRefreshError.Rejected -> getString(Res.string.refresh_rejected, status)
         SubscriptionRefreshError.ServerError -> getString(Res.string.refresh_server_error, status)
         SubscriptionRefreshError.Unreachable -> getString(Res.string.refresh_unreachable)

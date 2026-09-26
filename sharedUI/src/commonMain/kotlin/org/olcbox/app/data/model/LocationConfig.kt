@@ -367,6 +367,9 @@ data class SubscriptionMetadata(
     val quotaKnown: Boolean = false,
     @SerialName("expiry_known")
     val expiryKnown: Boolean = false,
+    /** A subscription response explicitly refused this device's HWID. Cleared only by a valid refresh. */
+    @SerialName("device_denied")
+    val deviceDenied: Boolean = false,
     /** `support-url`. A provider's own way of being reached — usually a bot. */
     @SerialName("support_url")
     val supportUrl: String? = null,
@@ -419,7 +422,7 @@ data class SubscriptionMetadata(
                 updateIntervalHours == null &&
                 lastRefreshAtEpochMs == null &&
                 expiresAtEpochMs == null &&
-                usedBytes == null && totalBytes == null && !quotaKnown && !expiryKnown &&
+                usedBytes == null && totalBytes == null && !quotaKnown && !expiryKnown && !deviceDenied &&
                 supportUrl.isNullOrBlank() &&
                 webPageUrl.isNullOrBlank() &&
                 announce.isNullOrBlank() &&
@@ -434,9 +437,10 @@ data class SubscriptionMetadata(
         const val ANNOUNCE_MAX_CHARS = 200
     }
 
-    enum class AccessState { ALLOWED, UNKNOWN, EXPIRED, LIMITED }
+    enum class AccessState { ALLOWED, UNKNOWN, EXPIRED, LIMITED, DEVICE_DENIED }
 
     fun accessStateAt(nowEpochMs: Long): AccessState = when {
+        deviceDenied -> AccessState.DEVICE_DENIED
         (expiryKnown || expiresAtEpochMs != null) && expiresAtEpochMs != null && nowEpochMs >= expiresAtEpochMs -> AccessState.EXPIRED
         quotaKnown && totalBytes != null && totalBytes > 0 && usedBytes != null && usedBytes >= totalBytes -> AccessState.LIMITED
         !(expiryKnown || expiresAtEpochMs != null) || !quotaKnown -> AccessState.UNKNOWN

@@ -177,6 +177,8 @@ class HostAndSubscriptionPresenterTest {
             SubscriptionPresenter.present(active.copy(expiresAtEpochMs = now), now, SubscriptionRefreshError.Unreachable).state)
         assertEquals(SubscriptionDisplayState.LIMITED,
             SubscriptionPresenter.present(active.copy(usedBytes = 100), now, SubscriptionRefreshError.Unreachable).state)
+        assertEquals(SubscriptionDisplayState.DEVICE_DENIED,
+            SubscriptionPresenter.present(active.copy(deviceDenied = true), now, SubscriptionRefreshError.DeviceDenied).state)
         assertEquals(SubscriptionDisplayState.REFRESH_FAILED,
             SubscriptionPresenter.present(active, now, SubscriptionRefreshError.Unreachable).state)
         assertEquals(SubscriptionDisplayState.UNKNOWN,

@@ -238,7 +238,8 @@ class LocationsRepositoryImpl(
             val merged = mergeImportedBundle(
                 current = getBundleUnlocked(),
                 imported = resolved.parsed.bundle.normalized(),
-                replaceMatchingStorageIds = resolved.parsed.mode == ImportMode.Restore
+                replaceMatchingStorageIds = resolved.parsed.mode == ImportMode.Restore,
+                verifiedSubscriptionUrl = resolved.source.subscriptionUrl
             )
             saveBundleUnlocked(merged)
         }
@@ -341,8 +342,21 @@ class LocationsRepositoryImpl(
                     onFailure = recordFailure
                 )
             } ?: run {
-                preservePreviousEntries(previousEntries)
-                // Downloaded fine but nothing importable ⇒ Empty.
+                // Keep the cached config for display/recovery, but an explicit
+                // HWID refusal must not leave that config eligible to run.
+                val retained = if (lastFailure?.error == SubscriptionRefreshError.DeviceDenied) {
+                    previousEntries.map { entry ->
+                        val metadata = entry.metadata ?: LocationMetadata()
+                        val subscription = metadata.subscription ?: SubscriptionMetadata()
+                        entry.copy(metadata = metadata.copy(
+                            subscription = subscription.copy(deviceDenied = true)
+                        ))
+                    }
+                } else previousEntries
+                metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
+                preservePreviousEntries(retained)
+                // Preserve the typed failure; only a response without a useful
+                // reason becomes Empty.
                 failures += lastFailure
                     ?: SubscriptionRefreshFailure(url, SubscriptionRefreshError.Empty)
                 return@forEach
@@ -464,7 +478,8 @@ class LocationsRepositoryImpl(
                     metadata = entry.metadata.withSubscriptionRefreshState(
                         updateIntervalHours = updateInterval,
                         lastRefreshAtEpochMs = refreshTimestamp,
-                        profile = carriedProfile
+                        profile = carriedProfile,
+                        deviceDenied = false
                     )
                 ).normalized()
             } + previousEntries.filterNot { runtimePolicy.permits(it.location.kind) }
@@ -665,7 +680,9 @@ class LocationsRepositoryImpl(
                 ?.takeUnless { entry ->
                     !runtimePolicy.permits(entry.location.kind) ||
                     entry.metadata?.subscription?.accessStateAt(nowEpochMs()) in
-                        setOf(SubscriptionMetadata.AccessState.EXPIRED, SubscriptionMetadata.AccessState.LIMITED)
+                        setOf(SubscriptionMetadata.AccessState.EXPIRED,
+                            SubscriptionMetadata.AccessState.LIMITED,
+                            SubscriptionMetadata.AccessState.DEVICE_DENIED)
                 }
         }
     }
@@ -925,6 +942,16 @@ class LocationsRepositoryImpl(
                     return@withProxyAuthentication null
                 }
 
+                // Remnawave can answer an HWID refusal with either an empty
+                // success response or a non-2xx status. The explicit headers
+                // are more specific than the HTTP status in both cases.
+                val deviceDenied = listOf("x-hwid-not-supported", "x-hwid-max-devices-reached")
+                    .any { name -> response.headers[name]?.trim()?.equals("true", ignoreCase = true) == true }
+                if (deviceDenied) {
+                    onFailure?.invoke(SubscriptionRefreshError.DeviceDenied, response.status.value)
+                    return@withProxyAuthentication null
+                }
+
                 if (response.status.value !in 200..299) {
                     val status = response.status.value
                     onFailure?.invoke(
@@ -932,13 +959,6 @@ class LocationsRepositoryImpl(
                         else SubscriptionRefreshError.Rejected,
                         status
                     )
-                    return@withProxyAuthentication null
-                }
-
-                if (response.headers["x-hwid-not-supported"] != null ||
-                    response.headers["x-hwid-max-devices-reached"] != null
-                ) {
-                    onFailure?.invoke(SubscriptionRefreshError.Rejected, response.status.value)
                     return@withProxyAuthentication null
                 }
 
@@ -1141,7 +1161,8 @@ class LocationsRepositoryImpl(
     private fun mergeImportedBundle(
         current: LocationBundleV4?,
         imported: LocationBundleV4,
-        replaceMatchingStorageIds: Boolean
+        replaceMatchingStorageIds: Boolean,
+        verifiedSubscriptionUrl: String?
     ): LocationBundleV4 {
         val currentBundle = current?.normalized()
         if (currentBundle == null || currentBundle.locations.isEmpty()) {
@@ -1154,11 +1175,30 @@ class LocationsRepositoryImpl(
             )
         }
 
+        // A local JSON/backup has no fresh server admission. Do not let an
+        // older export silently erase a later explicit HWID refusal for the
+        // same subscription. A successful HTTPS fetch of that URL may clear it.
+        val deniedUrls = currentBundle.locations.mapNotNull { entry ->
+            entry.subscriptionUrl?.trim()?.takeIf { url ->
+                url.isNotBlank() && entry.metadata?.subscription?.deviceDenied == true
+            }
+        }.toSet()
+        val verifiedUrl = verifiedSubscriptionUrl?.trim()
+        val importedEntries = imported.locations.map { entry ->
+            val url = entry.subscriptionUrl?.trim()
+            if (url == null || url !in deniedUrls || url == verifiedUrl) entry
+            else {
+                val metadata = entry.metadata ?: LocationMetadata()
+                val subscription = metadata.subscription ?: SubscriptionMetadata()
+                entry.copy(metadata = metadata.copy(subscription = subscription.copy(deviceDenied = true)))
+            }
+        }
+
         // Importing a subscription URL that is already here is nearly always
         // someone pasting a link they already have. Two copies of one provider's
         // servers is a list nobody can read, and refreshing the one that exists
         // is what they meant. Off, the old behaviour returns: both are kept.
-        val importedUrls = imported.locations
+        val importedUrls = importedEntries
             .mapNotNull { it.subscriptionUrl?.trim()?.takeIf { url -> url.isNotBlank() } }
             .toSet()
         val keptLocations = if (currentBundle.settings.preventDuplicates && importedUrls.isNotEmpty()) {
@@ -1173,7 +1213,7 @@ class LocationsRepositoryImpl(
         val existingStorageIds = keptLocations.mapTo(mutableSetOf()) { it.storageId }
 
         val importedByStorageId = if (replaceMatchingStorageIds) {
-            imported.locations.associateBy { it.storageId }
+            importedEntries.associateBy { it.storageId }
         } else {
             emptyMap()
         }
@@ -1192,7 +1232,7 @@ class LocationsRepositoryImpl(
 
         val importedIdMap = mutableMapOf<String, String>()
 
-        imported.locations.forEach { entry ->
+        importedEntries.forEach { entry ->
             if (replaceMatchingStorageIds && entry.storageId in replacedStorageIds) return@forEach
 
             val storageId = uniqueStorageId(entry.storageId, existingStorageIds)
@@ -1815,13 +1855,15 @@ class LocationsRepositoryImpl(
     private fun LocationMetadata?.withSubscriptionRefreshState(
         updateIntervalHours: Int,
         lastRefreshAtEpochMs: Long?,
-        profile: SubscriptionProfile? = null
+        profile: SubscriptionProfile? = null,
+        deviceDenied: Boolean? = null
     ): LocationMetadata {
         val subscription = (this?.subscription).withProfile(profile) ?: SubscriptionMetadata()
         return (this ?: LocationMetadata()).copy(
             subscription = subscription.copy(
                 updateIntervalHours = updateIntervalHours,
-                lastRefreshAtEpochMs = lastRefreshAtEpochMs
+                lastRefreshAtEpochMs = lastRefreshAtEpochMs,
+                deviceDenied = deviceDenied ?: subscription.deviceDenied
             )
         ).normalized()
     }

@@ -66,6 +66,7 @@ import org.olcbox.app.log.LogScrubber
 import org.olcbox.app.data.model.SubscriptionSettings
 import org.olcbox.app.util.nowMillis
 import org.olcbox.app.data.repository.LocationsRepository
+import org.olcbox.app.data.repository.SubscriptionRefreshError
 import org.olcbox.app.data.repository.SubscriptionRefreshReport
 import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.vpn.OlcrtcFailure
@@ -836,16 +837,20 @@ class HomeScreenViewModel(
     }
 
     private suspend fun refreshDueSubscriptionsIfNeeded() {
-        // Background pass: failures here are not surfaced — the user did not ask
-        // for it, and the next manual refresh will report the reason.
-        val report = withContext(Dispatchers.IO) {
-            locationsRepository.refreshDueSubscriptions(
+        // Ordinary background failures stay quiet. A newly refused device is
+        // actionable, but repeating the same notice on every poll is not.
+        val (report, deniedBefore) = withContext(Dispatchers.IO) {
+            val deniedUrls = deniedSubscriptionUrls()
+            val refresh = locationsRepository.refreshDueSubscriptions(
                 subscriptionProxy = vpnManager.subscriptionFetchProxy()
             )
+            refresh to deniedUrls
         }
-        if (report.updatedCount > 0) {
+        val deviceDenied = report.failures.any { it.error == SubscriptionRefreshError.DeviceDenied }
+        val newlyDenied = report.hasNewDeviceDenial(deniedBefore)
+        if (report.updatedCount > 0 || deviceDenied) {
             loadCurrentConfigNow()
-            if (_subscriptionSettings.value.notifyOnUpdate) {
+            if ((_subscriptionSettings.value.notifyOnUpdate && report.updatedCount > 0) || newlyDenied) {
                 _autoRefreshNotice.emit(report.localizedBulkMessage())
             }
         }
@@ -853,22 +858,33 @@ class HomeScreenViewModel(
 
     /**
      * Refreshes every subscription over the live tunnel, when auto-update is
-     * on. A failure is not surfaced: the user did not ask, and the scheduled
-     * pass reports the reason next time. Together with the periodic pass and
+     * on. Ordinary failures stay quiet; a new explicit device refusal is
+     * surfaced once. Together with the periodic pass and
      * the extension's own reads after a room handover (iOS), this is what
      * keeps a client on a rotating server holding a live room.
      */
     private suspend fun refreshSubscriptionsThroughTheTunnel() {
         if (!_subscriptionSettings.value.autoUpdate) return
-        runCatching {
+        val deniedBefore = deniedSubscriptionUrls()
+        val report = runCatching {
             withContext(Dispatchers.IO) {
                 locationsRepository.refreshSubscriptions(
                     subscriptionProxy = vpnManager.subscriptionFetchProxy()
                 )
             }
-        }
+        }.getOrNull()
         loadCurrentConfigNow()
+        if (report?.hasNewDeviceDenial(deniedBefore) == true) {
+            _autoRefreshNotice.emit(report.localizedBulkMessage())
+        }
     }
+
+    private suspend fun deniedSubscriptionUrls(): Set<String> =
+        locationsRepository.getBundle().locations.mapNotNull { entry ->
+            entry.subscriptionUrl?.trim()?.takeIf { url ->
+                url.isNotBlank() && entry.metadata?.subscription?.deviceDenied == true
+            }
+        }.toSet()
 
     /**
      * One more pull through the still-live tunnel before it is torn down, so

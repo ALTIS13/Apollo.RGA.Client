@@ -32,6 +32,12 @@ class SubscriptionTunnelAccessTest {
         assertEquals("Subscription traffic limit reached", SubscriptionTunnelAccess.denial(bundle(SubscriptionMetadata(usedBytes = 100, totalBytes = 100, quotaKnown = true)), "connected", 1000))
     }
 
+    @Test fun explicitDeviceDenialBlocksCachedTunnelWithoutDiscardingItsProfile() {
+        assertEquals("This device is not allowed to use the subscription",
+            SubscriptionTunnelAccess.denial(bundle(SubscriptionMetadata(deviceDenied = true)), "connected", 1000))
+        assertNull(SubscriptionTunnelAccess.denial(bundle(SubscriptionMetadata(deviceDenied = false)), "connected", 1000))
+    }
+
     @Test fun unknownAccessIsNotInventedExpiryAndMissingEntryIsDistinct() {
         assertNull(SubscriptionTunnelAccess.denial(bundle(SubscriptionMetadata()), "connected", 1000))
         assertEquals("No active location", SubscriptionTunnelAccess.denial(bundle(SubscriptionMetadata()), "deleted", 1000))

@@ -152,7 +152,7 @@ private fun countryName(code: String): String = when (code) {
     else -> code
 }
 
-enum class SubscriptionDisplayState { ACTIVE, EXPIRING, EXPIRED, LIMITED, UNKNOWN, REFRESH_FAILED }
+enum class SubscriptionDisplayState { ACTIVE, EXPIRING, EXPIRED, LIMITED, DEVICE_DENIED, UNKNOWN, REFRESH_FAILED }
 
 data class SubscriptionPresentation(
     val state: SubscriptionDisplayState,
@@ -172,6 +172,7 @@ object SubscriptionPresenter {
     ): SubscriptionPresentation {
         val access = metadata?.accessStateAt(nowEpochMs) ?: SubscriptionMetadata.AccessState.UNKNOWN
         val state = when {
+            access == SubscriptionMetadata.AccessState.DEVICE_DENIED -> SubscriptionDisplayState.DEVICE_DENIED
             access == SubscriptionMetadata.AccessState.EXPIRED -> SubscriptionDisplayState.EXPIRED
             access == SubscriptionMetadata.AccessState.LIMITED -> SubscriptionDisplayState.LIMITED
             refreshError != null -> SubscriptionDisplayState.REFRESH_FAILED

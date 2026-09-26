@@ -495,6 +495,7 @@ fun HomeScreen(
     val androidBackgroundNotice = stringResource(Res.string.apollo_background_notice)
     LaunchedEffect(isAndroid, androidBackgroundNotice) {
         viewModel.autoRefreshNotice.collect { message ->
+            locationViewModel.loadLocations()
             snackbarHostState.showSnackbar(visibleBackgroundNotice(isAndroid, message, androidBackgroundNotice))
         }
     }

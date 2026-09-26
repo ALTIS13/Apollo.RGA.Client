@@ -124,6 +124,7 @@ internal fun ApolloHomeContent(
         SubscriptionDisplayState.EXPIRING -> stringResource(Res.string.apollo_status_expiring)
         SubscriptionDisplayState.EXPIRED -> stringResource(Res.string.apollo_status_expired)
         SubscriptionDisplayState.LIMITED -> stringResource(Res.string.apollo_status_limited)
+        SubscriptionDisplayState.DEVICE_DENIED -> stringResource(Res.string.apollo_status_device_denied)
         SubscriptionDisplayState.UNKNOWN -> stringResource(Res.string.apollo_status_unknown)
         SubscriptionDisplayState.REFRESH_FAILED -> stringResource(Res.string.apollo_status_refresh_failed)
     }
@@ -137,7 +138,8 @@ internal fun ApolloHomeContent(
         isConnecting -> stringResource(Res.string.apollo_cancel)
         else -> stringResource(Res.string.apollo_connect)
     }
-    val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED, SubscriptionDisplayState.LIMITED)
+    val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED,
+        SubscriptionDisplayState.LIMITED, SubscriptionDisplayState.DEVICE_DENIED)
     val actionEnabled = isConnected || isConnecting || (canStartVpn && !accessBlocked && selectedLocationId != null)
     val unknownCountry = stringResource(Res.string.apollo_country_unknown)
     val route = when {
@@ -322,7 +324,8 @@ internal fun ApolloHomeContent(
             val subscriptionColor = when (subscription.state) {
                 SubscriptionDisplayState.ACTIVE -> palette.success
                 SubscriptionDisplayState.EXPIRING, SubscriptionDisplayState.REFRESH_FAILED -> palette.warning
-                SubscriptionDisplayState.EXPIRED, SubscriptionDisplayState.LIMITED -> MaterialTheme.colorScheme.error
+                SubscriptionDisplayState.EXPIRED, SubscriptionDisplayState.LIMITED,
+                SubscriptionDisplayState.DEVICE_DENIED -> MaterialTheme.colorScheme.error
                 SubscriptionDisplayState.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
             }
             Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(18.dp),
@@ -352,6 +355,10 @@ internal fun ApolloHomeContent(
                         }
                         if (subscription.state == SubscriptionDisplayState.REFRESH_FAILED) {
                             Text(stringResource(Res.string.apollo_status_retry),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else if (subscription.state == SubscriptionDisplayState.DEVICE_DENIED) {
+                            Text(stringResource(Res.string.apollo_status_device_denied_hint),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

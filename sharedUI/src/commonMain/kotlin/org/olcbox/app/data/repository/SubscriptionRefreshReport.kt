@@ -5,6 +5,9 @@ package org.olcbox.app.data.repository
  * phrase it without the datasource owning user-facing copy.
  */
 enum class SubscriptionRefreshError {
+    /** Remnawave explicitly refused this device through an HWID response header. */
+    DeviceDenied,
+
     /** The server answered, but said the subscription is gone or not allowed. */
     Rejected,
 
@@ -26,6 +29,8 @@ data class SubscriptionRefreshFailure(
 ) {
     /** One line for a toast/snackbar. */
     fun message(): String = when (error) {
+        SubscriptionRefreshError.DeviceDenied ->
+            "This device is not allowed to use the subscription — contact support or retry after device access changes"
         SubscriptionRefreshError.Rejected ->
             "Server list rejected${statusCode?.let { " ($it)" }.orEmpty()} — it may have been revoked"
         SubscriptionRefreshError.ServerError ->

@@ -326,6 +326,24 @@ class ApolloHomeContentTest {
         onNodeWithText("Remaining: 0 B").assertExists()
     }
 
+    @Test fun explicitDeviceDenialExplainsWhyConnectIsUnavailable() = runComposeUiTest {
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active.copy(state = SubscriptionDisplayState.DEVICE_DENIED),
+                    isConnected = false, isConnecting = false, canStartVpn = true,
+                    isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onAllNodesWithText("Device access denied").assertCountEquals(2)
+        onNodeWithText("Check device access or contact support. Refresh after it changes.").assertExists()
+        onNodeWithTag("apollo-action").assertIsNotEnabled()
+    }
+
     @Test fun connectedHeroOffersOnlyDisconnectWithoutASecondFooterAction() = runComposeUiTest {
         var actions = 0
         setContent {

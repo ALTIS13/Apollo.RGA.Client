@@ -281,6 +281,7 @@
     <string name="refresh_bulk_partial">%1$d به‌روز شد، %2$d ناموفق: %3$s</string>
     <string name="refresh_bulk_updated">فهرست‌های سرور به‌روز شد: %1$d</string>
     <string name="refresh_empty">فهرست سرورها هیچ مکانی برنگرداند</string>
+    <string name="refresh_device_denied">دسترسی این دستگاه به اشتراک رد شد. دستگاه‌های مجاز را بررسی کنید یا با پشتیبانی تماس بگیرید.</string>
     <string name="refresh_rejected">فهرست سرورها رد شد%1$s — شاید لغو شده باشد</string>
     <string name="refresh_server_error">خطای میزبان فهرست سرورها%1$s — بعداً دوباره تلاش کنید</string>
     <string name="refresh_server_list">به‌روزرسانی فهرست سرورها</string>
@@ -495,6 +496,8 @@
     <string name="apollo_status_expiring">اشتراک به‌زودی منقضی می‌شود</string>
     <string name="apollo_status_expired">اشتراک منقضی شده است</string>
     <string name="apollo_status_limited">سهمیهٔ ترافیک تمام شده است</string>
+    <string name="apollo_status_device_denied">دسترسی دستگاه رد شد</string>
+    <string name="apollo_status_device_denied_hint">دستگاه‌های مجاز را بررسی کنید یا با پشتیبانی تماس بگیرید. سپس اشتراک را به‌روزرسانی کنید.</string>
     <string name="apollo_status_unknown">وضعیت اشتراک نامشخص است</string>
     <string name="apollo_status_refresh_failed">به‌روزرسانی اشتراک ناموفق بود</string>
     <string name="apollo_status_retry">اطلاعات دسترسی ذخیره‌شده همچنان روی دستگاه است. برای بررسی وضعیت فعلی، اشتراک را به‌روزرسانی کنید.</string>

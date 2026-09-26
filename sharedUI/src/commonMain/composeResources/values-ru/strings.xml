@@ -281,6 +281,7 @@
     <string name="refresh_bulk_partial">Обновлено: %1$d, с ошибкой: %2$d. %3$s</string>
     <string name="refresh_bulk_updated">Обновлено списков серверов: %1$d</string>
     <string name="refresh_empty">В списке серверов нет локаций</string>
+    <string name="refresh_device_denied">Устройству отказано в доступе к подписке. Проверьте список устройств или обратитесь в поддержку.</string>
     <string name="refresh_rejected">Список серверов отклонён%1$s — возможно, доступ отозван</string>
     <string name="refresh_server_error">Ошибка на сервере списка%1$s — попробуйте позже</string>
     <string name="refresh_server_list">Обновить список серверов</string>
@@ -495,6 +496,8 @@
     <string name="apollo_status_expiring">Срок подписки скоро истечёт</string>
     <string name="apollo_status_expired">Срок подписки истёк</string>
     <string name="apollo_status_limited">Лимит трафика исчерпан</string>
+    <string name="apollo_status_device_denied">Устройству отказано в доступе</string>
+    <string name="apollo_status_device_denied_hint">Проверьте список устройств или обратитесь в поддержку. После изменения обновите подписку.</string>
     <string name="apollo_status_unknown">Статус подписки неизвестен</string>
     <string name="apollo_status_refresh_failed">Не удалось обновить подписку</string>
     <string name="apollo_status_retry">Последние сохранённые данные остаются на устройстве. Обновите подписку, чтобы проверить статус.</string>

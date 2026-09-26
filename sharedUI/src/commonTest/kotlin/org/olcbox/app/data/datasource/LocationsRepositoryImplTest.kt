@@ -1169,12 +1169,84 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource()
         val repo = experimentalRepository(source, HttpClient(MockEngine {
             requests++
-            respond("", headers = headersOf("x-hwid-active" to listOf("true"), "x-hwid-max-devices-reached" to listOf("true")))
+            respond(XrayJsonSubscriptionFixtures.body,
+                headers = headersOf("x-hwid-active" to listOf("true"), "x-hwid-max-devices-reached" to listOf("true")))
         }))
 
         assertFalse(repo.importText("https://example.test/sub"))
         assertEquals(1, requests)
         assertNull(source.stored)
+    }
+
+    @Test
+    fun explicitHwidDenialBlocksCachedHostsUntilAValidRefresh() = runTest {
+        for (denialHeader in listOf("x-hwid-max-devices-reached", "x-hwid-not-supported")) {
+            var deny = false
+            val denialStatus = if (denialHeader == "x-hwid-not-supported") HttpStatusCode.NotFound else HttpStatusCode.OK
+            val source = FakeLocationsDataSource()
+            val repo = experimentalRepository(source, HttpClient(MockEngine {
+                if (deny) {
+                    respond(XrayJsonSubscriptionFixtures.body,
+                        status = denialStatus,
+                        headers = headersOf(denialHeader, "true"))
+                } else {
+                    respond(XrayJsonSubscriptionFixtures.body,
+                        headers = headersOf("subscription-userinfo", "upload=1; download=1; total=100; expire=3000"))
+                }
+            }), nowEpochMs = { 2_000_000L })
+            val url = "https://example.test/sub"
+            assertTrue(repo.importText(url), denialHeader)
+            val before = assertNotNull(source.stored)
+            val oldExport = repo.exportBundle()
+            val selectedId = assertNotNull(before.activeLocationId)
+            assertNotNull(repo.getActiveLocation(), denialHeader)
+
+            deny = true
+            val report = repo.refreshSubscription(url)
+            assertEquals(0, report.updatedCount, denialHeader)
+            assertEquals(SubscriptionRefreshError.DeviceDenied, report.failures.single().error, denialHeader)
+            assertEquals(denialStatus.value, report.failures.single().statusCode, denialHeader)
+            assertEquals(before.locations.map { it.storageId to it.location.xrayConfig },
+                source.stored!!.locations.map { it.storageId to it.location.xrayConfig }, denialHeader)
+            assertEquals(selectedId, source.stored!!.activeLocationId, denialHeader)
+            assertEquals("This device is not allowed to use the subscription",
+                SubscriptionTunnelAccess.denial(source.stored!!, selectedId, 2_000_000L,
+                    RuntimeLocationPolicy.ExperimentalDebug), denialHeader)
+            assertNull(repo.getActiveLocation(), "cached host must be blocked after $denialHeader")
+
+            assertTrue(repo.importText(oldExport), "restoring an older export should remain possible")
+            assertNull(repo.getActiveLocation(), "old export must not clear a known HWID refusal")
+
+            deny = false
+            assertEquals(1, repo.refreshSubscription(url).updatedCount, denialHeader)
+            assertNotNull(repo.getActiveLocation(), "valid refresh must restore access after $denialHeader")
+        }
+    }
+
+    @Test
+    fun transientRefreshFailureDoesNotBecomeDeviceDenial() = runTest {
+        var fail = false
+        val source = FakeLocationsDataSource()
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
+            if (fail) respond("unavailable", status = HttpStatusCode.InternalServerError)
+            else respond(XrayJsonSubscriptionFixtures.body,
+                headers = headersOf("subscription-userinfo", "upload=1; download=1; total=100; expire=3000"))
+        }), nowEpochMs = { 2_000_000L })
+        val url = "https://example.test/sub"
+        assertTrue(repo.importText(url))
+        fail = true
+        assertEquals(SubscriptionRefreshError.ServerError, repo.refreshSubscription(url).failures.single().error)
+        assertNotNull(repo.getActiveLocation(), "temporary host failure must not revoke cached access")
+    }
+
+    @Test
+    fun reachedDeviceCountAloneDoesNotRejectAnAlreadyAllowedDevice() = runTest {
+        val source = FakeLocationsDataSource()
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
+            respond(XrayJsonSubscriptionFixtures.body, headers = headersOf("x-hwid-limit", "true"))
+        }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        assertNotNull(repo.getActiveLocation())
     }
 
     @Test
