@@ -11,7 +11,7 @@
             android:pathData="M256,18 A238,238 0,1 1,256 494 A238,238 0,1 1,256 18" />
         <group android:pivotX="256" android:pivotY="256" android:rotation="-24">
             <path android:pathData="M460,256 A204,108 0,1 1,52 256 A204,108 0,1 1,460 256"
-                android:fillColor="@android:color/transparent" android:strokeWidth="14">
+                android:fillColor="#00000000" android:fillAlpha="0" android:strokeWidth="14">
                 <aapt:attr name="android:strokeColor">
                     <gradient android:type="linear" android:startX="96" android:startY="120"
                         android:endX="416" android:endY="392">
