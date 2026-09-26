@@ -163,7 +163,7 @@ abstract class GenerateAppInfoTask : DefaultTask() {
             package org.olcbox.app
 
             internal object GeneratedAppInfo {
-                const val NAME: String = "olcbox"
+                const val NAME: String = "ApolloRGA"
                 const val VERSION: String = "${esc(version.get())}"
                 const val BUILD: String = "${esc(buildId.get())}"
                 const val CRYPT_KEY_V1: String = "${esc(cryptKeyV1.get())}"
@@ -258,6 +258,7 @@ kotlin {
         namespace = "org.olcbox.app.sharedui"
         compileSdk = 37
         minSdk = 23
+        withHostTest {}
 
         // AGP's Kotlin Multiplatform library plugin does not package Compose
         // resources unless Android resource processing is enabled explicitly.
@@ -337,6 +338,11 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.ktor.client.mock)
         }
+
+        named("androidHostTest") { dependencies {
+            implementation(kotlin("test"))
+            implementation("org.robolectric:robolectric:4.16.1")
+        } }
 
         androidMain.dependencies {
             implementation(libs.androidx.activityCompose)

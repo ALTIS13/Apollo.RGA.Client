@@ -34,6 +34,9 @@ data class LocationConfig(
     val kind: LocationKind = LocationKind.Olcrtc,
     @SerialName("raw_link")
     val rawLink: String? = null,
+    /** Validated XRAY_JSON profile, kept as an object so DNS/routing/extra are not reconstructed. */
+    @SerialName("xray_config")
+    val xrayConfig: JsonObject? = null,
     /**
      * The other rooms that, with [id], form one failover group sharing this
      * location's key, carrier and transport: the `##rooms` header of a
@@ -69,7 +72,9 @@ data class LocationConfig(
 
     fun isComplete(): Boolean = when (kind) {
         LocationKind.Olcrtc -> id.isNotBlank() && key.isNotBlank()
-        LocationKind.Vless, LocationKind.Hysteria2, LocationKind.Trojan, LocationKind.Shadowsocks, LocationKind.Vmess ->
+        LocationKind.Vless, LocationKind.Hysteria2 ->
+            xrayConfig != null || (rawLink?.let { LinkParser.parse(it) != null } ?: false)
+        LocationKind.Trojan, LocationKind.Shadowsocks, LocationKind.Vmess ->
             rawLink?.let { LinkParser.parse(it) != null } ?: false
     }
 
@@ -354,6 +359,14 @@ data class SubscriptionMetadata(
     /** From `subscription-userinfo`; 0 or absent means it never expires. */
     @SerialName("expires_at_epoch_ms")
     val expiresAtEpochMs: Long? = null,
+    @SerialName("used_bytes")
+    val usedBytes: Long? = null,
+    @SerialName("total_bytes")
+    val totalBytes: Long? = null,
+    @SerialName("quota_known")
+    val quotaKnown: Boolean = false,
+    @SerialName("expiry_known")
+    val expiryKnown: Boolean = false,
     /** `support-url`. A provider's own way of being reached — usually a bot. */
     @SerialName("support_url")
     val supportUrl: String? = null,
@@ -385,6 +398,8 @@ data class SubscriptionMetadata(
             updateIntervalHours = updateIntervalHours?.coerceIn(MIN_UPDATE_INTERVAL_HOURS, MAX_UPDATE_INTERVAL_HOURS),
             lastRefreshAtEpochMs = lastRefreshAtEpochMs?.takeIf { it > 0 },
             expiresAtEpochMs = expiresAtEpochMs?.takeIf { it > 0 },
+            usedBytes = usedBytes?.takeIf { it >= 0 },
+            totalBytes = totalBytes?.takeIf { it >= 0 },
             supportUrl = supportUrl.cleanMetadataValue(),
             webPageUrl = webPageUrl.cleanMetadataValue(),
             announce = announce.cleanMetadataValue()?.take(ANNOUNCE_MAX_CHARS),
@@ -403,6 +418,7 @@ data class SubscriptionMetadata(
                 updateIntervalHours == null &&
                 lastRefreshAtEpochMs == null &&
                 expiresAtEpochMs == null &&
+                usedBytes == null && totalBytes == null && !quotaKnown && !expiryKnown &&
                 supportUrl.isNullOrBlank() &&
                 webPageUrl.isNullOrBlank() &&
                 announce.isNullOrBlank() &&
@@ -416,6 +432,17 @@ data class SubscriptionMetadata(
         /** What Happ displays of an `announce`; providers write to that length. */
         const val ANNOUNCE_MAX_CHARS = 200
     }
+
+    enum class AccessState { ALLOWED, UNKNOWN, EXPIRED, LIMITED }
+
+    fun accessStateAt(nowEpochMs: Long): AccessState = when {
+        expiryKnown && expiresAtEpochMs != null && nowEpochMs >= expiresAtEpochMs -> AccessState.EXPIRED
+        quotaKnown && totalBytes != null && totalBytes > 0 && usedBytes != null && usedBytes >= totalBytes -> AccessState.LIMITED
+        !expiryKnown || !quotaKnown -> AccessState.UNKNOWN
+        else -> AccessState.ALLOWED
+    }
+
+    fun isUsableAt(nowEpochMs: Long): Boolean = accessStateAt(nowEpochMs) == AccessState.ALLOWED
 }
 
 @Serializable
@@ -534,7 +561,9 @@ data class LocationEntry(
     @SerialName("kind")
     val kind: LocationKind = LocationKind.Olcrtc,
     @SerialName("raw_link")
-    val rawLink: String? = null
+    val rawLink: String? = null,
+    @SerialName("xray_config")
+    val xrayConfig: JsonObject? = null
 ) {
     val location: LocationConfig
         get() {
@@ -563,6 +592,7 @@ data class LocationEntry(
                     ?: LocationConfig.DEFAULT_VP8_BATCH,
                 kind = kind,
                 rawLink = rawLink,
+                xrayConfig = xrayConfig,
                 failoverRoomIds = failoverRooms
             ).normalized()
         }
@@ -588,7 +618,8 @@ data class LocationEntry(
                 ?.normalized()
                 ?.takeUnless { it.isEmpty() },
             kind = config.kind,
-            rawLink = config.rawLink
+            rawLink = config.rawLink,
+            xrayConfig = config.xrayConfig
         )
     }
 
@@ -615,7 +646,8 @@ data class LocationEntry(
                 transport = LocationTransportConfig.from(config),
                 metadata = metadata,
                 kind = config.kind,
-                rawLink = config.rawLink
+                rawLink = config.rawLink,
+                xrayConfig = config.xrayConfig
             ).normalized()
         }
 

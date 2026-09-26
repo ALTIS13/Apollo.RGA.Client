@@ -1,6 +1,7 @@
 package org.olcbox.app.data.datasource
 
 import android.content.Context
+import android.util.AtomicFile
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.Dispatchers
@@ -31,19 +32,24 @@ class LocationsDataSourceImpl(
     }
 
     override suspend fun loadLocationBundle(): LocationBundleV4? = withContext(Dispatchers.IO) {
-        val file = File(context.filesDir, LOCATIONS_BUNDLE_FILE_NAME)
-            .takeIf { it.exists() }
+        val primary = File(context.filesDir, LOCATIONS_BUNDLE_FILE_NAME)
+        val file = primary.takeIf { it.exists() || File(it.path + ".bak").exists() }
             ?: File(context.filesDir, LEGACY_LOCATIONS_BUNDLE_FILE_NAME).takeIf { it.exists() }
             ?: return@withContext null
-        if (!file.exists()) return@withContext null
         runCatching {
-            json.decodeFromString(LocationBundleV4.serializer(), file.readText()).normalized()
+            val content = if (file == primary) AtomicFile(file).openRead().bufferedReader().use { it.readText() }
+                else file.readText()
+            json.decodeFromString(LocationBundleV4.serializer(), content).normalized()
         }.getOrNull()
     }
 
     override suspend fun saveLocationBundle(bundle: LocationBundleV4): Unit = withContext(Dispatchers.IO) {
         val normalized = bundle.normalized()
-        File(context.filesDir, LOCATIONS_BUNDLE_FILE_NAME).writeText(
+        // The active file is derived from this master. Disable readiness before
+        // either commit so a crash between the two cannot advertise stale config.
+        context.vpnPrefDataStore.edit { it[KEY_IS_VPN_CONFIG_READY] = false }
+        writeAtomic(
+            File(context.filesDir, LOCATIONS_BUNDLE_FILE_NAME),
             json.encodeToString(LocationBundleV4.serializer(), normalized)
         )
         updateActiveLocationConfig(normalized)
@@ -84,7 +90,7 @@ class LocationsDataSourceImpl(
         val file = File(context.filesDir, ACTIVE_LOCATION_CONFIG_FILE_NAME)
 
         if (active == null) {
-            if (file.exists()) file.delete()
+            AtomicFile(file).delete()
             context.vpnPrefDataStore.edit {
                 it[KEY_IS_VPN_CONFIG_READY] = false
                 it.remove(KEY_VPN_CONFIG_PATH)
@@ -92,12 +98,24 @@ class LocationsDataSourceImpl(
             return
         }
 
-        file.writeText(
+        writeAtomic(file,
             json.encodeToString(LocationBundleV4.serializer(), bundle.copy(locations = listOf(active)))
         )
         context.vpnPrefDataStore.edit {
             it[KEY_IS_VPN_CONFIG_READY] = active.location.isComplete()
             it[KEY_VPN_CONFIG_PATH] = file.absolutePath
+        }
+    }
+
+    private fun writeAtomic(file: File, content: String) {
+        val atomic = AtomicFile(file)
+        val stream = atomic.startWrite()
+        try {
+            stream.write(content.toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+        } catch (failure: Throwable) {
+            atomic.failWrite(stream)
+            throw failure
         }
     }
 }

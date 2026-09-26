@@ -93,8 +93,7 @@ class LocationsRepositoryImpl(
         /** The encrypted link the user pasted, when the import began with one. */
         val originLink: String? = null,
         val updateIntervalHours: Int? = null,
-        val profile: SubscriptionProfile? = null,
-        val requestMode: SubscriptionRequestMode = SubscriptionRequestMode.Identity
+        val profile: SubscriptionProfile? = null
     )
 
     private data class DownloadedSubscription(
@@ -116,6 +115,8 @@ class LocationsRepositoryImpl(
         val usedBytes: Long? = null,
         val totalBytes: Long? = null,
         val expiresAtEpochMs: Long? = null,
+        val quotaKnown: Boolean = false,
+        val expiryKnown: Boolean = false,
         val supportUrl: String? = null,
         val webPageUrl: String? = null,
         /** `announce`: null when absent (the last one stays), "" when the provider sent `0`. */
@@ -125,7 +126,7 @@ class LocationsRepositoryImpl(
         val movedTo: String? = null
     ) {
         fun isEmpty(): Boolean = title.isNullOrBlank() &&
-            usedBytes == null && totalBytes == null && expiresAtEpochMs == null &&
+            usedBytes == null && totalBytes == null && expiresAtEpochMs == null && !quotaKnown && !expiryKnown &&
             supportUrl.isNullOrBlank() && webPageUrl.isNullOrBlank() &&
             announce == null && fallbackUrl == null && movedTo == null
     }
@@ -150,11 +151,6 @@ class LocationsRepositoryImpl(
     private enum class ImportMode {
         Additive,
         Restore
-    }
-
-    private enum class SubscriptionRequestMode {
-        Identity,
-        Compatibility
     }
 
     private val mutationMutex = Mutex()
@@ -294,8 +290,7 @@ class LocationsRepositoryImpl(
             // encrypted link the subscription arrived as. Without this, the first
             // auto-refresh quietly declassifies it.
             val previousOriginLink = previousEntries.firstNotNullOfOrNull { it.subscriptionOriginLink }
-            // Keep the last reported reason: it belongs to the attempt that
-            // ultimately failed (Identity is retried in Compatibility mode).
+            // Keep the last reported reason without changing request identity.
             var lastFailure: SubscriptionRefreshFailure? = null
             val recordFailure: SubscriptionFailureSink = { error, status ->
                 lastFailure = SubscriptionRefreshFailure(url, error, status)
@@ -312,7 +307,7 @@ class LocationsRepositoryImpl(
                 fallbackSubscriptionInterval = previousInterval,
                 subscriptionProxy = subscriptionProxy,
                 onFailure = recordFailure
-            ) ?: fallbackUrl?.let { spare ->
+            ) ?: fallbackUrl?.takeIf { lastFailure?.error == SubscriptionRefreshError.Unreachable }?.let { spare ->
                 resolveParsedImport(
                     text = spare,
                     fallbackSubscriptionInterval = previousInterval,
@@ -328,12 +323,18 @@ class LocationsRepositoryImpl(
             }
             val source = resolved.source
             // Filed from now on where the provider says the list lives.
-            val listUrl = source.profile?.movedTo ?: url
+            val listUrl = if (source.content.startsWith("[")) url else source.profile?.movedTo ?: url
             // A refresh parses fresh entries, which remember nothing: a note the
             // provider put up and has not taken down, and its spare address,
             // carry over from the entries they replace.
+            val previousSubscription = previousEntries.firstNotNullOfOrNull { it.metadata?.subscription }
             val carriedProfile = (source.profile ?: SubscriptionProfile()).let { profile ->
                 profile.copy(
+                    usedBytes = if (profile.quotaKnown) profile.usedBytes else previousSubscription?.usedBytes,
+                    totalBytes = if (profile.quotaKnown) profile.totalBytes else previousSubscription?.totalBytes,
+                    quotaKnown = profile.quotaKnown || previousSubscription?.quotaKnown == true,
+                    expiresAtEpochMs = if (profile.expiryKnown) profile.expiresAtEpochMs else previousSubscription?.expiresAtEpochMs,
+                    expiryKnown = profile.expiryKnown || previousSubscription?.expiryKnown == true,
                     announce = profile.announce
                         ?: previousEntries.firstNotNullOfOrNull { it.metadata?.subscription?.announce },
                     fallbackUrl = profile.fallbackUrl
@@ -568,6 +569,10 @@ class LocationsRepositoryImpl(
         return mutationMutex.withLock {
             val bundle = getBundleUnlocked()
             bundle.locations.firstOrNull { it.storageId == bundle.activeLocationId }
+                ?.takeUnless { entry ->
+                    entry.metadata?.subscription?.accessStateAt(nowEpochMs()) in
+                        setOf(SubscriptionMetadata.AccessState.EXPIRED, SubscriptionMetadata.AccessState.LIMITED)
+                }
         }
     }
 
@@ -661,37 +666,13 @@ class LocationsRepositoryImpl(
         // plain link falls straight through unchanged.
         val effective = cryptCodec?.decryptLink(resolvedInput) ?: resolvedInput
 
-        var source = resolveImportSource(
+        val source = resolveImportSource(
             text = effective,
-            requestMode = SubscriptionRequestMode.Identity,
             subscriptionProxy = subscriptionProxy,
             onFailure = onFailure
-        ) ?: run {
-            if (effective.isHttpUrl()) {
-                resolveImportSource(
-                    text = effective,
-                    requestMode = SubscriptionRequestMode.Compatibility,
-                    subscriptionProxy = subscriptionProxy,
-                    onFailure = onFailure
-                )
-            } else {
-                null
-            }
-        } ?: return null
+        ) ?: return null
 
-        var parsed = parseImportSource(source, fallbackSubscriptionInterval, originLink)
-        if (parsed == null && effective.isHttpUrl() && source.requestMode != SubscriptionRequestMode.Compatibility) {
-            val fallbackSource = resolveImportSource(
-                text = effective,
-                requestMode = SubscriptionRequestMode.Compatibility,
-                subscriptionProxy = subscriptionProxy,
-                onFailure = onFailure
-            )
-            if (fallbackSource != null) {
-                source = fallbackSource
-                parsed = parseImportSource(fallbackSource, fallbackSubscriptionInterval, originLink)
-            }
-        }
+        val parsed = parseImportSource(source, fallbackSubscriptionInterval, originLink)
 
         return parsed?.let { ResolvedImport(source, it) }
     }
@@ -760,7 +741,6 @@ class LocationsRepositoryImpl(
 
     private suspend fun resolveImportSource(
         text: String,
-        requestMode: SubscriptionRequestMode,
         subscriptionProxy: SubscriptionFetchProxy?,
         onFailure: SubscriptionFailureSink? = null
     ): ImportSource? {
@@ -777,7 +757,6 @@ class LocationsRepositoryImpl(
 
         val downloaded = downloadTextFromUrl(
             url = text,
-            requestMode = requestMode,
             subscriptionProxy = subscriptionProxy,
             onFailure = onFailure
         ) ?: return null
@@ -797,25 +776,19 @@ class LocationsRepositoryImpl(
                     content = it,
                     // A list that says it has moved is stored at its new address
                     // from its very first fetch (see subscriptionProfile).
-                    subscriptionUrl = downloaded.profile?.movedTo ?: text.trim(),
+                    subscriptionUrl = if (content.startsWith("[")) text.trim() else downloaded.profile?.movedTo ?: text.trim(),
                     updateIntervalHours = downloaded.updateIntervalHours,
-                    profile = downloaded.profile,
-                    requestMode = requestMode
+                    profile = downloaded.profile
                 )
             }
     }
 
     private suspend fun downloadTextFromUrl(
         url: String,
-        requestMode: SubscriptionRequestMode,
         subscriptionProxy: SubscriptionFetchProxy?,
         onFailure: SubscriptionFailureSink? = null
     ): DownloadedSubscription? {
-        val hwid = if (requestMode == SubscriptionRequestMode.Identity) {
-            deviceIdentityProvider.hwid()
-        } else {
-            null
-        }
+        val hwid = deviceIdentityProvider.hwid()
         val client = if (subscriptionProxy == null) {
             httpClient
         } else {
@@ -831,16 +804,8 @@ class LocationsRepositoryImpl(
                                 HttpHeaders.Accept,
                                 "text/plain, text/markdown, application/octet-stream, */*"
                             )
-                            if (requestMode == SubscriptionRequestMode.Identity) {
-                                append(HttpHeaders.UserAgent, CurrentAppInfo.userAgent)
-                                append("x-hwid", hwid.orEmpty())
-                            } else {
-                                append(
-                                    HttpHeaders.UserAgent,
-                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                                        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                                )
-                            }
+                            append(HttpHeaders.UserAgent, CurrentAppInfo.userAgent)
+                            append("x-hwid", hwid)
                         }
                     }
                 }.onFailure { if (it is CancellationException) throw it }.getOrNull() ?: run {
@@ -855,6 +820,13 @@ class LocationsRepositoryImpl(
                         else SubscriptionRefreshError.Rejected,
                         status
                     )
+                    return@withProxyAuthentication null
+                }
+
+                if (response.headers["x-hwid-not-supported"] != null ||
+                    response.headers["x-hwid-max-devices-reached"] != null
+                ) {
+                    onFailure?.invoke(SubscriptionRefreshError.Rejected, response.status.value)
                     return@withProxyAuthentication null
                 }
 
@@ -953,6 +925,33 @@ class LocationsRepositoryImpl(
         subscriptionUrl: String? = null,
         updateIntervalHours: Int? = null
     ): ParsedImport? {
+        if (text.startsWith("[")) {
+            val result = XrayJsonSubscriptionCodec.decode(text)
+            return if (result is XrayJsonSubscriptionCodec.Success) {
+                val usedIds = mutableSetOf<String>()
+                val entries = result.profiles.map { profile ->
+                    val outbound = profile.effectiveConfig["outbounds"]!!.jsonArray.first().jsonObject
+                    val settings = outbound["settings"]!!.jsonObject
+                    val endpoint = if (profile.protocol == XrayJsonSubscriptionCodec.Protocol.VLESS) {
+                        settings["vnext"]!!.jsonArray.first().jsonObject
+                    } else settings
+                    val id = "${profile.protocol}:${endpoint["address"]!!.jsonPrimitive.content}:${endpoint["port"]!!.jsonPrimitive.content}"
+                    val location = LocationConfig(
+                        name = profile.displayName,
+                        id = id,
+                        kind = if (profile.protocol == XrayJsonSubscriptionCodec.Protocol.VLESS) LocationKind.Vless else LocationKind.Hysteria2,
+                        xrayConfig = profile.effectiveConfig
+                    )
+                    LocationEntry.from(
+                        storageId = uniqueStorageId("imported_${location.storageSlug()}", usedIds),
+                        location = location,
+                        subscriptionUrl = subscriptionUrl,
+                        metadata = LocationMetadata(subscription = SubscriptionMetadata(updateIntervalHours = updateIntervalHours))
+                    )
+                }
+                ParsedImport(LocationBundleV4(activeLocationId = entries.first().storageId, locations = entries), ImportMode.Additive)
+            } else null
+        }
         parseLinkList(text, subscriptionUrl, updateIntervalHours)?.let {
             return ParsedImport(it, ImportMode.Additive)
         }
@@ -1560,9 +1559,11 @@ class LocationsRepositoryImpl(
             ?.toMap()
             .orEmpty()
 
-        val used = listOfNotNull(info["upload"], info["download"])
-            .takeIf { it.isNotEmpty() }
-            ?.sum()
+        val upload = info["upload"]?.takeIf { it >= 0 }
+        val download = info["download"]?.takeIf { it >= 0 }
+        val used = if (upload != null && download != null && upload <= Long.MAX_VALUE - download) upload + download else null
+        val total = info["total"]?.takeIf { it >= 0 }
+        val expire = info["expire"]?.takeIf { it in 0..Long.MAX_VALUE / 1000 }
 
         val announce = headers["announce"]?.trim()?.let { raw ->
             if (raw == "0") {
@@ -1585,9 +1586,11 @@ class LocationsRepositoryImpl(
         val profile = SubscriptionProfile(
             title = title,
             usedBytes = used,
-            totalBytes = info["total"]?.takeIf { it > 0 },
+            totalBytes = total,
             // The header is in seconds, and 0 is the documented "never".
-            expiresAtEpochMs = info["expire"]?.takeIf { it > 0 }?.let { it * 1000 },
+            expiresAtEpochMs = expire?.takeIf { it > 0 }?.let { it * 1000 },
+            quotaKnown = used != null && total != null,
+            expiryKnown = expire != null,
             supportUrl = headers["support-url"]?.trim()?.takeIf { it.isNotBlank() },
             webPageUrl = headers["profile-web-page-url"]?.trim()?.takeIf { it.isNotBlank() },
             announce = announce,
@@ -1658,8 +1661,12 @@ class LocationsRepositoryImpl(
         return base.copy(
             name = profile.title ?: base.name,
             used = profile.usedBytes?.let(::formatByteSize) ?: base.used,
-            available = profile.totalBytes?.let(::formatByteSize) ?: base.available,
-            expiresAtEpochMs = profile.expiresAtEpochMs ?: base.expiresAtEpochMs,
+            available = profile.totalBytes?.takeIf { it > 0 }?.let(::formatByteSize) ?: base.available,
+            usedBytes = profile.usedBytes ?: base.usedBytes,
+            totalBytes = profile.totalBytes ?: base.totalBytes,
+            quotaKnown = profile.quotaKnown || base.quotaKnown,
+            expiryKnown = profile.expiryKnown || base.expiryKnown,
+            expiresAtEpochMs = if (profile.expiryKnown) profile.expiresAtEpochMs else base.expiresAtEpochMs,
             supportUrl = profile.supportUrl ?: base.supportUrl,
             webPageUrl = profile.webPageUrl ?: base.webPageUrl,
             announce = when (profile.announce) {

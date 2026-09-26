@@ -5,6 +5,7 @@ import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.headersOf
+import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.test.runTest
 import org.olcbox.app.CurrentAppInfo
 import org.olcbox.app.crypt.CryptCodec
@@ -645,7 +646,7 @@ class LocationsRepositoryImplTest {
     }
 
     @Test
-    fun subscriptionImportFallsBackWhenIdentityResponseIsNotConfig() = runTest {
+    fun subscriptionImportDoesNotRetryRejectedIdentityAsBrowser() = runTest {
         val userAgents = mutableListOf<String?>()
         val hwids = mutableListOf<String?>()
         val engine = MockEngine { request ->
@@ -669,16 +670,193 @@ class LocationsRepositoryImplTest {
         ).importText("https://example.test/sub.txt")
 
         val bundle = source.stored
-        assertTrue(imported)
-        assertNotNull(bundle)
-        assertEquals(2, userAgents.size)
+        assertFalse(imported)
+        assertNull(bundle)
+        assertEquals(1, userAgents.size)
         assertEquals(CurrentAppInfo.userAgent, userAgents[0])
         assertEquals("hwid-test", hwids[0])
-        assertTrue(userAgents[1]?.startsWith("Mozilla/5.0") == true)
-        assertNull(hwids[1])
-        assertEquals("room", bundle.locations.single().location.id)
-        assertEquals(12, bundle.locations.single().metadata?.subscription?.updateIntervalHours)
-        assertEquals("https://example.test/sub.txt", bundle.locations.single().subscriptionUrl)
+    }
+
+    @Test
+    fun xrayJsonImportKeepsEveryValidatedProfileAndOriginalConfig() = runTest {
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            respond(XrayJsonSubscriptionFixtures.body)
+        }))
+
+        assertTrue(repo.importText("https://example.test/sub"))
+        val stored = assertNotNull(source.stored)
+        assertEquals(2, stored.locations.size)
+        assertEquals(listOf("Synthetic exit A", "Synthetic exit B"), stored.locations.map { it.name })
+        assertEquals(
+            listOf(XrayJsonSubscriptionFixtures.vless, XrayJsonSubscriptionFixtures.hysteria)
+                .map { kotlinx.serialization.json.Json.parseToJsonElement(it).jsonObject },
+            stored.locations.map { it.location.xrayConfig }
+        )
+        assertEquals("https://example.test/sub", stored.locations.single { it.name == "Synthetic exit A" }.subscriptionUrl)
+    }
+
+    @Test
+    fun invalidXrayRefreshPreservesWholeSelectedVersion() = runTest {
+        var body = XrayJsonSubscriptionFixtures.body
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        val first = assertNotNull(source.stored)
+        repo.setActiveLocationId(first.locations[1].storageId)
+        val before = assertNotNull(source.stored)
+
+        body = "[${XrayJsonSubscriptionFixtures.vless},{\"remarks\":\"broken\"}]"
+        val report = repo.refreshSubscription("https://example.test/sub")
+
+        assertEquals(0, report.updatedCount)
+        assertTrue(report.hasFailures)
+        assertEquals(before, source.stored)
+        assertEquals(before.activeLocationId, repo.getActiveLocationId())
+    }
+
+    @Test
+    fun successfulXrayRefreshKeepsSelectionAcrossDnsChange() = runTest {
+        var body = XrayJsonSubscriptionFixtures.body
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        val chosen = assertNotNull(source.stored).locations[1].storageId
+        repo.setActiveLocationId(chosen)
+
+        body = XrayJsonSubscriptionFixtures.body.replace("198.51.100.53", "203.0.113.53")
+        assertEquals(1, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertEquals(chosen, repo.getActiveLocationId())
+        assertEquals(2, assertNotNull(source.stored).locations.size)
+    }
+
+    @Test
+    fun xrayJsonImportRetainsLiteralUserUrlDespiteMoveHeader() = runTest {
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            respond(XrayJsonSubscriptionFixtures.body, headers = headersOf("new-url", "https://example.test/json"))
+        }))
+
+        assertTrue(repo.importText("https://example.test/literal"))
+        assertTrue(assertNotNull(source.stored).locations.all { it.subscriptionUrl == "https://example.test/literal" })
+    }
+
+    @Test
+    fun http200HwidDenialDoesNotRetryAsBrowserOrPublish() = runTest {
+        var requests = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            requests++
+            respond("", headers = headersOf("x-hwid-active" to listOf("true"), "x-hwid-max-devices-reached" to listOf("true")))
+        }))
+
+        assertFalse(repo.importText("https://example.test/sub"))
+        assertEquals(1, requests)
+        assertNull(source.stored)
+    }
+
+    @Test
+    fun rejectedIdentityRefreshDoesNotUseSpareAddressToMaskDenial() = runTest {
+        val url = "https://example.test/sub"
+        val spare = "https://spare.example.test/sub"
+        var deny = false
+        val asked = mutableListOf<String>()
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { request ->
+            asked += request.url.toString()
+            if (deny && request.url.host == "example.test") respond("denied", HttpStatusCode.Forbidden)
+            else respond(XrayJsonSubscriptionFixtures.body, headers = headersOf("fallback-url", spare))
+        }))
+        assertTrue(repo.importText(url))
+        val before = assertNotNull(source.stored)
+
+        deny = true
+        asked.clear()
+        assertEquals(0, repo.refreshSubscription(url).updatedCount)
+        assertEquals(listOf(url), asked)
+        assertEquals(before, source.stored)
+    }
+
+    @Test
+    fun failedRefreshRetainsKnownQuotaAndExpiryWithoutMakingItUnlimited() = runTest {
+        var reject = false
+        var now = 2_000_000L
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            if (reject) respond("denied", HttpStatusCode.Forbidden)
+            else respond(
+                XrayJsonSubscriptionFixtures.body,
+                headers = headersOf("subscription-userinfo", "upload=6; download=5; total=10; expire=2001")
+            )
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText("https://example.test/sub"))
+        val before = assertNotNull(source.stored)
+        val quota = assertNotNull(before.locations.first().metadata?.subscription)
+        assertEquals(11L, quota.usedBytes)
+        assertEquals(10L, quota.totalBytes)
+        assertFalse(quota.isUsableAt(now))
+
+        reject = true
+        now = 2_002_000L
+        assertEquals(0, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertEquals(before, source.stored)
+        assertFalse(assertNotNull(source.stored).locations.first().metadata!!.subscription!!.isUsableAt(now))
+        assertNull(repo.getActiveLocation(), "a known depleted subscription cannot supply an active tunnel")
+    }
+
+    @Test
+    fun expiredStoredSubscriptionCannotSupplyAnActiveTunnelAfterFailedRefresh() = runTest {
+        var now = 2_000_000L
+        var reject = false
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            if (reject) respond("offline", HttpStatusCode.ServiceUnavailable)
+            else respond(XrayJsonSubscriptionFixtures.body,
+                headers = headersOf("subscription-userinfo", "upload=1; download=1; total=10; expire=2001"))
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText("https://example.test/sub"))
+        assertNotNull(repo.getActiveLocation())
+
+        now = 2_002_000L
+        reject = true
+        assertEquals(0, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertNull(repo.getActiveLocation())
+        assertEquals(2, repo.getAllLocations().size, "retain the URL and last valid version for later refresh")
+    }
+
+    @Test
+    fun validRefreshWithoutUserinfoRetainsPreviouslyKnownLimitAndExpiry() = runTest {
+        var userinfo = "upload=6; download=5; total=10; expire=2001"
+        var now = 2_000_000L
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            respond(XrayJsonSubscriptionFixtures.body,
+                headers = if (userinfo.isEmpty()) headersOf() else headersOf("subscription-userinfo", userinfo))
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText("https://example.test/sub"))
+
+        now = 2_002_000L
+        userinfo = ""
+        assertEquals(1, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertNull(repo.getActiveLocation())
+        val metadata = source.stored!!.locations.first().metadata!!.subscription!!
+        assertEquals(11L, metadata.usedBytes)
+        assertEquals(10L, metadata.totalBytes)
+        assertEquals(2_001_000L, metadata.expiresAtEpochMs)
+    }
+
+    @Test
+    fun malformedNegativeExpiryRemainsUnknownRatherThanUnlimited() = runTest {
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            respond(XrayJsonSubscriptionFixtures.body,
+                headers = headersOf("subscription-userinfo", "upload=1; download=1; total=10; expire=-1"))
+        }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        assertEquals(
+            org.olcbox.app.data.model.SubscriptionMetadata.AccessState.UNKNOWN,
+            source.stored!!.locations.first().metadata!!.subscription!!.accessStateAt(2_000_000L)
+        )
     }
 
     @Test
