@@ -46,7 +46,7 @@ class LogScrubberTest {
     }
 
     @Test fun credentialsAndCapabilitiesGo() {
-        assertEquals("start room=<id>", s.scrub("start room=a3f9c1e2-4b5d-6789-0abc-def012345678"))
+        assertEquals("start room=<redacted>", s.scrub("start room=a3f9c1e2-4b5d-6789-0abc-def012345678"))
         assertEquals("import <link>", s.scrub("import olcrtc://crypt1/AAAAbbbbCCCCdddd"))
         assertEquals("import <link>", s.scrub("import happ://crypt5/fzvdQQSl2kKPyNPhAeRV4WSh12xLFV8"))
         assertEquals("GET <host>/sub/x", s.scrub("GET sub.proofkit.org/sub/x"))
@@ -127,17 +127,44 @@ class LogScrubberTest {
         assertTrue(out.contains("/<path>"), out)
     }
 
-    @Test fun localEndpointsInsideUrlsSurviveVerbatim() {
-        // The URL rule has to agree with the bare-address rule: a loopback or LAN
-        // endpoint names nothing about the user, and the port and path beside it
-        // are what say which listener the line is about.
-        for (line in listOf(
-            "verify through socks5://127.0.0.1:10810",
-            "PAC served at http://127.0.0.1:10809/proxy.pac",
-            "router page http://192.168.1.1/status",
-        )) {
-            assertEquals(line, s.scrub(line), "a local URL must not be tagged")
+    @Test fun localUrlKeepsListenerButLosesSensitivePathAndQuery() {
+        val out = s.scrub("GET http://127.0.0.1:10809/private/SENTINEL_PATH?key=SENTINEL_KEY&password=SENTINEL_PASSWORD")
+        assertEquals("GET http://127.0.0.1:10809/<path>", out)
+        assertEquals("proxy socks5://127.0.0.1:10810", s.scrub("proxy socks5://127.0.0.1:10810"))
+    }
+
+    @Test fun localhostPrefixCannotHideAFullHostAndItsQuery() {
+        val out = s.scrub("GET https://localhost.example.com/private?key=SENTINEL_KEY")
+        assertFalse(out.contains("localhost.example.com"), out)
+        assertFalse(out.contains("SENTINEL_KEY"), out)
+        assertTrue(Regex("https://node#[0-9a-f]{12}/<path>").containsMatchIn(out), out)
+    }
+
+    @Test fun bracketedIpv6UrlLosesSensitivePathAndQuery() {
+        assertEquals(
+            "GET http://[::1]:10809/<path>",
+            s.scrub("GET http://[::1]:10809/private?password=SENTINEL_PASSWORD")
+        )
+        val public = s.scrub("GET https://[2001:db8::1]:443/private?key=SENTINEL_KEY")
+        assertFalse(public.contains("2001:db8::1"), public)
+        assertFalse(public.contains("SENTINEL_KEY"), public)
+        assertTrue(Regex("https://\\[node#[0-9a-f]{12}]:443/<path>").containsMatchIn(public), public)
+    }
+
+    @Test fun queryCredentialsWithoutFullUrlNeverReachTheLog() {
+        val out = s.scrub("GET /status?key=SENTINEL_KEY&password=SENTINEL_PASSWORD&mode=fast")
+        assertEquals("GET /status?key=<redacted>&password=<redacted>&mode=fast", out)
+    }
+
+    @Test fun nativeRoomAndCredentialAssignmentsNeverReachTheLog() {
+        val out = s.scrub(
+            "failover cycle=1 starting room=SENTINEL_ROOM key=SENTINEL_KEY " +
+                "token=SENTINEL_TOKEN channel=SENTINEL_CHANNEL roomID=SENTINEL_ID"
+        )
+        for (secret in listOf("SENTINEL_ROOM", "SENTINEL_KEY", "SENTINEL_TOKEN", "SENTINEL_CHANNEL", "SENTINEL_ID")) {
+            assertFalse(secret in out, out)
         }
+        assertTrue(out.startsWith("failover cycle=1 starting room=<redacted>"), out)
     }
 
     @Test fun aPublicAddressInsideAUrlReadsLikeTheBareOne() {

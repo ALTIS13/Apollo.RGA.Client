@@ -14,7 +14,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.olcbox.app.CurrentAppInfo
-import org.olcbox.app.GeneratedAppInfo
 
 private const val HAPP_PREFIX = "happ://"
 
@@ -43,7 +42,7 @@ interface PartnerLinkResolver {
 
 class HttpPartnerLinkResolver(
     private val httpClient: HttpClient,
-    private val apiBase: String = GeneratedAppInfo.RESOLVER_BASE,
+    private val apiBase: String? = null,
 ) : PartnerLinkResolver {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -51,9 +50,13 @@ class HttpPartnerLinkResolver(
     override suspend fun resolve(link: String): PartnerLinkResult {
         val trimmed = link.trim()
         if (!isPartnerLink(trimmed)) return PartnerLinkResult.NotFound
+        // Apollo.RGA does not own a partner resolver yet. Never send a pasted
+        // bearer-like link to the upstream Ghostlane/ProofKit coordinator.
+        val endpoint = apiBase?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return PartnerLinkResult.Unavailable
 
         val response = runCatching {
-            httpClient.post("${apiBase.trimEnd('/')}/partners/resolve-link") {
+            httpClient.post("${endpoint.trimEnd('/')}/partners/resolve-link") {
                 headers {
                     append(HttpHeaders.ContentType, ContentType.Application.Json.toString())
                     append(HttpHeaders.UserAgent, CurrentAppInfo.userAgent)

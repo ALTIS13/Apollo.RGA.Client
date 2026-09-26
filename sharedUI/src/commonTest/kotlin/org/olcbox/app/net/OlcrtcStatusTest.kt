@@ -15,6 +15,21 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OlcrtcStatusTest {
+    private val testCoordinator = "https://status.example.test"
+
+    @Test fun defaultStatusLookupDoesNotContactAnUpstreamCoordinator() = runTest {
+        var requests = 0
+        val engine = MockEngine {
+            requests += 1
+            respond("""{"slots_total":8,"slots_free":3}""", status = HttpStatusCode.OK)
+        }
+
+        val status = OlcrtcStatusClient(HttpClient(engine)).statusFor("ab".repeat(32))
+
+        assertEquals(OlcrtcNodeStatus.Unavailable, status)
+        assertEquals(0, requests, "a key-derived ID must not leave the app without an owned endpoint")
+    }
+
     /**
      * Vectors produced by the coordinator's own database
      * (`left(encode(sha256(decode(key,'hex')),'hex'),16)`), which is also what the
@@ -80,7 +95,7 @@ class OlcrtcStatusTest {
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             )
         }
-        val slots = OlcrtcStatusClient(HttpClient(engine)).slotsFor("ab".repeat(32))
+        val slots = OlcrtcStatusClient(HttpClient(engine), testCoordinator).slotsFor("ab".repeat(32))
 
         assertEquals(OlcrtcSlots(slots_total = 8, slots_free = 3, holds_slot = true), slots)
     }
@@ -93,12 +108,12 @@ class OlcrtcStatusTest {
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             )
         }
-        assertNull(OlcrtcStatusClient(HttpClient(engine)).slotsFor("ab".repeat(32)))
+        assertNull(OlcrtcStatusClient(HttpClient(engine), testCoordinator).slotsFor("ab".repeat(32)))
     }
 
     @Test fun aMalformedKeyNeverReachesTheNetwork() = runTest {
         val engine = MockEngine { error("the client must not call out for a key it cannot hash") }
-        assertNull(OlcrtcStatusClient(HttpClient(engine)).slotsFor("not-a-key"))
+        assertNull(OlcrtcStatusClient(HttpClient(engine), testCoordinator).slotsFor("not-a-key"))
     }
 
     // ── the three answers ──────────────────────────────────────────────────
@@ -117,7 +132,7 @@ class OlcrtcStatusTest {
         }
         assertEquals(
             OlcrtcNodeStatus.KeyGone,
-            OlcrtcStatusClient(HttpClient(engine)).statusFor("ab".repeat(32))
+            OlcrtcStatusClient(HttpClient(engine), testCoordinator).statusFor("ab".repeat(32))
         )
     }
 
@@ -125,7 +140,7 @@ class OlcrtcStatusTest {
         val engine = MockEngine { respond(content = "", status = HttpStatusCode.BadGateway) }
         assertEquals(
             OlcrtcNodeStatus.Unavailable,
-            OlcrtcStatusClient(HttpClient(engine)).statusFor("ab".repeat(32))
+            OlcrtcStatusClient(HttpClient(engine), testCoordinator).statusFor("ab".repeat(32))
         )
     }
 
@@ -133,7 +148,7 @@ class OlcrtcStatusTest {
         val engine = MockEngine { error("the client must not call out for a key it cannot hash") }
         assertEquals(
             OlcrtcNodeStatus.Unavailable,
-            OlcrtcStatusClient(HttpClient(engine)).statusFor("not-a-key")
+            OlcrtcStatusClient(HttpClient(engine), testCoordinator).statusFor("not-a-key")
         )
     }
 
@@ -147,7 +162,7 @@ class OlcrtcStatusTest {
         }
         assertEquals(
             OlcrtcNodeStatus.Occupancy(OlcrtcSlots(slots_total = 8, slots_free = 3, holds_slot = true)),
-            OlcrtcStatusClient(HttpClient(engine)).statusFor("ab".repeat(32))
+            OlcrtcStatusClient(HttpClient(engine), testCoordinator).statusFor("ab".repeat(32))
         )
     }
 }

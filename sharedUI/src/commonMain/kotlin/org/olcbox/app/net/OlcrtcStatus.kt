@@ -93,10 +93,9 @@ sealed interface OlcrtcNodeStatus {
 }
 
 /**
- * Reads node occupancy from the coordinator.
- *
- * Always ProofKit's coordinator, whoever sold the subscription: the Telemost room the
- * link points at is ours, so it is the only party that knows how full it is.
+ * Reads node occupancy only when an owned coordinator endpoint is explicitly supplied.
+ * The Apollo.RGA derivative has no managed status endpoint yet, so the default is
+ * disabled rather than sending a key-derived identifier to an upstream service.
  */
 class OlcrtcStatusClient(
     private val httpClient: HttpClient,
@@ -136,6 +135,8 @@ class OlcrtcStatusClient(
      * this existed, and never blocks a connection the user could otherwise make.
      */
     suspend fun statusFor(keyHex: String): OlcrtcNodeStatus {
+        // No configured Apollo endpoint: do not even derive a key ID, let alone send it.
+        if (baseUrl.isBlank()) return OlcrtcNodeStatus.Unavailable
         // A malformed key is not a revoked one: it never had a chance to be asked
         // about, so it says nothing and changes nothing.
         val keyId = keyIdFor(keyHex) ?: return OlcrtcNodeStatus.Unavailable
@@ -158,7 +159,7 @@ class OlcrtcStatusClient(
     }
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://proofkit.org"
+        const val DEFAULT_BASE_URL = ""
         const val PATH = "/api/v1/olcrtc/status"
     }
 }

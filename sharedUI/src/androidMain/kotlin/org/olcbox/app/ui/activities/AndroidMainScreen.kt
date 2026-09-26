@@ -9,7 +9,7 @@ import org.olcbox.app.ui.features.home.localizedSingleMessage
 import multiplatform_app.sharedui.generated.resources.Res
 import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.location_qr
-import multiplatform_app.sharedui.generated.resources.no_browser
+import multiplatform_app.sharedui.generated.resources.subscription_enrollment_unavailable
 import multiplatform_app.sharedui.generated.resources.qr_imported
 import multiplatform_app.sharedui.generated.resources.server_list_added
 import multiplatform_app.sharedui.generated.resources.server_list_not_found
@@ -50,7 +50,6 @@ import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import org.olcbox.app.admin.AdminState
 import org.olcbox.app.data.share.ConfigShareService
-import org.olcbox.app.ui.components.kit.PkBrand
 import org.olcbox.app.update.AndroidUpdateSettingsStore
 import org.olcbox.app.update.AppUpdateInfo
 import org.olcbox.app.update.AppUpdateSettings
@@ -179,7 +178,7 @@ fun AndroidMainScreen(
     // Said from callbacks, which cannot read a resource themselves.
     val serverListAddedText = stringResource(Res.string.server_list_added)
     val qrImportedText = stringResource(Res.string.qr_imported)
-    val noBrowserText = stringResource(Res.string.no_browser)
+    val enrollmentUnavailableText = stringResource(Res.string.subscription_enrollment_unavailable)
     val serverListRemovedText = stringResource(Res.string.server_list_removed)
     val serverListNotFoundText = stringResource(Res.string.server_list_not_found)
     val locationQrTitle = stringResource(Res.string.location_qr)
@@ -418,14 +417,7 @@ fun AndroidMainScreen(
         },
         showAppSettingsButton = true,
         onGetSubscriptionClick = {
-            runCatching {
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse(PkBrand.siteUrl))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            }.onFailure {
-                Toast.makeText(context, noBrowserText, Toast.LENGTH_SHORT).show()
-            }
+            Toast.makeText(context, enrollmentUnavailableText, Toast.LENGTH_SHORT).show()
         },
         // The call to action to go and buy a subscription is gone from every
         // platform, not only the one that was made to remove it. It went first on

@@ -28,6 +28,10 @@ class LogScrubber(private val salt: Long) {
         // the narrower rules below.
         out = CRYPT_LINK.replace(out, "<link>")
         out = UUID.replace(out, "<id>")
+        // The native olcRTC runtime can log bare `room=...`, `key=...`, and
+        // `token=...` fields rather than a URL. A numeric room is not a UUID,
+        // so redact named values before the URL/hostname passes.
+        out = SECRET_ASSIGNMENT.replace(out) { match -> "${match.groupValues[1]}<redacted>" }
         // URLs need one pass of their own. Replacing only the hostname leaves
         // XHTTP paths and subscription identifiers visible after the host tag.
         out = URL.replace(out) { match ->
@@ -36,13 +40,13 @@ class LogScrubber(private val salt: Long) {
             val host = match.groupValues[3]
             val port = match.groupValues[4]
             val suffix = match.groupValues[5]
-            // The verdicts the bare rules below would reach: our own host reads as
-            // ours, and an address literal is tagged only when it is public. A
-            // loopback or LAN endpoint keeps its path as well, because it names a
-            // local listener and the path is what says which one.
+            // Preserve a local listener's address and port for diagnosis, but
+            // never its path or query: even a loopback URL can carry a secret.
             val shown = when {
+                host.startsWith('[') -> "[${tagIfPublicV6(host.substring(1, host.length - 1))}]"
                 OUR_HOST.matches(host) -> "<host>"
                 IPV4.matches(host) -> tagIfPublicV4(host)
+                host.equals("localhost", ignoreCase = true) -> host
                 else -> tag(host.lowercase())
             }
             buildString {
@@ -50,9 +54,11 @@ class LogScrubber(private val salt: Long) {
                 if (credentials.isNotEmpty()) append("<credentials>@")
                 append(shown)
                 if (port.isNotEmpty()) append(':').append(port)
-                if (suffix.isNotEmpty()) append(if (shown == host) suffix else "/<path>")
+                if (suffix.isNotEmpty()) append("/<path>")
             }
         }
+        // Some core messages log only a request path rather than its full URL.
+        out = QUERY_SECRET.replace(out) { match -> "${match.groupValues[1]}<redacted>" }
         out = OUR_HOST.replace(out, "<host>")
         // Core debug output includes every destination hostname. Keep repeated
         // destinations correlatable inside one export without publishing browsing history.
@@ -157,6 +163,11 @@ class LogScrubber(private val salt: Long) {
 
         private val CRYPT_LINK = Regex("""\b(?:olcrtc|happ)://crypt\d/\S+""")
 
+        private val SECRET_ASSIGNMENT = Regex(
+            """(?<![\p{L}\p{N}_-])((?:room(?:_?id|_?url)?|key|password|token|channel|slug|api[_-]?key)=)([^\s,;&#]+)""",
+            RegexOption.IGNORE_CASE
+        )
+
         private val UUID = Regex(
             """\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-""" +
                 """[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"""
@@ -166,10 +177,14 @@ class LogScrubber(private val salt: Long) {
 
         private val URL = Regex(
             """\b([a-zA-Z][a-zA-Z0-9+.-]*://)(?:([^\s/@]+)@)?""" +
-                """((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+""" +
-                """[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)""" +
+                """(\[[0-9a-zA-Z:.%_-]+]|""" +
+                """(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+""" +
+                """[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?|""" +
+                """[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?)(?![\p{L}\p{N}.-])""" +
                 """(?::(\d+))?([/?#][^\s]*)?"""
         )
+
+        private val QUERY_SECRET = Regex("""([?&](?:key|password)=)([^&#\s]+)""", RegexOption.IGNORE_CASE)
 
         private val HOSTNAME = Regex(
             """(?<![\p{L}\p{N}_-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+""" +

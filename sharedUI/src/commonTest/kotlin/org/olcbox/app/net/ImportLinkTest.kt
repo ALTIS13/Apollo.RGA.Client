@@ -9,7 +9,7 @@ class ImportLinkTest {
 
     @Test fun theSchemeLinkCarriesTheListInTheQuery() {
         val link = ImportLink.schemeLink(list)
-        assertEquals("proofkit://add?url=https%3A%2F%2Fproofkit.org%2Fsub%2Fabc123%3Ftransport%3Dauto", link)
+        assertEquals("apollorga://add?url=https%3A%2F%2Fproofkit.org%2Fsub%2Fabc123%3Ftransport%3Dauto", link)
         assertEquals(list, ImportLink.payloadOf(link))
     }
 
@@ -32,9 +32,15 @@ class ImportLinkTest {
     }
 
     @Test fun theGhostlaneSchemeTakesEveryShapeTheOlderOneDoes() {
-        assertEquals(list, ImportLink.payloadOf(ImportLink.schemeLink(list).replaceFirst("proofkit://", "ghostlane://")))
+        assertEquals(list, ImportLink.payloadOf(ImportLink.schemeLink(list).replaceFirst("apollorga://", "ghostlane://")))
         assertEquals("olcrtc://crypt1/abc", ImportLink.payloadOf("ghostlane://add#olcrtc%3A%2F%2Fcrypt1%2Fabc"))
         assertEquals("olcrtc://crypt1/abc", ImportLink.payloadOf("GHOSTLANE://import?url=olcrtc%3A%2F%2Fcrypt1%2Fabc"))
+    }
+
+    @Test fun theApolloSchemeReadsAProviderSubscriptionPathWithoutDroppingItsQuery() {
+        val raw = "https://sub.example.net/s/Abc%2Bd?format=raw#Apollo"
+        assertEquals(raw, ImportLink.payloadOf("apollorga://add/$raw"))
+        assertEquals(raw, ImportLink.payloadOf("APOLLORGA://import/$raw"))
     }
 
     // What Remnawave-style subscription pages write for each client: the list

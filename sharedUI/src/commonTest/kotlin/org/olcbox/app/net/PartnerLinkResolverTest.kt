@@ -13,6 +13,19 @@ import kotlin.test.assertTrue
 
 class PartnerLinkResolverTest {
 
+    @Test
+    fun defaultResolverDoesNotSendAnOpaquePartnerLinkToUpstream() = runTest {
+        var requests = 0
+        val engine = MockEngine {
+            requests += 1
+            respond("""{"link":"olcrtc://crypt1/QUJD"}""", status = HttpStatusCode.OK)
+        }
+        val result = HttpPartnerLinkResolver(HttpClient(engine)).resolve("happ://crypt5/synthetic-test-value")
+
+        assertEquals(PartnerLinkResult.Unavailable, result)
+        assertEquals(0, requests, "opaque partner link is bearer-like and must stay on device")
+    }
+
     private fun client(status: HttpStatusCode, body: String) = HttpClient(MockEngine { _ ->
         respond(body, status, headersOf(HttpHeaders.ContentType, "application/json"))
     })

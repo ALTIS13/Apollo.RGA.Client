@@ -47,8 +47,6 @@ object PkBrand {
      */
     const val tagline = "decentralized VPN"
 
-    /** Where a user with no subscription is sent to get one. */
-    const val siteUrl = "https://proofkit.org"
 }
 
 /**

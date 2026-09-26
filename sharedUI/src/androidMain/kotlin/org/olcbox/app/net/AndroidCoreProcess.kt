@@ -29,24 +29,45 @@ internal class AndroidCoreProcess(
     private fun binaryPath(): File =
         File(context.applicationInfo.nativeLibraryDir, soName)
 
+    private fun workDir(): File = File(context.cacheDir, "olcbox-$label")
+
+    private fun deleteRawArtifacts() {
+        val dir = workDir()
+        File(dir, "config.json").delete()
+        File(dir, "$label.log").delete()
+        dir.delete() // Only remove our empty directory; never recurse into other cache files.
+    }
+
     @Synchronized
     fun start(configJson: String) {
         stop()
-        val workDir = File(context.cacheDir, "olcbox-$label").apply { mkdirs() }
-        val config = File(workDir, "config.json").apply { writeText(configJson) }
-        val log = File(workDir, "$label.log").apply { delete() }
-        process = ProcessBuilder(argv(binaryPath().absolutePath, config.absolutePath))
-            .directory(workDir)
-            .redirectErrorStream(true)
-            .redirectOutput(log)
-            .start()
+        val dir = workDir().apply { mkdirs() }
+        val config = File(dir, "config.json")
+        val log = File(dir, "$label.log")
+        try {
+            config.writeText(configJson)
+            process = ProcessBuilder(argv(binaryPath().absolutePath, config.absolutePath))
+                .directory(dir)
+                .redirectErrorStream(true)
+                .redirectOutput(log)
+                .start()
+        } catch (e: Exception) {
+            deleteRawArtifacts() // Also remove a partial config when exec or writing failed.
+            throw e
+        }
     }
 
     @Synchronized
     fun stop() {
-        val p = process ?: return
+        val p = process
         process = null
-        p.destroy() // SIGTERM — the Go cores exit cleanly on it
+        try {
+            p?.destroy() // SIGTERM — the Go cores exit cleanly on it
+        } finally {
+            // stdout is redirected to this file, not the app log. Unlink both
+            // raw artifacts even when the process already exited or failed to start.
+            deleteRawArtifacts()
+        }
     }
 
     /** API-23-safe liveness: exitValue() throws while the process is still running. */
@@ -74,7 +95,7 @@ internal class AndroidCoreProcess(
      * rather than at the config.
      */
     fun diagnostics(maxLines: Int = 12): String {
-        val log = File(File(context.cacheDir, "olcbox-$label"), "$label.log")
+        val log = File(workDir(), "$label.log")
         val state = process?.let { p ->
             try {
                 "exited with code ${p.exitValue()}"

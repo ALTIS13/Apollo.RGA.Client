@@ -65,7 +65,9 @@ internal object OlcRtcConnectionChecker {
                         config.vp8Batch.toLong()
                     )
                 }.onFailure {
-                    Log.e("OlcRtcConnectionChecker", "HTTP ping failed", it)
+                    // Native errors can embed a config or URL in their message/stack.
+                    // Keep the failure category without giving logcat the raw throwable.
+                    Log.e("OlcRtcConnectionChecker", "HTTP ping failed (${it.javaClass.simpleName})")
                 }.getOrNull()
 
                 if (result != null && result >= 0L) {
