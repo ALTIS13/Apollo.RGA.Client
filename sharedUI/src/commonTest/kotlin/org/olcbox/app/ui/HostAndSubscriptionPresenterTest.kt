@@ -20,7 +20,9 @@ class HostAndSubscriptionPresenterTest {
         val purpose = "For ordinary browsing on an unstable mobile connection"
         val host = LocationEntry.from(
             "exit-nl",
-            LocationConfig(name = "🇳🇱 $longName", kind = LocationKind.Vless, xrayConfig = buildJsonObject { }),
+            LocationConfig(name = "🇳🇱 $longName", kind = LocationKind.Vless, xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"direct.example.net"}]}}]}"""
+            ).jsonObject),
             metadata = LocationMetadata(comment = purpose)
         )
 
@@ -29,9 +31,45 @@ class HostAndSubscriptionPresenterTest {
         assertEquals("Netherlands", row.country)
         assertEquals(longName, row.name)
         assertEquals(purpose, row.purpose)
-        assertEquals("через RU Relay", row.relay)
-        assertEquals("Устройство → RU Relay → Netherlands", row.routeLine)
+        assertNull(row.relay)
+        assertEquals("Маршрут не подтверждён", row.routeLine)
         assertEquals("VLESS", row.protocol)
+    }
+
+    @Test fun directWordInNameIsNotRouteEvidence() {
+        val host = LocationEntry.from("exit-nl", LocationConfig(
+            name = "🇳🇱 NL Direct", kind = LocationKind.Vless,
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"direct.example.net"}]}}]}"""
+            ).jsonObject
+        ))
+        val row = HostPresenter.present(host)!!
+        assertNull(row.relay)
+        assertEquals("Маршрут не подтверждён", row.routeLine)
+    }
+
+    @Test fun exactConfiguredOwnedRelayEndpointCanBeLabeledWithoutClaimingPhysicalEgress() {
+        val host = LocationEntry.from("exit-nl", LocationConfig(
+            name = "🇳🇱 Netherlands", kind = LocationKind.Vless,
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"rw-nl-relay.gate-altas.tech","port":443}]}}]}"""
+            ).jsonObject
+        ))
+        val row = HostPresenter.present(host)!!
+        assertEquals("через RU Relay", row.relay)
+        assertEquals("Настроенный вход: RU Relay · назначение Netherlands", row.routeLine)
+    }
+
+    @Test fun hysteriaV2OwnedIngressUsesItsActualXrayProtocolShape() {
+        val host = LocationEntry.from("exit-fi", LocationConfig(
+            name = "🇫🇮 Finland", kind = LocationKind.Hysteria2,
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"hysteria","settings":{"address":"rw-fin-relay.gate-altas.tech","port":443,"version":2}}]}"""
+            ).jsonObject
+        ))
+        val row = HostPresenter.present(host)!!
+        assertEquals("через RU Relay", row.relay)
+        assertEquals("Настроенный вход: RU Relay · назначение Finland", row.routeLine)
     }
 
     @Test fun hostPresentationOmitsSecretsAndNeverPresentsOlcrtcAsOrdinary() {
@@ -50,6 +88,17 @@ class HostAndSubscriptionPresenterTest {
         val unsafeRendered = HostPresenter.present(unsafe).toString()
         assertFalse(bareUrl in unsafeRendered)
         assertFalse(bearer in unsafeRendered)
+    }
+
+    @Test fun shortWhitespaceDelimitedCredentialLabelsNeverReachNameOrPurpose() {
+        val shortValue = "ABC1234567890123"
+        val host = LocationEntry.from("ordinary", LocationConfig(
+            name = "🇳🇱 token $shortValue", kind = LocationKind.Vless, xrayConfig = buildJsonObject { }
+        ), metadata = LocationMetadata(comment = "password $shortValue"))
+
+        val row = HostPresenter.present(host)!!
+        assertFalse(shortValue in row.toString())
+        assertNull(row.purpose)
     }
 
     @Test fun liveDestinationCodesAndLayeredProtocolRemainExplicit() {
@@ -93,6 +142,27 @@ class HostAndSubscriptionPresenterTest {
             SubscriptionPresenter.present(active, now, SubscriptionRefreshError.Unreachable).accessState)
         assertEquals(SubscriptionMetadata.AccessState.EXPIRED,
             SubscriptionPresenter.present(active.copy(expiresAtEpochMs = now), now).accessState)
+    }
+
+    @Test fun knownImminentExpiryRemainsVisibleWithoutUsageHeaders() {
+        val now = 10_000_000L
+        val expiryOnly = SubscriptionMetadata(expiresAtEpochMs = now + DAY, expiryKnown = true, quotaKnown = false)
+
+        val presented = SubscriptionPresenter.present(expiryOnly, now)
+        assertEquals(SubscriptionMetadata.AccessState.UNKNOWN, presented.accessState)
+        assertEquals(SubscriptionDisplayState.EXPIRING, presented.state)
+    }
+
+    @Test fun zeroTotalQuotaIsUnmeteredRatherThanZeroRemaining() {
+        val now = 10_000_000L
+        val unmetered = SubscriptionMetadata(
+            expiresAtEpochMs = now + 5 * DAY, expiryKnown = true,
+            usedBytes = 10, totalBytes = 0, quotaKnown = true
+        )
+
+        val presented = SubscriptionPresenter.present(unmetered, now)
+        assertEquals(SubscriptionDisplayState.ACTIVE, presented.state)
+        assertNull(presented.remainingBytes)
     }
 
     private companion object { const val DAY = 86_400_000L }

@@ -9,6 +9,7 @@ import org.olcbox.app.util.parseEmojiAndName
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
 data class HostPresentation(
     val flag: String,
@@ -36,15 +37,11 @@ object HostPresenter {
         val flag = if (flagCode != null) parsedFlag else code?.let(::flagForCode).orEmpty()
         val country = code?.let(::countryName) ?: "Страна не указана"
         val name = withoutFlag.ifBlank { country }
-        val relay = when {
-            VIA_RU.containsMatchIn(name) || RU_RELAY.containsMatchIn(name) -> "через RU Relay"
-            DIRECT.containsMatchIn(name) -> "напрямую"
-            else -> null
-        }
+        val relay = if (configuredOwnedRelay(entry)) "через RU Relay" else null
         val routeLine = if (relay == "через RU Relay") {
-            "Устройство → RU Relay → $country"
+            "Настроенный вход: RU Relay · назначение $country"
         } else {
-            "Устройство → $country"
+            "Маршрут не подтверждён"
         }
         return HostPresentation(
             flag = flag,
@@ -75,16 +72,37 @@ object HostPresenter {
         }
         return listOfNotNull("VLESS", transport, protection).joinToString(" · ")
     }
+
+    /** A configured owned ingress is not proof of the packet's actual egress path. */
+    private fun configuredOwnedRelay(entry: LocationEntry): Boolean = runCatching {
+        val outbound = entry.location.xrayConfig?.get("outbounds")?.jsonArray?.firstOrNull()?.jsonObject
+            ?: return@runCatching false
+        val protocol = outbound["protocol"]?.jsonPrimitive?.content?.lowercase()
+        val settings = outbound["settings"]?.jsonObject ?: return@runCatching false
+        val address = when {
+            entry.location.kind == LocationKind.Vless && protocol == "vless" ->
+                settings["vnext"]?.jsonArray?.firstOrNull()?.jsonObject?.get("address")?.jsonPrimitive?.content
+            entry.location.kind == LocationKind.Hysteria2 && protocol == "hysteria" &&
+                settings["version"]?.jsonPrimitive?.intOrNull == 2 ->
+                settings["address"]?.jsonPrimitive?.content
+            else -> null
+        }
+        address?.lowercase() in OWNED_RELAY_ENDPOINTS
+    }.getOrDefault(false)
 }
 
 private val URL_OR_SECRET = Regex(
     "(?i)://|\\b(?:[a-z0-9-]+\\.)+[a-z]{2,}(?:[:/?#]\\S*)?|\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b|" +
         "\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b|" +
-        "\\b(?:token|key|password|uuid|bearer)\\s*[:=]|\\b[a-z0-9_-]{24,}\\b"
+        "\\b(?:token|key|password|uuid|bearer)(?:\\s*[:=]|\\s+)|\\b[a-z0-9_-]{24,}\\b"
 )
-private val VIA_RU = Regex("(?i)\\bvia\\s+RU\\b")
-private val RU_RELAY = Regex("(?i)\\bRU\\s+Relay\\b")
-private val DIRECT = Regex("(?i)\\bDirect\\b")
+private val OWNED_RELAY_ENDPOINTS = setOf(
+    "rw-fin-relay.gate-altas.tech",
+    "rw-nl-relay.gate-altas.tech",
+    "rw-de-relay.gate-altas.tech",
+    "rw-sg-relay.gate-altas.tech",
+    "rw-sgl-relay.gate-altas.tech"
+)
 
 private fun safeDisplayText(raw: String): String? = raw.trim()
     .replace(Regex("\\s+"), " ")
@@ -142,12 +160,14 @@ object SubscriptionPresenter {
             access == SubscriptionMetadata.AccessState.EXPIRED -> SubscriptionDisplayState.EXPIRED
             access == SubscriptionMetadata.AccessState.LIMITED -> SubscriptionDisplayState.LIMITED
             refreshError != null -> SubscriptionDisplayState.REFRESH_FAILED
-            access == SubscriptionMetadata.AccessState.UNKNOWN -> SubscriptionDisplayState.UNKNOWN
             metadata?.expiresAtEpochMs != null && metadata.expiresAtEpochMs - nowEpochMs <= EXPIRING_WINDOW_MS ->
                 SubscriptionDisplayState.EXPIRING
+            access == SubscriptionMetadata.AccessState.UNKNOWN -> SubscriptionDisplayState.UNKNOWN
             else -> SubscriptionDisplayState.ACTIVE
         }
-        val remaining = if (metadata?.quotaKnown == true && metadata.totalBytes != null && metadata.usedBytes != null) {
+        val remaining = if (metadata?.quotaKnown == true && metadata.totalBytes != null &&
+            metadata.totalBytes > 0 && metadata.usedBytes != null
+        ) {
             (metadata.totalBytes - metadata.usedBytes).coerceAtLeast(0)
         } else null
         return SubscriptionPresentation(state, access, remaining, metadata?.expiresAtEpochMs, refreshError)
