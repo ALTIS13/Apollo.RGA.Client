@@ -35,6 +35,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.assertNull
+import kotlin.test.assertFalse
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeScreenModelImportLinkTest {
@@ -285,12 +286,39 @@ class HomeScreenModelImportLinkTest {
         assertEquals("error: Not an Apollo.RGA import link", awaitForReal(outcome))
         assertTrue(repository.getAllLocations().isEmpty())
     }
+
+    @Test fun importFailureNeverReturnsExceptionUrlToCallback() = runTest {
+        val secretMarker = "synthetic-secret"
+        source.failSaveMessage = "failed for https://subscription.example.test/sub?token=$secretMarker"
+        val outcome = CompletableDeferred<String>()
+        val vm = viewModel()
+        vm.onImportFullConfig(realityLink, onError = { outcome.complete(it) })
+
+        val callback = awaitForReal(outcome)
+        assertFalse(callback.contains(secretMarker))
+        assertEquals("Import failed", callback)
+    }
+
+    @Test fun importFailureNeverStoresExceptionUrlInStartBlockedReason() = runTest {
+        val secretMarker = "synthetic-secret"
+        source.failSaveMessage = "failed for https://subscription.example.test/sub?token=$secretMarker"
+        val outcome = CompletableDeferred<String>()
+        val vm = viewModel()
+        vm.onImportFullConfig(realityLink, onError = { outcome.complete(it) })
+
+        awaitForReal(outcome)
+        val reason = vm.state.value.startBlockedReason.orEmpty()
+        assertFalse(reason.contains(secretMarker))
+        assertEquals("Import failed", reason)
+    }
 }
 
 private class MemoryLocationsDataSource(var stored: LocationBundleV4? = null) : LocationsDataSource {
     var failSave = false
+    var failSaveMessage: String? = null
     override suspend fun loadLocationBundle(): LocationBundleV4? = stored
     override suspend fun saveLocationBundle(bundle: LocationBundleV4) {
+        failSaveMessage?.let { throw IllegalStateException(it) }
         if (failSave) error("synthetic persistence failure")
         stored = bundle
     }

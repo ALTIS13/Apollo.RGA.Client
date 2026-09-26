@@ -1,26 +1,25 @@
 package org.olcbox.app.net
 
 import org.junit.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 class AndroidExternalImportIntentPolicyTest {
     private val view = "android.intent.action.VIEW"
     private val synthetic = "apollorga://add?url=https%3A%2F%2Fsubscription.example.test%2Fqa"
 
-    @Test fun releaseRejectsEvenExplicitAppOwnedViewIntent() {
-        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, synthetic, debugBuild = false))
+    @Test fun rejectsEvenExplicitAppOwnedViewIntent() {
+        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, synthetic))
         assertNull(AndroidExternalImportIntentPolicy.allowedData(
-            view, "https://foreign.example.test/add#synthetic", debugBuild = false))
+            view, "https://foreign.example.test/add#synthetic"))
     }
 
-    @Test fun debugForwardsOnlyExactOwnedSchemeHostsOnView() {
-        assertEquals(synthetic, AndroidExternalImportIntentPolicy.allowedData(view, synthetic, debugBuild = true))
+    @Test fun rejectsBothExactOwnedSchemeHostsOnView() {
+        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, synthetic))
         val importHost = "apollorga://import?url=https%3A%2F%2Fsubscription.example.test%2Fqa"
-        assertEquals(importHost, AndroidExternalImportIntentPolicy.allowedData(view, importHost, debugBuild = true))
+        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, importHost))
     }
 
-    @Test fun debugRejectsWrongActionsAndUntrustedOrigins() {
+    @Test fun rejectsWrongActionsAndUntrustedOrigins() {
         val invalid = listOf(
             "https://foreign.example.test/add#synthetic",
             "https://owned.example.test/import#synthetic",
@@ -36,12 +35,12 @@ class AndroidExternalImportIntentPolicyTest {
             "apollorga:add?url=synthetic",
             "apollorga://add?url=" + "a".repeat(20_000),
         )
-        invalid.forEach { assertNull(AndroidExternalImportIntentPolicy.allowedData(view, it, debugBuild = true)) }
+        invalid.forEach { assertNull(AndroidExternalImportIntentPolicy.allowedData(view, it)) }
         assertNull(AndroidExternalImportIntentPolicy.allowedData(
-            "android.intent.action.MAIN", synthetic, debugBuild = true))
+            "android.intent.action.MAIN", synthetic))
         assertNull(AndroidExternalImportIntentPolicy.allowedData(
-            "android.intent.action.SEND", synthetic, debugBuild = true))
-        assertNull(AndroidExternalImportIntentPolicy.allowedData(null, synthetic, debugBuild = true))
-        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, null, debugBuild = true))
+            "android.intent.action.SEND", synthetic))
+        assertNull(AndroidExternalImportIntentPolicy.allowedData(null, synthetic))
+        assertNull(AndroidExternalImportIntentPolicy.allowedData(view, null))
     }
 }

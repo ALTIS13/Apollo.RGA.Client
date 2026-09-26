@@ -731,8 +731,8 @@ class HomeScreenViewModel(
                 }
                 loadCurrentConfigNow()
                 onComplete()
-            } catch (e: Exception) {
-                val message = e.message ?: getString(Res.string.import_failed)
+            } catch (_: Exception) {
+                val message = getString(Res.string.import_failed)
                 _state.update {
                     it.copy(
                         canStartVpn = false,
