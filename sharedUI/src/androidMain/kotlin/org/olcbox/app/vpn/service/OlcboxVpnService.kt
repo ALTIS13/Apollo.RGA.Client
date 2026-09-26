@@ -151,6 +151,8 @@ class OlcboxVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var tun2socksThread: Thread? = null
     @Volatile
+    private var tun2socksBackendPort: Int? = null
+    @Volatile
     private var tun2socksStarted = false
     @Volatile
     private var tun2socksStopRequested = false
@@ -530,7 +532,7 @@ class OlcboxVpnService : VpnService() {
                     this@OlcboxVpnService.routingSettings = routingSettings
                     verboseDebugLogs = routingSettings.verboseDebugLogs
 
-                    if (isMigration && !forceFullRestart && canReconnectTransportInPlace()) {
+                    if (isMigration && !forceFullRestart && canReconnectTransportInPlace(location)) {
                         reconnectTransport(location, requestedGeneration)
                     } else {
                         startFullTunnel(location, requestedGeneration, isMigration, isRestart)
@@ -562,7 +564,14 @@ class OlcboxVpnService : VpnService() {
         coroutineContext.ensureActive()
         if (requestedGeneration != generation) return
 
-        if (startTransport(location, upstream, requestedGeneration, setErrorOnFailure = false)) {
+        if (startTransport(location, upstream, requestedGeneration, setErrorOnFailure = false, reuseBridge = true)) {
+            if (connectionMode == AndroidConnectionMode.Tun &&
+                !isTunBridgeReadyForActiveTransport()
+            ) {
+                addLog("TUN bridge endpoint changed; rebuilding tunnel")
+                startFullTunnel(location, requestedGeneration, isMigration = true, isRestart = false)
+                return
+            }
             val exit = verifyTunnel()
             if (requestedGeneration != generation) return
             if (exit == null) {
@@ -662,6 +671,20 @@ class OlcboxVpnService : VpnService() {
             return
         }
 
+        if (!isTunBridgeReadyForActiveTransport()) {
+            addLog("TUN bridge endpoint does not match transport")
+            stopTransportProcesses(closeTun = true, waitForSocksPort = false)
+            if (isMigration) {
+                setStatus(VpnStatus.Reconnecting)
+                updateNotification("Waiting for transport...")
+                scheduleTransportRetry(requestedGeneration, "TUN bridge endpoint mismatch")
+            } else {
+                setStatus(VpnStatus.Error("TUN bridge endpoint mismatch"))
+                updateNotification("Tunnel failed")
+            }
+            return
+        }
+
         coroutineContext.ensureActive()
         if (requestedGeneration != generation) return
 
@@ -739,7 +762,8 @@ class OlcboxVpnService : VpnService() {
         location: LocationConfig,
         upstream: Network,
         requestedGeneration: Long,
-        setErrorOnFailure: Boolean
+        setErrorOnFailure: Boolean,
+        reuseBridge: Boolean = false
     ): Boolean {
         val routing = routingFor(upstream)
         return if (location.kind == LocationKind.Olcrtc) {
@@ -747,7 +771,7 @@ class OlcboxVpnService : VpnService() {
             activeCoreLogin = null
             startMobile(location, upstream, requestedGeneration, setErrorOnFailure, routing)
         } else {
-            startCore(location, setErrorOnFailure, routing)
+            startCore(location, setErrorOnFailure, routing, reuseBridge)
         }
     }
 
@@ -766,16 +790,24 @@ class OlcboxVpnService : VpnService() {
     private suspend fun startCore(
         location: LocationConfig,
         setErrorOnFailure: Boolean,
-        routing: Routing
+        routing: Routing,
+        reuseBridge: Boolean
     ): Boolean {
         val tun = connectionMode == AndroidConnectionMode.Tun
-        val port = if (tun) freeLoopbackPort() else socksListenPort
-        val login = if (tun) SocksLogin.of(socksUsername, socksPassword) else null
         return try {
+            val port = TunBridgePortPolicy.corePortForStart(
+                tunMode = tun,
+                reuseBridge = reuseBridge,
+                bridgePort = tun2socksBackendPort,
+                freshPort = if (tun && !reuseBridge) freeLoopbackPort() else null,
+                proxyPort = socksListenPort
+            ) ?: error("No valid core SOCKS port")
+            val login = if (tun) SocksLogin.of(socksUsername, socksPassword) else null
             val raw = location.rawLink ?: error("core location has no link")
             val spec = LinkParser.parse(raw) ?: error("unparseable core link")
             stopCoreProcesses()
             waitForSocksPortReleased(port, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
+            if (isLocalSocksPortOpen(port)) error("Core SOCKS port $port is still in use")
             val label: String
             // Which core to ask afterwards, decided here rather than re-derived
             // from the label — the failure path should not have to parse a string
@@ -936,7 +968,7 @@ class OlcboxVpnService : VpnService() {
             configureMobileTransport(config, upstream, directRules)
             addLog(
                 "Starting olcRTC provider=${config.bypassProvider}, " +
-                    "transport=${config.transport}, room=${config.id}"
+                    "transport=${config.transport}, room=<redacted>"
             )
             lastMobileProvider = config.bypassProvider
             olcrtc.setProvider(config.bypassProvider)
@@ -1033,7 +1065,9 @@ class OlcboxVpnService : VpnService() {
             }
 
             val nativeFd = ParcelFileDescriptor.dup(pfd.fileDescriptor).detachFd()
-            val configFile = writeTun2socksConfig()
+            val corePort = activeCorePort
+            val configFile = writeTun2socksConfig(corePort)
+            tun2socksBackendPort = corePort ?: socksListenPort
             tun2socksStarted = true
             tun2socksStopRequested = false
             tun2socksThread = thread(name = "OlcboxTun2Socks", isDaemon = true) {
@@ -1047,10 +1081,12 @@ class OlcboxVpnService : VpnService() {
                 } finally {
                     tun2socksStarted = false
                     tun2socksStopRequested = false
+                    if (tun2socksThread == Thread.currentThread()) tun2socksBackendPort = null
                 }
             }
             true
         } catch (e: Exception) {
+            tun2socksBackendPort = null
             addLog("tun2socks start failed: ${e.message}")
             setStatus(VpnStatus.Error(e.message ?: "tun2socks failed"))
             updateNotification("Tunnel failed")
@@ -1153,7 +1189,7 @@ class OlcboxVpnService : VpnService() {
         }
     }
 
-    private fun writeTun2socksConfig(): File {
+    private fun writeTun2socksConfig(corePort: Int?): File {
         val file = File(filesDir, TUN2SOCKS_CONFIG_FILE_NAME)
         file.writeText(
             HevTunnelConfig.yaml(
@@ -1161,7 +1197,7 @@ class OlcboxVpnService : VpnService() {
                 ipv4 = TUN_IPV4_ADDRESS,
                 socksAddress = socksConnectHost(),
                 socksPort = socksListenPort,
-                corePort = activeCorePort,
+                corePort = corePort,
                 username = upstreamLogin().first,
                 password = upstreamLogin().second
             )
@@ -1351,6 +1387,7 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun stopTun2socks() {
+        tun2socksBackendPort = null
         if (nativeLibrariesLoaded && tun2socksStarted && !tun2socksStopRequested) {
             tun2socksStopRequested = true
             runCatching { stopTun2socksNative() }
@@ -1585,7 +1622,7 @@ class OlcboxVpnService : VpnService() {
             lock.acquire(WAKE_LOCK_TIMEOUT_MS)
             lastWakeLockRefreshAtMs = now
         }.onFailure {
-            Log.w(TAG, "Failed to refresh VPN wake lock", it)
+            Log.w(TAG, "Failed to refresh VPN wake lock (${it.javaClass.simpleName})")
         }
     }
 
@@ -1593,7 +1630,7 @@ class OlcboxVpnService : VpnService() {
         runCatching {
             wakeLock?.let { if (it.isHeld) it.release() }
         }.onFailure {
-            Log.w(TAG, "Failed to release VPN wake lock", it)
+            Log.w(TAG, "Failed to release VPN wake lock (${it.javaClass.simpleName})")
         }
         lastWakeLockRefreshAtMs = 0L
     }
@@ -1638,12 +1675,23 @@ class OlcboxVpnService : VpnService() {
         vpnInterface = null
     }
 
-    private fun canReconnectTransportInPlace(): Boolean {
+    private fun canReconnectTransportInPlace(location: LocationConfig? = null): Boolean {
         return when (connectionMode) {
-            AndroidConnectionMode.Tun -> vpnInterface != null && tun2socksThread?.isAlive == true
+            AndroidConnectionMode.Tun ->
+                vpnInterface != null && tun2socksThread?.isAlive == true && tun2socksStarted &&
+                    TunBridgePortPolicy.canReuseBridge(
+                        bridgePort = tun2socksBackendPort,
+                        currentCorePort = activeCorePort,
+                        targetUsesCore = (location?.kind ?: OlcboxVpnState.activeLocation?.kind) != LocationKind.Olcrtc,
+                        proxyPort = socksListenPort
+                    )
             AndroidConnectionMode.Proxy -> isActiveTransportRunning()
         }
     }
+
+    private fun isTunBridgeReadyForActiveTransport(): Boolean =
+        tun2socksStarted && tun2socksThread?.isAlive == true &&
+            TunBridgePortPolicy.matchesActivePort(tun2socksBackendPort, activeCorePort, socksListenPort)
 
     /**
      * Whether the transport that is supposed to be carrying traffic is still alive.
@@ -1692,7 +1740,7 @@ class OlcboxVpnService : VpnService() {
             isCallbackRegistered = true
             addLog("Network monitor registered")
         } catch (e: Exception) {
-            Log.e(TAG, "Network monitor failed", e)
+            Log.e(TAG, "Network monitor failed (${e.javaClass.simpleName})")
         }
     }
 
@@ -1807,7 +1855,7 @@ class OlcboxVpnService : VpnService() {
             connectivityManager.bindProcessToNetwork(network)
             if (successLog != null) addLog(successLog)
         } catch (e: Exception) {
-            Log.w(TAG, "bindProcessToNetwork failed", e)
+            Log.w(TAG, "bindProcessToNetwork failed (${e.javaClass.simpleName})")
         }
     }
 
@@ -1836,7 +1884,7 @@ class OlcboxVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "Ghostlane VPN",
+                "${applicationInfo.loadLabel(packageManager)} VPN",
                 NotificationManager.IMPORTANCE_LOW
             )
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
@@ -1872,7 +1920,7 @@ class OlcboxVpnService : VpnService() {
 
     private fun buildNotification(status: String) =
         NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(localized("Ghostlane ${activeModeLabel()}"))
+            .setContentTitle("${applicationInfo.loadLabel(packageManager)} ${localized(activeModeLabel())}")
             .setContentText(localized(status))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
@@ -2105,7 +2153,7 @@ class OlcboxVpnService : VpnService() {
                         true
                     } catch (e: UnsatisfiedLinkError) {
                         nativeLibrariesLoadError = e
-                        Log.e(TAG, "Failed to load native tun2socks libraries", e)
+                        Log.e(TAG, "Failed to load native tun2socks libraries (${e.javaClass.simpleName})")
                         false
                     }
                 }
@@ -2183,6 +2231,6 @@ private val NOTIFICATION_TEXTS: Map<String, StringResource> = mapOf(
     "VPN tunnel error" to Res.string.notification_tunnel_error,
     "Split tunneling error" to Res.string.notification_split_error,
     "Add a location first" to Res.string.blocked_no_location,
-    "Ghostlane Proxy" to Res.string.notification_title_proxy,
+    "Proxy" to Res.string.notification_title_proxy,
     "Stop" to Res.string.notification_stop
 )

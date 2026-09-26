@@ -46,9 +46,9 @@ android {
         minSdk = 23
         targetSdk = 37
 
-        // org.proofkit.app, as on iOS: the olcbox id collided with every other
-        // app built from olcbox on the same phone. The Kotlin namespace stays.
-        applicationId = "org.proofkit.app"
+        // Apollo.RGA is installed beside INCY and the upstream Ghostlane app.
+        // The Kotlin namespace remains upstream's; only the Android identity changes.
+        applicationId = "tech.gatealtas.rga"
         versionCode = olcboxVersionCode.get()
         versionName = olcboxVersion.get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -91,6 +91,7 @@ android {
 
     buildTypes {
         debug {
+            applicationIdSuffix = ".debug"
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             }
