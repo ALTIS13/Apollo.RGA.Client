@@ -49,7 +49,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,8 +91,8 @@ fun AndroidMainScreen(
     locationViewModel: LocationViewModel,
     vpnManager: AndroidVpnManager,
     appUpdateService: AppUpdateService? = null,
-    /** An import link the activity received; taken once, then cleared. */
-    pendingImportLink: MutableStateFlow<String?>? = null
+    /** Updated synchronously by the Activity for every incoming intent. */
+    externalImportConfirmation: ExternalImportConfirmationState
 ) {
 
     var currentScreenRoute by rememberSaveable { mutableStateOf("home") }
@@ -157,7 +156,6 @@ fun AndroidMainScreen(
     val pendingVpnAction = remember {
         mutableStateOf<PendingVpnPermissionAction?>(null)
     }
-    val externalImportConfirmation = remember { ExternalImportConfirmationState() }
     var isAppSettingsOpen by remember { mutableStateOf(false) }
     var appSettingsInitialRoute by remember { mutableStateOf(AppSettingsInitialRoute.Hub) }
     var shareSheetPayload by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -318,19 +316,6 @@ fun AndroidMainScreen(
     fun reloadLocationsAfterImport(onComplete: () -> Unit = {}) {
         locationViewModel.loadLocations {
             viewModel.loadCurrentConfig(onComplete)
-        }
-    }
-
-    // The policy hands us a literal HTTPS subscription URL, not its App Link
-    // envelope. Stage it until the person confirms it below.
-    if (pendingImportLink != null) {
-        LaunchedEffect(pendingImportLink) {
-            pendingImportLink.collect { link ->
-                if (link == null) return@collect
-                if (pendingImportLink.compareAndSet(link, null)) {
-                    externalImportConfirmation.offer(link)
-                }
-            }
         }
     }
 

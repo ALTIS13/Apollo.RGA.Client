@@ -24,9 +24,15 @@ internal object OwnedHttpsImportIntentParser {
 
         val rawFragment = envelope.rawFragment ?: return null
         if (rawFragment.isEmpty() || rawFragment.length > MAX_FRAGMENT_CHARS || '#' in rawFragment) return null
-        // Require a URI-component-encoded payload so its own percent escapes are not consumed.
-        if (rawFragment.any { it != '%' && !it.isUriComponentUnescaped() }) return null
-        val payload = decodeFragmentOnce(rawFragment) ?: return null
+        val payload = if (rawFragment.startsWith("https://")) {
+            // Remnawave substitutes the literal subscription URL. Preserve its
+            // own percent escapes verbatim; decoding here would change the URL.
+            rawFragment
+        } else {
+            // Also accept the component-encoded form used by existing links.
+            if (rawFragment.any { it != '%' && !it.isUriComponentUnescaped() }) return null
+            decodeFragmentOnce(rawFragment) ?: return null
+        }
         if (payload.isEmpty() || containsControlOrFormat(payload)) return null
 
         val target = parseUri(payload) ?: return null

@@ -5,13 +5,28 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /** Keeps an external subscription link in memory until the person accepts or dismisses it. */
-internal class ExternalImportConfirmationState {
+class ExternalImportConfirmationState {
     enum class OfferResult { ACCEPTED, ALREADY_PENDING, CONFLICT }
 
     var pendingLink by mutableStateOf<String?>(null)
         private set
     var hasConflict by mutableStateOf(false)
         private set
+
+    /** A recreated Activity must never turn its stored VIEW intent back into a new consent. */
+    fun receiveInitialIntent(link: String?, restoredConflict: Boolean?) {
+        if (restoredConflict == null) {
+            receiveExternalIntent(link)
+        } else {
+            pendingLink = null
+            hasConflict = restoredConflict
+        }
+    }
+
+    /** Called synchronously for every Activity intent, before UI rendering can conflate events. */
+    fun receiveExternalIntent(link: String?) {
+        if (link == null) dismiss() else offer(link)
+    }
 
     fun offer(link: String): OfferResult {
         if (hasConflict) return OfferResult.CONFLICT

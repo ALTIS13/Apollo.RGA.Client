@@ -9,13 +9,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import kotlinx.coroutines.flow.MutableStateFlow
 import org.olcbox.app.data.datasource.LocationsDataSourceImpl
 import org.olcbox.app.data.datasource.LocationsRepositoryImpl
 import org.olcbox.app.data.exporter.AndroidLogExporter
 import org.olcbox.app.data.identity.PersistentDeviceIdentityProvider
 import org.olcbox.app.data.importer.AndroidConfigImporter
 import org.olcbox.app.ui.activities.AndroidMainScreen
+import org.olcbox.app.ui.activities.ExternalImportConfirmationState
 import org.olcbox.app.ui.features.home.HomeScreenViewModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
 import org.olcbox.app.ui.theme.AppTheme
@@ -26,9 +26,13 @@ import org.olcbox.app.vpn.AndroidVpnManager
 
 class AppActivity : ComponentActivity() {
 
-    // The import link the system handed us, until the screen takes it. Launch
-    // mode is singleInstance, so a link while running arrives in onNewIntent.
-    private val pendingImportLink = MutableStateFlow<String?>(null)
+    private companion object {
+        const val EXTERNAL_IMPORT_CONFLICT_KEY = "external_import_conflict"
+    }
+
+    // Process every launch intent synchronously; a StateFlow would conflate
+    // distinct links received before the screen's collector runs.
+    private val externalImportConfirmation = ExternalImportConfirmationState()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -82,24 +86,38 @@ class AppActivity : ComponentActivity() {
                         locationViewModel = locationViewModel,
                         vpnManager = vpnManager,
                         appUpdateService = updateService,
-                        pendingImportLink = pendingImportLink
+                        externalImportConfirmation = externalImportConfirmation
                     )
                 }
             }
         }
-        captureExternalImport(intent)
+        externalImportConfirmation.receiveInitialIntent(
+            allowedExternalImport(intent),
+            savedInstanceState?.getBoolean(EXTERNAL_IMPORT_CONFLICT_KEY, false)
+        )
+        clearStoredExternalIntent()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        // Only the conflict bit survives recreation; never put a subscription URL in a Bundle.
+        outState.putBoolean(EXTERNAL_IMPORT_CONFLICT_KEY, externalImportConfirmation.hasConflict)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
-        captureExternalImport(intent)
+        externalImportConfirmation.receiveExternalIntent(allowedExternalImport(intent))
+        clearStoredExternalIntent()
     }
 
-    private fun captureExternalImport(incoming: Intent?) {
-        pendingImportLink.value = AndroidExternalImportIntentPolicy.allowedData(
+    private fun allowedExternalImport(incoming: Intent?): String? =
+        AndroidExternalImportIntentPolicy.allowedData(
             incoming?.action,
             incoming?.dataString
         )
+
+    private fun clearStoredExternalIntent() {
+        // Android may reuse Activity.intent on recreation; keep no token-bearing VIEW data there.
+        setIntent(Intent(this, AppActivity::class.java).apply { action = Intent.ACTION_MAIN })
     }
 }

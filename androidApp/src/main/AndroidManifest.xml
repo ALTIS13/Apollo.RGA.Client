@@ -71,9 +71,18 @@
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
-            <!-- Real subscription links must use an owned verified App Link.
-                 Until that endpoint/assetlinks contract exists, release imports
-                 remain in-app paste/scan only, without a hijackable scheme. -->
+            <!-- Import is limited to our owned HTTPS host and exact path.
+                 The fragment contains a raw or component-encoded subscription
+                 URL; the app validates it and requires confirmation. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="rga.apollot.ru"
+                    android:path="/import" />
+            </intent-filter>
         </activity>
 
         <activity

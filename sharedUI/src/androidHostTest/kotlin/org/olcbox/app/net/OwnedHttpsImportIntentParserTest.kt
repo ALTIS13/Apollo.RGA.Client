@@ -26,12 +26,18 @@ class OwnedHttpsImportIntentParserTest {
             parse("https://$host$path#https%3A%2F%2Fsubscription.example.test%2Fsub%3Ftoken%3Da%2523mode"))
     }
 
-    @Test fun rejectsRawLiteralTargetWhosePercentEscapeWouldBecomeQuerySeparator() {
-        assertNull(parse("https://$host$path#https://subscription.example.test/sub?token=a%26mode=b"))
+    @Test fun acceptsRawSubscriptionLinkWithoutDecodingItsOwnEscapes() {
+        assertEquals(payload, parse("https://$host$path#$payload"))
+        assertEquals("https://subscription.example.test/sub?token=a%26mode=b",
+            parse("https://$host$path#https://subscription.example.test/sub?token=a%26mode=b"))
+        assertEquals("https://subscription.example.test/sub?token=a%23mode",
+            parse("https://$host$path#https://subscription.example.test/sub?token=a%23mode"))
     }
 
-    @Test fun rejectsRawLiteralTargetWhosePercentEscapeWouldBecomeFragmentSeparator() {
-        assertNull(parse("https://$host$path#https://subscription.example.test/sub?token=a%23mode"))
+    @Test fun rejectsRawNonHttpsOrCredentialBearingTarget() {
+        assertNull(parse("https://$host$path#http://subscription.example.test/sub"))
+        assertNull(parse("https://$host$path#https://user@subscription.example.test/sub"))
+        assertNull(parse("https://$host$path#https://subscription.example.test/sub#nested"))
     }
 
     @Test fun rejectsWrongActionOrMissingData() {

@@ -64,4 +64,46 @@ class ExternalImportConfirmationStateTest {
         assertEquals(ExternalImportConfirmationState.OfferResult.ALREADY_PENDING, state.offer(syntheticLink))
         assertEquals(syntheticLink, state.pendingLink)
     }
+
+    @Test fun invalidNewIntentRevokesOldConsentTarget() {
+        val state = ExternalImportConfirmationState()
+        val imports = mutableListOf<String>()
+
+        state.receiveExternalIntent(syntheticLink)
+        state.receiveExternalIntent(null)
+        state.confirm { imports.add(it) }
+
+        assertNull(state.pendingLink)
+        assertEquals(false, state.hasConflict)
+        assertEquals(emptyList(), imports)
+    }
+
+    @Test fun rapidDistinctIntentsBecomeConflictBeforeUiCollects() {
+        val state = ExternalImportConfirmationState()
+        val secondLink = "https://subscription.example.test/second?token=synthetic2"
+
+        state.receiveExternalIntent(syntheticLink)
+        state.receiveExternalIntent(secondLink)
+
+        assertNull(state.pendingLink)
+        assertEquals(true, state.hasConflict)
+    }
+
+    @Test fun recreationNeverReoffersStoredViewIntentAndRetainsConflictWithoutUrl() {
+        val secondLink = "https://subscription.example.test/second?token=synthetic2"
+        val before = ExternalImportConfirmationState()
+        before.receiveExternalIntent(syntheticLink)
+        before.receiveExternalIntent(secondLink)
+        assertEquals(true, before.hasConflict)
+
+        val restored = ExternalImportConfirmationState()
+        restored.receiveInitialIntent(secondLink, restoredConflict = before.hasConflict)
+        assertNull(restored.pendingLink)
+        assertEquals(true, restored.hasConflict)
+
+        val dismissed = ExternalImportConfirmationState()
+        dismissed.receiveInitialIntent(syntheticLink, restoredConflict = false)
+        assertNull(dismissed.pendingLink)
+        assertEquals(false, dismissed.hasConflict)
+    }
 }
