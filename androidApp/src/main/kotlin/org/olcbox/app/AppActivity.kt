@@ -20,6 +20,8 @@ import org.olcbox.app.ui.features.home.HomeScreenViewModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
 import org.olcbox.app.ui.theme.AppTheme
 import org.olcbox.app.net.AndroidRuntimeLocationPolicy
+import org.olcbox.app.net.AndroidExternalImportIntentPolicy
+import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.update.AppUpdateService
 import org.olcbox.app.vpn.AndroidVpnManager
 
@@ -86,12 +88,20 @@ class AppActivity : ComponentActivity() {
                 }
             }
         }
-        intent?.dataString?.let { pendingImportLink.value = it }
+        captureExternalImport(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.dataString?.let { pendingImportLink.value = it }
+        captureExternalImport(intent)
+    }
+
+    private fun captureExternalImport(incoming: Intent?) {
+        pendingImportLink.value = AndroidExternalImportIntentPolicy.allowedData(
+            incoming?.action,
+            incoming?.dataString,
+            AndroidRuntimeLocationPolicy.forApp(applicationContext) == RuntimeLocationPolicy.ExperimentalDebug
+        )
     }
 }
