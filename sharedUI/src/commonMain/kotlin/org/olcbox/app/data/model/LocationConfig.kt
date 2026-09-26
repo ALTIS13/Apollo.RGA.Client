@@ -687,6 +687,11 @@ data class LocationBundleV4(
      */
     @SerialName("vpn_disclosure_accepted_at")
     val vpnDisclosureAcceptedAt: Long? = null,
+    /** Separate Android Apollo notice; a legacy Ghostlane acceptance cannot cover its changed routing disclosure. */
+    @SerialName("apollo_vpn_disclosure_accepted_at")
+    val apolloVpnDisclosureAcceptedAt: Long? = null,
+    @SerialName("apollo_vpn_disclosure_version")
+    val apolloVpnDisclosureVersion: Int? = null,
     /**
      * When the first-run walkthrough was last completed or skipped, in epoch
      * millis; null until it has been, and null again after "replay first run".

@@ -47,6 +47,33 @@ class RoutingSettingsTest {
         assertTrue(source.stored?.locations.orEmpty().isEmpty())
     }
 
+    @Test fun legacyDisclosureDoesNotGrantVersionedApolloConsent() = runTest {
+        val source = MemoryLocationsDataSource()
+        val repository = LocationsRepositoryImpl(source)
+        repository.acceptVpnDisclosure(atMillis = 1_000L)
+        assertTrue(repository.isVpnDisclosureAccepted())
+        assertEquals(false, repository.isApolloVpnDisclosureAccepted())
+
+        repository.acceptApolloVpnDisclosure(atMillis = 2_000L)
+        repository.acceptApolloVpnDisclosure(atMillis = 3_000L)
+        assertTrue(repository.isApolloVpnDisclosureAccepted())
+        assertEquals(1_000L, source.stored?.vpnDisclosureAcceptedAt)
+        assertEquals(2_000L, source.stored?.apolloVpnDisclosureAcceptedAt)
+        assertEquals(1, source.stored?.apolloVpnDisclosureVersion)
+    }
+
+    @Test fun oldApolloNoticeVersionMustBeAcceptedAgain() = runTest {
+        val source = MemoryLocationsDataSource(stored = LocationBundleV4(
+            apolloVpnDisclosureAcceptedAt = 1_000L, apolloVpnDisclosureVersion = 0
+        ))
+        val repository = LocationsRepositoryImpl(source)
+        assertEquals(false, repository.isApolloVpnDisclosureAccepted())
+        repository.acceptApolloVpnDisclosure(atMillis = 2_000L)
+        assertEquals(true, repository.isApolloVpnDisclosureAccepted())
+        assertEquals(2_000L, source.stored?.apolloVpnDisclosureAcceptedAt)
+        assertEquals(1, source.stored?.apolloVpnDisclosureVersion)
+    }
+
     @Test fun legacyLocationsAreAdoptedWithoutDroppingTheSettings() = runTest {
         val source = MemoryLocationsDataSource(
             stored = LocationBundleV4(routing = RoutingSettings(RoutingMode.BypassRussia)),

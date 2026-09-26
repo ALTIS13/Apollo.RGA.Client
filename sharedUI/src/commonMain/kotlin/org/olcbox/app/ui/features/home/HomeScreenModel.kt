@@ -335,9 +335,28 @@ class HomeScreenViewModel(
     private val _vpnDisclosureAccepted = MutableStateFlow(false)
     val vpnDisclosureAccepted = _vpnDisclosureAccepted.asStateFlow()
 
+    // Null until the independent Apollo acknowledgement has been read from this device.
+    private val _apolloVpnDisclosureAccepted = MutableStateFlow<Boolean?>(null)
+    val apolloVpnDisclosureAccepted = _apolloVpnDisclosureAccepted.asStateFlow()
+
     fun acceptVpnDisclosure() {
         _vpnDisclosureAccepted.value = true
         viewModelScope.launch { locationsRepository.acceptVpnDisclosure(nowMillis()) }
+    }
+
+    suspend fun acceptApolloVpnDisclosure(): Boolean {
+        return try {
+            // The service checks persisted consent too. Do not signal acceptance or
+            // launch a tunnel until the write has actually completed.
+            locationsRepository.acceptApolloVpnDisclosure(nowMillis())
+            _apolloVpnDisclosureAccepted.value = true
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _state.update { it.copy(failure = getString(Res.string.connect_start_failed)) }
+            false
+        }
     }
 
     /**
@@ -377,6 +396,9 @@ class HomeScreenViewModel(
         }
         viewModelScope.launch {
             _vpnDisclosureAccepted.value = locationsRepository.isVpnDisclosureAccepted()
+        }
+        viewModelScope.launch {
+            _apolloVpnDisclosureAccepted.value = locationsRepository.isApolloVpnDisclosureAccepted()
         }
         viewModelScope.launch {
             _onboardingSeen.value = locationsRepository.isOnboardingSeen()

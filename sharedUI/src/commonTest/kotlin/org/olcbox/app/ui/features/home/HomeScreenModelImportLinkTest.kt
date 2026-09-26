@@ -65,6 +65,33 @@ class HomeScreenModelImportLinkTest {
     private val realityLink = "vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443" +
         "?security=reality&encryption=none&pbk=PUBKEY&sid=ab12&fp=chrome&sni=www.example.com&flow=xtls-rprx-vision&type=tcp#DE"
 
+    @Test fun viewModelDoesNotTreatLegacyDisclosureAsApolloAcknowledgement() = runTest {
+        source.stored = LocationBundleV4(vpnDisclosureAcceptedAt = 1_000L)
+        val vm = viewModel()
+        try {
+            assertEquals(false, withContext(Dispatchers.Default) { withTimeout(10_000) {
+                vm.apolloVpnDisclosureAccepted.first { it != null }
+            } })
+            assertEquals(true, vm.acceptApolloVpnDisclosure())
+            assertEquals(true, repository.isApolloVpnDisclosureAccepted())
+            assertEquals(true, vm.apolloVpnDisclosureAccepted.value)
+        } finally { vm.viewModelScope.cancel() }
+    }
+
+    @Test fun failedApolloAcknowledgementNeverEnablesAStart() = runTest {
+        source.stored = LocationBundleV4(vpnDisclosureAcceptedAt = 1_000L)
+        val vm = viewModel()
+        try {
+            withContext(Dispatchers.Default) { withTimeout(10_000) {
+                vm.apolloVpnDisclosureAccepted.first { it != null }
+            } }
+            source.failSave = true
+            assertEquals(false, vm.acceptApolloVpnDisclosure())
+            assertEquals(false, vm.apolloVpnDisclosureAccepted.value)
+            assertEquals(false, repository.isApolloVpnDisclosureAccepted())
+        } finally { vm.viewModelScope.cancel() }
+    }
+
     @Test fun selectedOnlyToggleBypassesPersistedLowestChoice() = runTest {
         source.stored = LocationBundleV4(
             activeLocationId = "one",
@@ -261,8 +288,12 @@ class HomeScreenModelImportLinkTest {
 }
 
 private class MemoryLocationsDataSource(var stored: LocationBundleV4? = null) : LocationsDataSource {
+    var failSave = false
     override suspend fun loadLocationBundle(): LocationBundleV4? = stored
-    override suspend fun saveLocationBundle(bundle: LocationBundleV4) { stored = bundle }
+    override suspend fun saveLocationBundle(bundle: LocationBundleV4) {
+        if (failSave) error("synthetic persistence failure")
+        stored = bundle
+    }
     override suspend fun loadLegacyLocations(): List<Pair<String, String>> = emptyList()
     override suspend fun loadLegacyActiveLocationId(): String? = null
 }

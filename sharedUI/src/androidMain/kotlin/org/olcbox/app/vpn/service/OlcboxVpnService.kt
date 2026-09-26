@@ -85,6 +85,7 @@ import org.olcbox.app.net.TunnelVerifier
 import org.olcbox.app.net.XrayConfig
 import org.olcbox.app.net.XrayJsonRuntimeConfig
 import org.olcbox.app.net.SubscriptionTunnelAccess
+import org.olcbox.app.net.ApolloVpnDisclosureGate
 import org.olcbox.app.vpn.AndroidConnectionMode
 import org.olcbox.app.vpn.AndroidSocksProxySettings
 import org.olcbox.app.vpn.AndroidSplitTunnelMode
@@ -536,6 +537,12 @@ class OlcboxVpnService : VpnService() {
                     if (requestedGeneration != generation) return@withLock
 
                     val bundle = repository.getBundle()
+                    ApolloVpnDisclosureGate.denial(bundle)?.let { denial ->
+                        setStatus(VpnStatus.Error(denial))
+                        updateNotification(denial)
+                        stopTransportProcesses(closeTun = true, waitForSocksPort = false)
+                        return@withLock
+                    }
                     val denial = SubscriptionTunnelAccess.denial(bundle, bundle.activeLocationId, System.currentTimeMillis(), runtimePolicy)
                     if (denial != null) {
                         setStatus(VpnStatus.Error(denial))

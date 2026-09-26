@@ -1,6 +1,5 @@
 package org.olcbox.app.ui.features.home
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,12 +44,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import multiplatform_app.sharedui.generated.resources.*
-import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.olcbox.app.data.model.LocationEntry
 import org.olcbox.app.net.LocationKind
 import org.olcbox.app.ui.HostPresentation
 import org.olcbox.app.ui.HostPresenter
+import org.olcbox.app.ui.ApolloOrbitMark
 import org.olcbox.app.ui.SubscriptionDisplayState
 import org.olcbox.app.ui.SubscriptionPresentation
 import org.olcbox.app.ui.features.locations.LocationItem
@@ -58,6 +57,8 @@ import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.formatDate
 
 /** Android's operating surface. It receives the repository's policy-filtered projection. */
+internal enum class ApolloConnectionNotice { NONE, FAILED, CHECKING, BLOCKED }
+
 @Composable
 internal fun ApolloHomeContent(
     locations: List<LocationItem>,
@@ -74,6 +75,8 @@ internal fun ApolloHomeContent(
     onSettings: () -> Unit,
     onLocationSelected: (String) -> Unit,
     snackbarHostState: SnackbarHostState,
+    notice: ApolloConnectionNotice = ApolloConnectionNotice.NONE,
+    onDismissNotice: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val ordinary = locations.mapNotNull { item ->
@@ -107,8 +110,10 @@ internal fun ApolloHomeContent(
     }
     val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED, SubscriptionDisplayState.LIMITED)
     val actionEnabled = isConnected || isConnecting || (canStartVpn && !accessBlocked && selectedLocationId != null)
+    val unknownCountry = stringResource(Res.string.apollo_country_unknown)
     val route = when {
-        selected?.relay != null -> stringResource(Res.string.apollo_route_configured, selected.country)
+        selected?.relay != null -> stringResource(Res.string.apollo_route_configured,
+            localizedCountry(selected.country, unknownCountry))
         else -> stringResource(Res.string.apollo_route_unknown)
     }
 
@@ -121,11 +126,7 @@ internal fun ApolloHomeContent(
                 modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Image(
-                    painter = painterResource(Res.drawable.apollo_orbit),
-                    contentDescription = null,
-                    modifier = Modifier.size(36.dp)
-                )
+                ApolloOrbitMark(Modifier.size(36.dp))
                 Text(
                     text = "Apollo.RGA",
                     style = MaterialTheme.typography.titleLarge,
@@ -173,6 +174,22 @@ internal fun ApolloHomeContent(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.semantics { testTag = "apollo-subscription-status" }
                     )
+                    if (notice != ApolloConnectionNotice.NONE) {
+                        val noticeText = when (notice) {
+                            ApolloConnectionNotice.FAILED -> stringResource(Res.string.apollo_connection_failed)
+                            ApolloConnectionNotice.CHECKING -> stringResource(Res.string.apollo_connection_checking)
+                            ApolloConnectionNotice.BLOCKED -> stringResource(Res.string.apollo_connection_blocked)
+                            ApolloConnectionNotice.NONE -> ""
+                        }
+                        Text(noticeText, style = MaterialTheme.typography.bodyMedium,
+                            color = if (notice == ApolloConnectionNotice.FAILED) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (notice == ApolloConnectionNotice.FAILED) {
+                            TextButton(onClick = onDismissNotice, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
+                                Text(stringResource(Res.string.apollo_dismiss))
+                            }
+                        }
+                    }
                     subscription.expiresAtEpochMs?.let {
                         Text(stringResource(Res.string.apollo_expires, formatDate(it)),
                             style = MaterialTheme.typography.bodyMedium)
@@ -234,7 +251,8 @@ internal fun ApolloHomeContent(
                 experimental.forEachIndexed { index, item ->
                     Surface(
                         modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 56.dp)
-                            .clickable(role = Role.RadioButton) { onLocationSelected(item.storageId) },
+                            .selectable(selected = item.storageId == selectedLocationId,
+                                role = Role.RadioButton, onClick = { onLocationSelected(item.storageId) }),
                         color = if (item.storageId == selectedLocationId) MaterialTheme.colorScheme.secondaryContainer
                             else MaterialTheme.colorScheme.surfaceContainer
                     ) {
@@ -248,7 +266,12 @@ internal fun ApolloHomeContent(
     }
 }
 
-private fun destination(host: HostPresentation): String = listOf(host.flag, host.country)
+private fun localizedCountry(country: String, fallback: String): String =
+    if (country == "Страна не указана") fallback else country
+
+@Composable
+private fun destination(host: HostPresentation): String = listOf(
+    host.flag, localizedCountry(host.country, stringResource(Res.string.apollo_country_unknown)))
     .filter(String::isNotBlank).joinToString(" ")
 
 @Composable
@@ -265,13 +288,19 @@ private fun ApolloHostRow(
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        val country = localizedCountry(host.country, stringResource(Res.string.apollo_country_unknown))
+        val name = if (host.name == "Хост без названия") stringResource(Res.string.apollo_host_unknown)
+            else host.name
+        val protocol = if (host.protocol == "Протокол не указан")
+            stringResource(Res.string.apollo_protocol_unknown) else host.protocol
+        val relay = host.relay?.let { stringResource(Res.string.apollo_via_ru_relay) }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(destination(host), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            if (host.name != host.country) {
-                Text(host.name, style = MaterialTheme.typography.bodyMedium,
+            if (name != country) {
+                Text(name, style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(listOfNotNull(host.protocol, host.relay).joinToString(" · "),
+            Text(listOfNotNull(protocol, relay).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             host.purpose?.let { Text(it, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant) }

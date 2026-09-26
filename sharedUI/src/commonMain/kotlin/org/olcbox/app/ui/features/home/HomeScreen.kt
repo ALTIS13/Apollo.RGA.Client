@@ -2,6 +2,9 @@ package org.olcbox.app.ui.features.home
 
 import org.olcbox.app.ui.components.kit.boardWords
 import multiplatform_app.sharedui.generated.resources.Res
+import multiplatform_app.sharedui.generated.resources.apollo_experimental
+import multiplatform_app.sharedui.generated.resources.apollo_country_unknown
+import multiplatform_app.sharedui.generated.resources.apollo_background_notice
 import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.action_cancel
 import multiplatform_app.sharedui.generated.resources.action_remove
@@ -77,6 +80,7 @@ import org.olcbox.app.ui.features.home.components.locationDisplayParts
 import org.olcbox.app.ui.features.home.components.pingFor
 import org.olcbox.app.ui.features.home.components.rememberBoardModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
+import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.ui.features.onboarding.OnboardingScreen
 import org.olcbox.app.ui.features.onboarding.ApolloOnboardingScreen
 import org.olcbox.app.ui.HostPresenter
@@ -96,6 +100,44 @@ import org.olcbox.app.util.nowMillis
  *
  * Everything here is state and effects; the layout itself is `HomeScreenContent`.
  */
+internal fun requiresVpnDisclosure(
+    isAndroid: Boolean,
+    legacyAccepted: Boolean,
+    apolloAccepted: Boolean,
+    isConnected: Boolean,
+    isConnecting: Boolean
+): Boolean = !isConnected && !isConnecting &&
+    (if (isAndroid) !apolloAccepted else !legacyAccepted)
+
+internal fun autoConnectMayStart(isAndroid: Boolean, apolloAccepted: Boolean?): Boolean =
+    !isAndroid || apolloAccepted == true
+
+internal data class ManualRefreshFailure(
+    val error: SubscriptionRefreshError,
+    val lastSuccessfulRefreshAt: Long?
+) {
+    fun currentError(lastSuccessfulRefreshAt: Long?): SubscriptionRefreshError? =
+        error.takeIf { this.lastSuccessfulRefreshAt == lastSuccessfulRefreshAt }
+}
+
+internal fun reconnectingLocationLabel(
+    item: LocationItem,
+    isAndroid: Boolean,
+    experimentalLabel: String,
+    unknownCountryLabel: String
+): String? {
+    if (!isAndroid) return locationDisplayParts(item).second
+    val config = item.config ?: return null
+    if (config.kind == LocationKind.Olcrtc) return experimentalLabel
+    return HostPresenter.present(LocationEntry.from(item.storageId, config, item.subscriptionUrl,
+        item.subscriptionOriginLink, item.metadata))?.let { host ->
+        "${host.flag} ${if (host.country == "Страна не указана") unknownCountryLabel else host.country}".trim()
+    }
+}
+
+internal fun visibleBackgroundNotice(isAndroid: Boolean, rawNotice: String, androidLabel: String): String =
+    if (isAndroid) androidLabel else rawNotice
+
 @Composable
 fun HomeScreen(
     viewModel: HomeScreenViewModel,
@@ -124,7 +166,7 @@ fun HomeScreen(
     var isAddSheetOpen by remember { mutableStateOf(false) }
     var isRefreshingSubscriptions by remember { mutableStateOf(false) }
     var refreshingSubscriptionUrl by remember { mutableStateOf<String?>(null) }
-    var refreshErrors by remember { mutableStateOf<Map<String, SubscriptionRefreshError>>(emptyMap()) }
+    var refreshErrors by remember { mutableStateOf<Map<String, ManualRefreshFailure>>(emptyMap()) }
     var showAdminDialog by remember { mutableStateOf(false) }
     var lowestMeasureRequest by remember { mutableStateOf(0L) }
     // Asked once per launch, before the system's own prompt. On iOS that prompt
@@ -237,6 +279,7 @@ fun HomeScreen(
     }
 
     val vpnDisclosureAccepted by viewModel.vpnDisclosureAccepted.collectAsState()
+    val apolloVpnDisclosureAccepted by viewModel.apolloVpnDisclosureAccepted.collectAsState()
     var showVpnDisclosure by remember { mutableStateOf(false) }
 
     // Removing something is one tap away on the board now, so it asks first. Both
@@ -299,13 +342,21 @@ fun HomeScreen(
         if (after != before) viewModel.restartVpnIfRunning()
     }
 
+    fun lastSuccessfulRefreshAt(url: String): Long? = locations.firstOrNull {
+        it.subscriptionUrl?.trim() == url.trim()
+    }?.metadata?.subscription?.lastRefreshAtEpochMs
+
     fun refreshSubscriptions() {
         isRefreshingSubscriptions = true
         val activeBefore = activeLocationConfig()
         viewModel.refreshSubscriptions { report ->
             locationViewModel.loadLocations {
                 isRefreshingSubscriptions = false
-                refreshErrors = report.failures.associate { it.url to it.error }
+                refreshErrors = report.failures.associate { failure ->
+                    failure.url.trim() to ManualRefreshFailure(
+                        failure.error, lastSuccessfulRefreshAt(failure.url)
+                    )
+                }
                 restartIfActiveChanged(activeBefore)
                 scope.launch { snackbarHostState.showSnackbar(report.localizedBulkMessage()) }
             }
@@ -319,7 +370,10 @@ fun HomeScreen(
             locationViewModel.loadLocations {
                 refreshingSubscriptionUrl = null
                 val failure = report.failures.firstOrNull { it.url == url }?.error
-                refreshErrors = if (failure == null) refreshErrors - url else refreshErrors + (url to failure)
+                refreshErrors = if (failure == null) refreshErrors - url.trim()
+                    else refreshErrors + (url.trim() to ManualRefreshFailure(
+                        failure, lastSuccessfulRefreshAt(url)
+                    ))
                 restartIfActiveChanged(activeBefore)
                 scope.launch { snackbarHostState.showSnackbar(report.localizedSingleMessage()) }
             }
@@ -411,7 +465,7 @@ fun HomeScreen(
     // What the app does on its own when it opens. Each is off unless asked for:
     // connecting without being told to is not a default anyone should inherit.
     var launchActionsDone by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(subscriptionSettingsLoaded, locations.isEmpty(), launchActionsDone) {
+    LaunchedEffect(subscriptionSettingsLoaded, locations.isEmpty(), launchActionsDone, apolloVpnDisclosureAccepted) {
         // Only once the stored settings have actually arrived: the first value is
         // a default object, and acting on it would ignore what the user chose.
         //
@@ -419,7 +473,8 @@ fun HomeScreen(
         // the location list, so "ping on launch" fired against an empty list,
         // found nothing measurable and announced that instead — which is exactly
         // what "the checkbox does nothing" looks like from outside.
-        if (launchActionsDone || !subscriptionSettingsLoaded || locations.isEmpty()) {
+        if (launchActionsDone || !subscriptionSettingsLoaded || locations.isEmpty() ||
+            (isAndroid && apolloVpnDisclosureAccepted == null)) {
             return@LaunchedEffect
         }
         val settings = subscriptionSettings
@@ -427,14 +482,19 @@ fun HomeScreen(
         if (settings.refreshOnOpen && hasSubscriptions) refreshSubscriptions()
         if (settings.pingOnLaunch) refreshHttpPings()
         if (settings.connectOnLaunch && state.canStartVpn && !state.isVpnConnected) {
-            if (isAndroid) viewModel.requestSelectedOnlyForNextToggle()
-            onToggleClick()
+            if (!autoConnectMayStart(isAndroid, apolloVpnDisclosureAccepted)) {
+                showVpnDisclosure = true
+            } else {
+                if (isAndroid) viewModel.requestSelectedOnlyForNextToggle()
+                onToggleClick()
+            }
         }
     }
 
-    LaunchedEffect(Unit) {
+    val androidBackgroundNotice = stringResource(Res.string.apollo_background_notice)
+    LaunchedEffect(isAndroid, androidBackgroundNotice) {
         viewModel.autoRefreshNotice.collect { message ->
-            snackbarHostState.showSnackbar(message)
+            snackbarHostState.showSnackbar(visibleBackgroundNotice(isAndroid, message, androidBackgroundNotice))
         }
     }
 
@@ -461,12 +521,10 @@ fun HomeScreen(
         pingsState = pingsState
     )
     val lowestActive = selectedItem?.subscriptionUrl?.trim()?.let { it in lowestSubscriptionUrls } == true
+    val experimentalReconnectionLabel = stringResource(Res.string.apollo_experimental)
+    val unknownReconnectionCountry = stringResource(Res.string.apollo_country_unknown)
     val actualSelectedName = selectedItem?.let { item ->
-        val config = item.config
-        if (!isAndroid || config == null || config.kind == LocationKind.Olcrtc) locationDisplayParts(item).second
-        else HostPresenter.present(LocationEntry.from(item.storageId, config, item.subscriptionUrl,
-            item.subscriptionOriginLink, item.metadata))?.let { "${it.flag} ${it.country}".trim() }
-            ?: "Host"
+        reconnectingLocationLabel(item, isAndroid, experimentalReconnectionLabel, unknownReconnectionCountry)
     }
     val selectedName = if (lowestActive) {
         stringResource(Res.string.lowest_selected, actualSelectedName.orEmpty())
@@ -533,7 +591,8 @@ fun HomeScreen(
     fun handlePrimaryAction() {
         when {
             requiresSetup -> isAddSheetOpen = true
-            !vpnDisclosureAccepted && !state.isVpnConnected -> showVpnDisclosure = true
+            requiresVpnDisclosure(isAndroid, vpnDisclosureAccepted, apolloVpnDisclosureAccepted == true,
+                state.isVpnConnected, state.isVpnLoading) -> showVpnDisclosure = true
             else -> startVisibleConnection()
         }
     }
@@ -542,13 +601,8 @@ fun HomeScreen(
         viewModel.cancelAutomaticSelection()
         val wasConnected = state.isVpnConnected
         val target = locations.firstOrNull { it.storageId == id }
-        val name = target?.let { item ->
-            val config = item.config
-            if (!isAndroid || config == null || config.kind == LocationKind.Olcrtc) locationDisplayParts(item).second
-            else HostPresenter.present(LocationEntry.from(item.storageId, config, item.subscriptionUrl,
-                item.subscriptionOriginLink, item.metadata))?.let { "${it.flag} ${it.country}".trim() }
-                ?: "Host"
-        }
+        val name = target?.let { reconnectingLocationLabel(it, isAndroid,
+            experimentalReconnectionLabel, unknownReconnectionCountry) }
         val settings = subscriptionSettings.withLowestEnabled(
             target?.subscriptionUrl,
             enabled = false,
@@ -576,8 +630,14 @@ fun HomeScreen(
             apolloCopy = isAndroid,
             onAccept = {
                 showVpnDisclosure = false
-                viewModel.acceptVpnDisclosure()
-                startVisibleConnection()
+                if (isAndroid) {
+                    scope.launch {
+                        if (viewModel.acceptApolloVpnDisclosure()) startVisibleConnection()
+                    }
+                } else {
+                    viewModel.acceptVpnDisclosure()
+                    startVisibleConnection()
+                }
             },
             onDecline = { showVpnDisclosure = false }
         )
@@ -594,11 +654,20 @@ fun HomeScreen(
             subscription = SubscriptionPresenter.present(
                 selectedItem?.metadata?.subscription,
                 subscriptionNow.value,
-                selectedItem?.subscriptionUrl?.let { refreshErrors[it] }
+                selectedItem?.subscriptionUrl?.trim()?.let { url ->
+                    refreshErrors[url]?.currentError(selectedItem.metadata?.subscription?.lastRefreshAtEpochMs)
+                }
             ),
             isConnected = state.isVpnConnected,
             isConnecting = state.isVpnLoading,
             canStartVpn = state.canStartVpn,
+            notice = when {
+                state.failure != null -> ApolloConnectionNotice.FAILED
+                state.progress != null -> ApolloConnectionNotice.CHECKING
+                selectedItem != null && !state.canStartVpn -> ApolloConnectionNotice.BLOCKED
+                else -> ApolloConnectionNotice.NONE
+            },
+            onDismissNotice = viewModel::dismissFailure,
             isRefreshing = isRefreshingSubscriptions,
             showSettings = showAppSettingsButton,
             onAction = ::handlePrimaryAction,

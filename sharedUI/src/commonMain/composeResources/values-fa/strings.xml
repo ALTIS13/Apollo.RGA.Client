@@ -493,6 +493,11 @@
     <string name="apollo_connect">اتصال</string>
     <string name="apollo_disconnect">قطع اتصال</string>
     <string name="apollo_cancel">لغو اتصال</string>
+    <string name="apollo_connection_failed">اتصال ناموفق بود. مقصد را بررسی کنید یا دوباره تلاش کنید.</string>
+    <string name="apollo_connection_checking">در حال بررسی اتصال…</string>
+    <string name="apollo_connection_blocked">اتصال به این مقصد ممکن نیست. مقصد دیگری انتخاب کنید.</string>
+    <string name="apollo_dismiss">بستن</string>
+    <string name="apollo_background_notice">اطلاعات اتصال تغییر کرد. وضعیت فعلی را بررسی کنید.</string>
     <string name="apollo_refresh">به‌روزرسانی اشتراک</string>
     <string name="apollo_add">افزودن اشتراک</string>
     <string name="apollo_settings">تنظیمات</string>
@@ -502,6 +507,10 @@
     <string name="apollo_no_hosts">برای دیدن مقصدهای موجود، اشتراک فعلی خود را اضافه کنید.</string>
     <string name="apollo_route_configured">مسیر پیکربندی‌شده: دستگاه ← RU Relay ← %1$s</string>
     <string name="apollo_route_unknown">مسیر تأیید نشده است</string>
+    <string name="apollo_country_unknown">کشور مشخص نشده است</string>
+    <string name="apollo_host_unknown">گرهٔ بدون نام</string>
+    <string name="apollo_protocol_unknown">پروتکل مشخص نشده است</string>
+    <string name="apollo_via_ru_relay">از طریق RU Relay</string>
     <string name="apollo_experimental">حالت آزمایشی</string>
     <string name="apollo_experimental_node">گرهٔ آزمایشی %1$d</string>
     <string name="apollo_experimental_note">حالت آزمایش جداگانه برای شبکهٔ محدود؛ مقصد خروجی عادی نیست.</string>

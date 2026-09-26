@@ -1,6 +1,5 @@
 package org.olcbox.app.ui.features.onboarding
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
@@ -22,8 +21,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import multiplatform_app.sharedui.generated.resources.*
-import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
+import org.olcbox.app.ui.ApolloOrbitMark
 
 /** The Android first-run introduction; VPN permission stays in its separate disclosure. */
 @Composable
@@ -38,11 +37,7 @@ fun ApolloOnboardingScreen(
                 .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Image(
-                painter = painterResource(Res.drawable.apollo_orbit),
-                contentDescription = null,
-                modifier = Modifier.size(76.dp)
-            )
+            ApolloOrbitMark(Modifier.size(76.dp))
             Text("Apollo.RGA", style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.primary)
             Text(stringResource(Res.string.apollo_onboarding_title), style = MaterialTheme.typography.headlineLarge)

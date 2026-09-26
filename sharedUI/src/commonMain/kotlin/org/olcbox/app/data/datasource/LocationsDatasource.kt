@@ -39,6 +39,7 @@ import org.olcbox.app.data.model.RoutingSettings
 import org.olcbox.app.data.model.LocationMetadata
 import org.olcbox.app.data.model.SubscriptionMetadata
 import org.olcbox.app.data.repository.LocationsRepository
+import org.olcbox.app.data.repository.APOLLO_VPN_DISCLOSURE_VERSION
 import org.olcbox.app.net.HttpPartnerLinkResolver
 import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.PartnerLinkResolver
@@ -666,6 +667,24 @@ class LocationsRepositoryImpl(
             // move it forward.
             if (bundle.vpnDisclosureAcceptedAt == null) {
                 saveBundleUnlocked(bundle.copy(vpnDisclosureAcceptedAt = atMillis))
+            }
+        }
+    }
+
+    override suspend fun isApolloVpnDisclosureAccepted(): Boolean = getBundle().let { bundle ->
+        bundle.apolloVpnDisclosureVersion == APOLLO_VPN_DISCLOSURE_VERSION &&
+            bundle.apolloVpnDisclosureAcceptedAt != null
+    }
+
+    override suspend fun acceptApolloVpnDisclosure(atMillis: Long) {
+        mutationMutex.withLock {
+            val bundle = getBundleUnlocked()
+            if (bundle.apolloVpnDisclosureVersion != APOLLO_VPN_DISCLOSURE_VERSION ||
+                bundle.apolloVpnDisclosureAcceptedAt == null) {
+                saveBundleUnlocked(bundle.copy(
+                    apolloVpnDisclosureAcceptedAt = atMillis,
+                    apolloVpnDisclosureVersion = APOLLO_VPN_DISCLOSURE_VERSION
+                ))
             }
         }
     }

@@ -7,6 +7,9 @@ import org.olcbox.app.data.model.LocationEntry
 import org.olcbox.app.data.model.SubscriptionSettings
 import org.olcbox.app.data.model.RoutingSettings
 
+/** Bump whenever the Android Apollo VPN notice changes materially. */
+const val APOLLO_VPN_DISCLOSURE_VERSION = 1
+
 interface LocationsRepository {
     val changes: StateFlow<Long>
     /** Runtime projection only; never save it in place of the complete stored bundle. */
@@ -73,6 +76,10 @@ interface LocationsRepository {
      */
     suspend fun isVpnDisclosureAccepted(): Boolean
     suspend fun acceptVpnDisclosure(atMillis: Long)
+
+    /** Independent versioned acknowledgement for Android Apollo's split-routing notice. */
+    suspend fun isApolloVpnDisclosureAccepted(): Boolean = false
+    suspend fun acceptApolloVpnDisclosure(atMillis: Long) = Unit
 
     /**
      * Whether the first-run walkthrough has already been shown on this device.

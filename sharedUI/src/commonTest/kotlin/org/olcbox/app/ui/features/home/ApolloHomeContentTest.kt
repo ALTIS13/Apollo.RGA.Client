@@ -5,6 +5,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -81,6 +82,48 @@ class ApolloHomeContentTest {
         onNodeWithText("room-secret").assertDoesNotExist()
     }
 
+    @Test fun selectedExperimentalNodeExposesRadioSelection() = runComposeUiTest {
+        val room = LocationItem(
+            storageId = "synthetic-room", fullName = "private label",
+            config = LocationConfig(name = "private label", id = "room", key = "secret")
+        )
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(room), selectedLocationId = room.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Experimental node 1").assertIsSelected()
+    }
+
+    @Test fun unsafeUnlocalizedHostFallbackUsesTheCurrentUiLanguage() = runComposeUiTest {
+        val unsafe = LocationItem(
+            storageId = "synthetic-unknown", fullName = "token SECRET_VALUE",
+            config = LocationConfig(name = "token SECRET_VALUE", kind = LocationKind.Vless)
+        )
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(unsafe), selectedLocationId = unsafe.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onAllNodesWithText("Country not specified").assertCountEquals(2)
+        onNodeWithText("Unnamed host").assertExists()
+        onNodeWithText("Страна не указана").assertDoesNotExist()
+        onNodeWithText("Хост без названия").assertDoesNotExist()
+        onNodeWithText("SECRET_VALUE").assertDoesNotExist()
+    }
+
     @Test fun knownExpiryAndQuotaAreShownWithoutInventingUnlimitedQuota() = runComposeUiTest {
         setContent {
             MaterialTheme {
@@ -114,5 +157,26 @@ class ApolloHomeContentTest {
         }
         onNodeWithText("Subscription expired").assertExists()
         onNodeWithText("Connect").assertIsNotEnabled()
+    }
+
+    @Test fun failedStartHasSafeRecoveryWithoutPrintingRawException() = runComposeUiTest {
+        var dismissed = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState(),
+                    notice = ApolloConnectionNotice.FAILED,
+                    onDismissNotice = { dismissed++ }
+                )
+            }
+        }
+        onNodeWithText("Connection failed. Check this destination or try again.").assertExists()
+        onNodeWithText("Dismiss").performClick()
+        assertEquals(1, dismissed)
+        onNodeWithText("Connect").assertExists()
     }
 }

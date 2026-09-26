@@ -493,6 +493,11 @@
     <string name="apollo_connect">连接</string>
     <string name="apollo_disconnect">断开连接</string>
     <string name="apollo_cancel">取消连接</string>
+    <string name="apollo_connection_failed">连接失败。请检查目的地或重试。</string>
+    <string name="apollo_connection_checking">正在检查连接…</string>
+    <string name="apollo_connection_blocked">无法连接此目的地。请选择其他目的地。</string>
+    <string name="apollo_dismiss">关闭</string>
+    <string name="apollo_background_notice">连接信息已更改。请查看当前状态。</string>
     <string name="apollo_refresh">刷新订阅</string>
     <string name="apollo_add">添加订阅</string>
     <string name="apollo_settings">设置</string>
@@ -502,6 +507,10 @@
     <string name="apollo_no_hosts">添加现有订阅以查看可用目的地。</string>
     <string name="apollo_route_configured">配置的路由：设备 → RU Relay → %1$s</string>
     <string name="apollo_route_unknown">路由尚未验证</string>
+    <string name="apollo_country_unknown">未指定国家</string>
+    <string name="apollo_host_unknown">未命名节点</string>
+    <string name="apollo_protocol_unknown">未指定协议</string>
+    <string name="apollo_via_ru_relay">经由 RU Relay</string>
     <string name="apollo_experimental">实验模式</string>
     <string name="apollo_experimental_node">实验节点 %1$d</string>
     <string name="apollo_experimental_note">单独的受限网络测试模式，不是普通出口目的地。</string>

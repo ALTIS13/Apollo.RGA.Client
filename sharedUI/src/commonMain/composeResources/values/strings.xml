@@ -493,6 +493,11 @@
     <string name="apollo_connect">Connect</string>
     <string name="apollo_disconnect">Disconnect</string>
     <string name="apollo_cancel">Cancel connection</string>
+    <string name="apollo_connection_failed">Connection failed. Check this destination or try again.</string>
+    <string name="apollo_connection_checking">Checking connection…</string>
+    <string name="apollo_connection_blocked">This destination cannot start. Choose another destination.</string>
+    <string name="apollo_dismiss">Dismiss</string>
+    <string name="apollo_background_notice">Connection information changed. Check current status.</string>
     <string name="apollo_refresh">Refresh subscription</string>
     <string name="apollo_add">Add subscription</string>
     <string name="apollo_settings">Settings</string>
@@ -502,6 +507,10 @@
     <string name="apollo_no_hosts">Add your existing subscription to see available destinations.</string>
     <string name="apollo_route_configured">Configured route: device → RU Relay → %1$s</string>
     <string name="apollo_route_unknown">Route not verified</string>
+    <string name="apollo_country_unknown">Country not specified</string>
+    <string name="apollo_host_unknown">Unnamed host</string>
+    <string name="apollo_protocol_unknown">Protocol not specified</string>
+    <string name="apollo_via_ru_relay">via RU Relay</string>
     <string name="apollo_experimental">Experimental mode</string>
     <string name="apollo_experimental_node">Experimental node %1$d</string>
     <string name="apollo_experimental_note">Separate restricted-network test mode; not an ordinary destination.</string>

@@ -493,6 +493,11 @@
     <string name="apollo_connect">Подключиться</string>
     <string name="apollo_disconnect">Отключиться</string>
     <string name="apollo_cancel">Отменить подключение</string>
+    <string name="apollo_connection_failed">Не удалось подключиться. Проверьте выбранную страну или повторите попытку.</string>
+    <string name="apollo_connection_checking">Проверяем подключение…</string>
+    <string name="apollo_connection_blocked">К этой стране сейчас нельзя подключиться. Выберите другую.</string>
+    <string name="apollo_dismiss">Скрыть</string>
+    <string name="apollo_background_notice">Сведения о подключении изменились. Проверьте текущий статус.</string>
     <string name="apollo_refresh">Обновить подписку</string>
     <string name="apollo_add">Добавить подписку</string>
     <string name="apollo_settings">Настройки</string>
@@ -502,6 +507,10 @@
     <string name="apollo_no_hosts">Добавьте действующую подписку, чтобы увидеть страны выхода.</string>
     <string name="apollo_route_configured">Маршрут по настройке: устройство → RU Relay → %1$s</string>
     <string name="apollo_route_unknown">Маршрут не подтверждён</string>
+    <string name="apollo_country_unknown">Страна не указана</string>
+    <string name="apollo_host_unknown">Хост без названия</string>
+    <string name="apollo_protocol_unknown">Протокол не указан</string>
+    <string name="apollo_via_ru_relay">через RU Relay</string>
     <string name="apollo_experimental">Экспериментальный режим</string>
     <string name="apollo_experimental_node">Экспериментальный узел %1$d</string>
     <string name="apollo_experimental_note">Отдельный тестовый режим для ограниченной сети, не обычная страна выхода.</string>
