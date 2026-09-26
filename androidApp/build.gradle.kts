@@ -164,6 +164,7 @@ kotlin {
 
 dependencies {
     implementation(project(":sharedUI"))
+    implementation("androidx.startup:startup-runtime:1.1.1")
     // The gomobile binding is an isolated experimental transport. Ordinary
     // release variants must neither build nor package it.
     debugImplementation(project(":sharedUI:olcrtc-bin"))

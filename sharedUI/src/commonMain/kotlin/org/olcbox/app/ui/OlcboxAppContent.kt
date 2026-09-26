@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import org.olcbox.app.admin.AdminState
 import org.olcbox.app.data.model.LocationConfig
 import org.olcbox.app.ui.features.home.HomeScreen
+import org.olcbox.app.ui.features.home.ApolloHeroPhase
 import org.olcbox.app.ui.features.home.HomeScreenViewModel
 import org.olcbox.app.ui.features.locations.LocationSettingsScreen
 import org.olcbox.app.ui.features.locations.LocationViewModel
@@ -33,6 +34,8 @@ fun OlcboxAppContent(
     onShareLocationRequested: (LocationConfig) -> Unit = {},
     onSaveLogsRequested: (onSaved: (String) -> Unit, onError: (String) -> Unit) -> Unit,
     showAppSettingsButton: Boolean,
+    ambientMotionEnabled: Boolean = false,
+    routeMotion: (@Composable (ApolloHeroPhase, androidx.compose.ui.Modifier) -> Boolean)? = null,
     onGetSubscriptionClick: () -> Unit = {},
     showGetSubscription: Boolean = true,
     /**
@@ -94,6 +97,8 @@ fun OlcboxAppContent(
                     onImportFromPhoneRequested = onImportFromPhoneRequested,
                     onSaveLogsRequested = onSaveLogsRequested,
                     showAppSettingsButton = showAppSettingsButton,
+                    ambientMotionEnabled = ambientMotionEnabled,
+                    routeMotion = routeMotion,
                     onGetSubscriptionClick = onGetSubscriptionClick,
                     showGetSubscription = showGetSubscription,
                     showCustomLocation = showCustomLocation,

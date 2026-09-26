@@ -345,6 +345,7 @@ kotlin {
         } }
 
         androidMain.dependencies {
+            implementation("app.rive:rive-android:11.9.2")
             implementation(libs.androidx.activityCompose)
             implementation(libs.androidx.core)
             implementation(libs.androidx.camera.camera2)

@@ -376,6 +376,10 @@
     <string name="settings_server_lists_sharing">Server lists and sharing</string>
     <string name="settings_essentials">Essentials</string>
     <string name="settings_advanced">Advanced</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_ambient_motion">Decorative animations</string>
+    <string name="settings_ambient_motion_value">Only while the app is open</string>
+    <string name="settings_ambient_motion_system_off">Disabled by Android</string>
     <string name="settings_advanced_connection">Advanced connection</string>
     <string name="settings_share_access_qr">Share access · QR</string>
     <string name="settings_share_access_warning">A QR code or link may give someone access to this server list. Share only with people you trust.</string>
@@ -506,6 +510,12 @@
     <string name="apollo_usage_unknown">Remaining traffic data is unavailable</string>
     <string name="apollo_connected">Connected</string>
     <string name="apollo_connecting">Connecting…</string>
+    <string name="apollo_reconnecting">Reconnecting…</string>
+    <string name="apollo_link_idle">RGA // OFFLINE · CHANNEL INACTIVE</string>
+    <string name="apollo_link_connecting">RGA // CONNECTING · OPENING CHANNEL</string>
+    <string name="apollo_link_connected">RGA // ONLINE · CHANNEL ACTIVE</string>
+    <string name="apollo_link_reconnecting">RGA // RECOVERING · RESTORING CHANNEL</string>
+    <string name="apollo_link_failed">RGA // INTERRUPTED · NO CONNECTION</string>
     <string name="apollo_disconnected">Not connected</string>
     <string name="apollo_connect">Connect</string>
     <string name="apollo_disconnect">Disconnect</string>

@@ -37,6 +37,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.runtime.collectAsState
@@ -47,6 +48,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
 import org.olcbox.app.admin.AdminState
 import org.olcbox.app.data.share.ConfigShareService
@@ -60,6 +64,8 @@ import org.olcbox.app.update.isDownloaded
 import org.olcbox.app.update.isUpdateCheckDue
 import org.olcbox.app.update.shouldShowOffer
 import org.olcbox.app.ui.OlcboxAppContent
+import org.olcbox.app.ui.motion.AndroidAmbientMotionPreferences
+import org.olcbox.app.ui.motion.ApolloRiveRouteMotion
 import org.olcbox.app.ui.components.ApplicationUpdateOfferSheet
 import org.olcbox.app.ui.features.home.HomeScreenViewModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
@@ -103,6 +109,23 @@ fun AndroidMainScreen(
     }
 
     val context = LocalContext.current
+    val motionPreferences = remember(context) { AndroidAmbientMotionPreferences(context) }
+    val systemAnimationsEnabled = AndroidAmbientMotionPreferences.systemAnimationsEnabled(context)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var appResumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> appResumed = true
+                Lifecycle.Event.ON_PAUSE -> appResumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     // A TV has no camera to scan with and no clipboard worth the name: it takes a
     // server list from a phone on the same network instead.
     val television = remember(context) { context.isTelevision() }
@@ -418,6 +441,10 @@ fun AndroidMainScreen(
             logSaveLauncher.launch(viewModel.suggestedLogsFileName())
         },
         showAppSettingsButton = true,
+        ambientMotionEnabled = AndroidAmbientMotionPreferences.effective(
+            motionPreferences.userEnabled, systemAnimationsEnabled
+        ) && appResumed && currentScreenRoute == "home" && !isAppSettingsOpen,
+        routeMotion = { phase, modifier -> ApolloRiveRouteMotion(phase, modifier) },
         onGetSubscriptionClick = {
             Toast.makeText(context, enrollmentUnavailableText, Toast.LENGTH_SHORT).show()
         },
@@ -502,6 +529,9 @@ fun AndroidMainScreen(
             onSubscriptionSettingsChanged = viewModel::updateSubscriptionSettings,
             routingSettings = routingSettings,
             onRoutingSettingsChanged = viewModel::updateRoutingSettings,
+            ambientAnimationsEnabled = motionPreferences.userEnabled,
+            systemAnimationsEnabled = systemAnimationsEnabled,
+            onAmbientAnimationsEnabledChange = motionPreferences::setUserEnabled,
             enabled = !homeState.isVpnLoading,
             isConnectionActive = homeState.isVpnConnected,
             onDismiss = {

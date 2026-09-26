@@ -107,6 +107,8 @@ class ApolloHomeContentTest {
         }
         onAllNodesWithText("🇫🇮 Finland").assertCountEquals(2)
         onNodeWithText("Subscription active").assertExists()
+        onNodeWithText("RGA // OFFLINE · CHANNEL INACTIVE").assertExists()
+        onNodeWithText("→", useUnmergedTree = true).assertDoesNotExist()
         onNodeWithText("Route not verified").assertExists()
         onNodeWithText("Connect").performClick()
         assertEquals(1, connects)
@@ -382,5 +384,85 @@ class ApolloHomeContentTest {
         onNodeWithText("Dismiss").performClick()
         assertEquals(1, dismissed)
         onNodeWithText("Connect").assertExists()
+    }
+
+    @Test fun ambientOrbitDisappearsWhenMotionIsDisabled() = runComposeUiTest {
+        val ambientEnabled = mutableStateOf(true)
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(dutchWeb), selectedLocationId = dutchWeb.storageId,
+                    subscription = active, isConnected = false, isConnecting = true,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = ambientEnabled.value,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithTag("apollo-ambient-orbit").assertExists()
+        ambientEnabled.value = false
+        onNodeWithTag("apollo-ambient-orbit").assertDoesNotExist()
+    }
+
+    @Test fun disconnectedHeroKeepsItsOrbitStill() = runComposeUiTest {
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(dutchWeb), selectedLocationId = dutchWeb.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = true,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithTag("apollo-ambient-orbit").assertDoesNotExist()
+    }
+
+    @Test fun connectedOrbitLivesOnlyWhileDecorativeMotionIsEnabled() = runComposeUiTest {
+        val motionEnabled = mutableStateOf(true)
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(dutchWeb), selectedLocationId = dutchWeb.storageId,
+                    subscription = active, isConnected = true, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = motionEnabled.value,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithTag("apollo-ambient-orbit").assertExists()
+        motionEnabled.value = false
+        onNodeWithTag("apollo-ambient-orbit").assertDoesNotExist()
+    }
+
+    @Test fun reconnectingHeroMatchesItsRouteMotionAndKeepsDisconnectAvailable() = runComposeUiTest {
+        var observedPhase: ApolloHeroPhase? = null
+        val relayed = dutchWeb.copy(config = dutchWeb.config!!.copy(
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"rw-nl-relay.gate-altas.tech"}]},"streamSettings":{"network":"xhttp","security":"reality"}}]}"""
+            ).jsonObject
+        ))
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(relayed), selectedLocationId = relayed.storageId,
+                    subscription = active, isConnected = true, isConnecting = true,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = true,
+                    routeMotion = { phase, _ -> observedPhase = phase; true },
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Reconnecting…").assertExists()
+        onNodeWithText("RGA // RECOVERING · RESTORING CHANNEL").assertExists()
+        onAllNodesWithText("Disconnect").assertCountEquals(1)
+        assertEquals(ApolloHeroPhase.CONNECTING, observedPhase)
     }
 }

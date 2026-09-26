@@ -376,6 +376,10 @@
     <string name="settings_server_lists_sharing">Списки серверов и раздача</string>
     <string name="settings_essentials">Основное</string>
     <string name="settings_advanced">Дополнительно</string>
+    <string name="settings_appearance">Внешний вид</string>
+    <string name="settings_ambient_motion">Декоративные анимации</string>
+    <string name="settings_ambient_motion_value">Только когда приложение открыто</string>
+    <string name="settings_ambient_motion_system_off">Android отключил анимации</string>
     <string name="settings_advanced_connection">Расширенное подключение</string>
     <string name="settings_share_access_qr">Передать доступ · QR</string>
     <string name="settings_share_access_warning">QR-код или ссылка могут дать другому человеку доступ к этому списку серверов. Передавайте только тем, кому доверяете.</string>
@@ -506,6 +510,12 @@
     <string name="apollo_usage_unknown">Нет данных об остатке трафика</string>
     <string name="apollo_connected">Подключено</string>
     <string name="apollo_connecting">Подключаем…</string>
+    <string name="apollo_reconnecting">Восстанавливаем связь…</string>
+    <string name="apollo_link_idle">RGA // OFFLINE · КАНАЛ НЕАКТИВЕН</string>
+    <string name="apollo_link_connecting">RGA // CONNECTING · УСТАНАВЛИВАЕМ СВЯЗЬ</string>
+    <string name="apollo_link_connected">RGA // ONLINE · КАНАЛ АКТИВЕН</string>
+    <string name="apollo_link_reconnecting">RGA // RECOVERING · ВОССТАНАВЛИВАЕМ СВЯЗЬ</string>
+    <string name="apollo_link_failed">RGA // INTERRUPTED · СВЯЗЬ ПРЕРВАНА</string>
     <string name="apollo_disconnected">Не подключено</string>
     <string name="apollo_connect">Подключиться</string>
     <string name="apollo_disconnect">Отключиться</string>

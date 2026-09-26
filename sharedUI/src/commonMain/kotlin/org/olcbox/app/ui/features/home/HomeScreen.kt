@@ -1,5 +1,7 @@
 package org.olcbox.app.ui.features.home
 
+import androidx.compose.ui.Modifier
+
 import org.olcbox.app.ui.components.kit.boardWords
 import multiplatform_app.sharedui.generated.resources.Res
 import multiplatform_app.sharedui.generated.resources.apollo_experimental
@@ -151,6 +153,8 @@ fun HomeScreen(
     onImportFromPhoneRequested: (() -> Unit)? = null,
     onSaveLogsRequested: (onSaved: (String) -> Unit, onError: (String) -> Unit) -> Unit = { _, _ -> },
     showAppSettingsButton: Boolean = false,
+    ambientMotionEnabled: Boolean = false,
+    routeMotion: (@Composable (ApolloHeroPhase, Modifier) -> Boolean)? = null,
     canScanQr: Boolean = false,
     onAppSettingsClick: () -> Unit = {},
     showSplitTunnelingButton: Boolean = false,
@@ -672,6 +676,8 @@ fun HomeScreen(
             onDismissNotice = viewModel::dismissFailure,
             isRefreshing = isRefreshingSubscriptions,
             showSettings = showAppSettingsButton,
+            ambientMotionEnabled = ambientMotionEnabled,
+            routeMotion = routeMotion,
             onAction = ::handlePrimaryAction,
             onRefresh = ::refreshSubscriptions,
             onAdd = { isAddSheetOpen = true },

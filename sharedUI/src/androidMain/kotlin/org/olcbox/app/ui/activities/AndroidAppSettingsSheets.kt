@@ -66,6 +66,10 @@ import multiplatform_app.sharedui.generated.resources.search_apps
 import multiplatform_app.sharedui.generated.resources.settings_app_log_value
 import multiplatform_app.sharedui.generated.resources.settings_app_updates_value
 import multiplatform_app.sharedui.generated.resources.settings_advanced
+import multiplatform_app.sharedui.generated.resources.settings_appearance
+import multiplatform_app.sharedui.generated.resources.settings_ambient_motion
+import multiplatform_app.sharedui.generated.resources.settings_ambient_motion_system_off
+import multiplatform_app.sharedui.generated.resources.settings_ambient_motion_value
 import multiplatform_app.sharedui.generated.resources.settings_advanced_connection
 import multiplatform_app.sharedui.generated.resources.settings_manual_routing_rules
 import multiplatform_app.sharedui.generated.resources.settings_manual_routing_summary
@@ -139,6 +143,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -211,6 +216,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -269,6 +275,9 @@ internal fun AppSettingsSheet(
     onSubscriptionSettingsChanged: (SubscriptionSettings) -> Unit = {},
     routingSettings: RoutingSettings = RoutingSettings(),
     onRoutingSettingsChanged: (RoutingSettings) -> Unit = {},
+    ambientAnimationsEnabled: Boolean = true,
+    systemAnimationsEnabled: Boolean = true,
+    onAmbientAnimationsEnabledChange: (Boolean) -> Unit = {},
     enabled: Boolean,
     isConnectionActive: Boolean,
     onDismiss: () -> Unit,
@@ -369,6 +378,9 @@ internal fun AppSettingsSheet(
                         showUpdates = showUpdates,
                         subscriptionsCount = subscriptions.size,
                         routingSettings = routingSettings,
+                        ambientAnimationsEnabled = ambientAnimationsEnabled,
+                        systemAnimationsEnabled = systemAnimationsEnabled,
+                        onAmbientAnimationsEnabledChange = onAmbientAnimationsEnabledChange,
                         enabled = enabled,
                         onConnectionSettingsClick = { route = AppSettingsRoute.ConnectionSettings },
                         onRoutingClick = { route = AppSettingsRoute.Routing },
@@ -494,6 +506,9 @@ private fun AppSettingsHubContent(
     subscriptionsCount: Int,
     subscriptionSettings: SubscriptionSettings,
     routingSettings: RoutingSettings,
+    ambientAnimationsEnabled: Boolean,
+    systemAnimationsEnabled: Boolean,
+    onAmbientAnimationsEnabledChange: (Boolean) -> Unit,
     enabled: Boolean,
     onConnectionSettingsClick: () -> Unit,
     onRoutingClick: () -> Unit,
@@ -557,6 +572,20 @@ private fun AppSettingsHubContent(
                 )
             }
         }
+
+        Spacer(Modifier.height(8.dp))
+        SettingsSectionLabel(stringResource(Res.string.settings_appearance))
+        SettingsSwitchRow(
+            title = stringResource(Res.string.settings_ambient_motion),
+            value = stringResource(
+                if (systemAnimationsEnabled) Res.string.settings_ambient_motion_value
+                else Res.string.settings_ambient_motion_system_off
+            ),
+            icon = PkIcons.Bolt,
+            checked = ambientAnimationsEnabled,
+            enabled = true,
+            onCheckedChange = onAmbientAnimationsEnabledChange
+        )
 
         Spacer(Modifier.height(8.dp))
         SettingsSectionLabel(stringResource(Res.string.settings_advanced))
@@ -1569,15 +1598,20 @@ private fun SettingsSwitchRow(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(72.dp)
+            .defaultMinSize(minHeight = 72.dp)
             .clip(RoundedCornerShape(18.dp))
-            .clickable(enabled = enabled) { onCheckedChange(!checked) },
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange
+            ),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
@@ -1601,14 +1635,14 @@ private fun SettingsSwitchRow(
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = value,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
