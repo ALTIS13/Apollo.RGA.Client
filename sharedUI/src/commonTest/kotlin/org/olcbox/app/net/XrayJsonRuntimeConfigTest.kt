@@ -51,6 +51,20 @@ class XrayJsonRuntimeConfigTest {
         }
     }
 
+    @Test fun omittedBlackholeSettingsSurvivesRuntimeAdaptationForBothTunnelProtocols() {
+        for (body in listOf(XrayJsonSubscriptionFixtures.vless, XrayJsonSubscriptionFixtures.hysteria)) {
+            val original = config(body)
+            val outbounds = original.getValue("outbounds").jsonArray.toMutableList()
+            outbounds[2] = JsonObject(outbounds[2].jsonObject - "settings")
+            val stored = JsonObject(original + ("outbounds" to JsonArray(outbounds)))
+
+            val adapted = XrayJsonRuntimeConfig.adapt(stored, 32001, login).config
+            assertEquals(stored.getValue("outbounds"), adapted.getValue("outbounds"))
+            assertFalse("settings" in adapted.getValue("outbounds").jsonArray[2].jsonObject)
+            assertFalse("settings" in stored.getValue("outbounds").jsonArray[2].jsonObject)
+        }
+    }
+
     @Test fun rejectsReferencedHttpInsteadOfChangingRuleMeaning() {
         val body = XrayJsonSubscriptionFixtures.vless.replace("\"inboundTag\":[\"local-socks\"]", "\"inboundTag\":[\"local-http\"]")
         assertFailsWith<XrayJsonRuntimeConfig.Rejected> { XrayJsonRuntimeConfig.adapt(config(body), 32001, login) }

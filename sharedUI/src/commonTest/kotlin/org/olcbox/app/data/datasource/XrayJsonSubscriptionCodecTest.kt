@@ -1,6 +1,8 @@
 package org.olcbox.app.data.datasource
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.*
@@ -12,6 +14,12 @@ class XrayJsonSubscriptionCodecTest {
         assertTrue(contains(from), "Fixture mutation target must exist")
         assertNotEquals(from, to, "Fixture mutation must change the input")
         return replace(from, to)
+    }
+    private fun withoutOutboundSettings(body: String, index: Int): String {
+        val original = Json.parseToJsonElement(body).jsonObject
+        val outbounds = original.getValue("outbounds").jsonArray.toMutableList()
+        outbounds[index] = JsonObject(outbounds[index].jsonObject - "settings")
+        return JsonObject(original + ("outbounds" to JsonArray(outbounds))).toString()
     }
 
     @Test fun rejectsUnvalidatedHysteriaUp() = rejectsHysteriaExtension("up")
@@ -46,6 +54,33 @@ class XrayJsonSubscriptionCodecTest {
 
     @Test fun rejectsUnknownBlackholeSettings() {
         reject("[${fixture.vless.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\",\"settings\":{\"requiredFutureField\":true}")}]")
+    }
+
+    @Test fun omittedBlackholeSettingsAdmitsBothTunnelProtocolsWithoutSynthesizingAField() {
+        for ((body, protocol) in listOf(
+            fixture.vless to XrayJsonSubscriptionCodec.Protocol.VLESS,
+            fixture.hysteria to XrayJsonSubscriptionCodec.Protocol.HYSTERIA2
+        )) {
+            val original = body.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\"")
+            val result = assertIs<XrayJsonSubscriptionCodec.Success>(XrayJsonSubscriptionCodec.decode("[$original]"))
+            assertEquals(protocol, result.profiles.single().protocol)
+            assertEquals(Json.parseToJsonElement(original).jsonObject, result.profiles.single().effectiveConfig)
+            assertFalse("settings" in result.profiles.single().effectiveConfig.getValue("outbounds").jsonArray[2].jsonObject)
+        }
+    }
+
+    @Test fun absentSettingsIsOnlyAllowedForBlackhole() {
+        for (body in listOf(fixture.vless, fixture.hysteria)) {
+            for (invalid in listOf(
+                body.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\",\"settings\":null"),
+                body.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\",\"settings\":[]"),
+                body.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\",\"settings\":{\"unknown\":true}"),
+                withoutOutboundSettings(body, 1),
+                withoutOutboundSettings(body, 0)
+            )) {
+                assertEquals(XrayJsonSubscriptionCodec.Reason.INVALID_PROFILE, reject("[$invalid]").reason)
+            }
+        }
     }
 
     @Test fun preservesEntireConfigsAndOrderWithoutRebuildingDnsRoutingOrSecrets() {

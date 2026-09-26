@@ -70,8 +70,12 @@ internal object XrayJsonSubscriptionCodec {
         val tunnels = mutableListOf<Protocol>()
         for (out in outbounds) {
             out.keysOnly("tag", "protocol", "settings", "streamSettings", "mux")
-            val settings = out["settings"].obj()
-            when (out["protocol"].string()) {
+            val protocol = out["protocol"].string()
+            // Xray defaults an omitted blackhole settings object to {}. Keep the
+            // source config untouched; this object exists only for validation.
+            val settings = if (protocol == "blackhole" && "settings" !in out) JsonObject(emptyMap())
+                else out["settings"].obj()
+            when (protocol) {
                 "freedom" -> {
                     check(out["streamSettings"] == null)
                     settings.keysOnly("domainStrategy")

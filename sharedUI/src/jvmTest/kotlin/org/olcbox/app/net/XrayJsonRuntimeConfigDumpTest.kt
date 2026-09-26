@@ -21,6 +21,15 @@ class XrayJsonRuntimeConfigDumpTest {
             val adapted = XrayJsonRuntimeConfig.adapt(source, 32001, SocksLogin("local-user", "synthetic-secret"))
             assertEquals(source["outbounds"], adapted.config["outbounds"])
             File(dir, "$name.json").writeText(adapted.config.toString())
+
+            val outbounds = source.getValue("outbounds").jsonArray.toMutableList()
+            outbounds[2] = JsonObject(outbounds[2].jsonObject - "settings")
+            val missingBlackholeSettings = JsonObject(source + ("outbounds" to JsonArray(outbounds)))
+            val adaptedMissing = XrayJsonRuntimeConfig.adapt(
+                missingBlackholeSettings, 32001, SocksLogin("local-user", "synthetic-secret")
+            )
+            assertEquals(missingBlackholeSettings["outbounds"], adaptedMissing.config["outbounds"])
+            File(dir, "$name-no-blackhole-settings.json").writeText(adaptedMissing.config.toString())
         }
     }
 }
