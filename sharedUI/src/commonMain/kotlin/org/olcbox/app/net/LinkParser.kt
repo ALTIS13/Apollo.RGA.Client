@@ -67,6 +67,7 @@ object LinkParser {
                 } else {
                     null
                 }
+                if (extra != null && !XhttpExtraPolicy.isCompatible(extra)) return null
                 TransportSpec.Xhttp(
                     path = p.query["path"] ?: "/",
                     host = p.query["host"] ?: p.query["sni"].orEmpty(),

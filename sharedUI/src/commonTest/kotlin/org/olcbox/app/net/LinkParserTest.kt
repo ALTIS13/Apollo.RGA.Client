@@ -52,6 +52,16 @@ class LinkParserTest {
         assertNull(LinkParser.parse(prefix + "%5B1%5D#FI"))
     }
 
+    @Test fun rejectsUnsafeXhttpExtraBeforeAHostCanBeImported() {
+        val prefix = "vless://22222222-2222-2222-2222-222222222222@1.2.3.4:443?type=xhttp&path=%2Fdownload&extra="
+        // The pinned Xray panics on packet-up when the upload chunk is <= 8192.
+        assertNull(LinkParser.parse(prefix + "%7B%22scMaxEachPostBytes%22%3A8192%7D"))
+        // Padding is allocated for every request, so a small JSON value can exhaust a mobile tunnel.
+        assertNull(LinkParser.parse(prefix + "%7B%22xPaddingBytes%22%3A50000000%7D"))
+        // This fork does not implement a second download transport within one link.
+        assertNull(LinkParser.parse(prefix + "%7B%22downloadSettings%22%3A%7B%7D%7D"))
+    }
+
     @Test fun parsesVlessGrpcAndDropsTcpOnlyFlow() {
         val link = "vless://33333333-3333-3333-3333-333333333333@grpc.example:2053" +
             "?type=grpc&serviceName=rutube&security=reality&pbk=PBK&flow=xtls-rprx-vision#KZ"

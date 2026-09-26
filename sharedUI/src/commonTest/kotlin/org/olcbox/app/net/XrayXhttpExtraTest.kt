@@ -60,5 +60,17 @@ class XrayXhttpExtraTest {
         assertFailsWith<IllegalArgumentException> {
             XrayConfig.buildXhttp(spec("""{"scMaxEachPostBytes":"unknown"}"""))
         }
+        assertFailsWith<IllegalArgumentException> {
+            XrayConfig.buildXhttp(spec("""{"scMaxEachPostBytes":8192}"""))
+        }
+    }
+
+    @Test fun rejectsOversizedPaddingAndUnsupportedNestedTransport() {
+        assertFailsWith<IllegalArgumentException> {
+            XrayConfig.buildXhttp(spec("""{"xPaddingBytes":50000000}"""))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            XrayConfig.buildXhttp(spec("""{"downloadSettings":{}}"""))
+        }
     }
 }

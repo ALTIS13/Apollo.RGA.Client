@@ -8,14 +8,19 @@ import org.olcbox.app.data.model.LocationBundleV4
 import org.olcbox.app.data.model.RoutingMode
 import org.olcbox.app.data.model.RoutingSettings
 import org.olcbox.app.data.model.SubscriptionSettings
+import org.olcbox.app.net.DirectDns
+import org.olcbox.app.net.Routing
+import org.olcbox.app.net.toRules
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class RoutingSettingsTest {
-    @Test fun defaultIsEverythingThroughTheTunnel() = runTest {
+    @Test fun freshInstallationRoutesRussiaDirectlyByDefault() = runTest {
         val settings = LocationsRepositoryImpl(MemoryLocationsDataSource()).getRoutingSettings()
-        assertEquals(RoutingMode.Global, settings.mode)
+        assertEquals(RoutingMode.BypassRussia, settings.mode)
+        val routing = settings.toRules("rules", DirectDns.Servers(listOf("192.0.2.53")))
+        assertEquals(Routing.Policy.Bypass("ru"), routing.policy)
     }
 
     @Test fun savedModeComesBack() = runTest {
@@ -55,10 +60,16 @@ class RoutingSettingsTest {
         assertTrue(bundle.locations.isNotEmpty(), "the legacy location was adopted")
     }
 
-    @Test fun aBundleWrittenBeforeRoutingExistedReadsAsGlobal() {
+    @Test fun aBundleWithoutRoutingUsesTheSafeRegionalDefault() {
         val bundle = Json { ignoreUnknownKeys = true }
             .decodeFromString<LocationBundleV4>("""{"version":5,"locations":[]}""")
-        assertEquals(RoutingMode.Global, bundle.routing.mode)
+        assertEquals(RoutingMode.BypassRussia, bundle.routing.mode)
+    }
+
+    @Test fun explicitlySavedGlobalModeIsNotOverriddenByTheDefault() = runTest {
+        val repository = LocationsRepositoryImpl(MemoryLocationsDataSource())
+        repository.saveRoutingSettings(RoutingSettings(RoutingMode.Global))
+        assertEquals(RoutingMode.Global, repository.getRoutingSettings().mode)
     }
 
     @Test fun removedRoutingOptionsDoNotBreakSavedBundles() {
@@ -70,21 +81,15 @@ class RoutingSettingsTest {
 
     @Test fun serialNamesAreStable() {
         // Persisted on every platform; renaming a constant must not silently
-        // reset everyone to Global.
-        val json = Json.encodeToString(
-            LocationBundleV4.serializer(),
-            LocationBundleV4(routing = RoutingSettings(RoutingMode.BypassRussia))
-        )
-        assertTrue("\"routing\":{\"mode\":\"bypass_russia\"}" in json, json)
+        // change saved routing choices. Test enum wire names directly: the
+        // serializer omits fields equal to their defaults from a whole bundle.
+        val json = Json { }
         for ((mode, serial) in listOf(
+            RoutingMode.BypassRussia to "bypass_russia",
             RoutingMode.BypassIran to "bypass_iran",
             RoutingMode.BypassChina to "bypass_china"
         )) {
-            val encoded = Json.encodeToString(
-                LocationBundleV4.serializer(),
-                LocationBundleV4(routing = RoutingSettings(mode))
-            )
-            assertTrue("\"routing\":{\"mode\":\"$serial\"}" in encoded, encoded)
+            assertEquals(serial, json.encodeToJsonElement(RoutingMode.serializer(), mode).jsonPrimitive.content)
         }
     }
 

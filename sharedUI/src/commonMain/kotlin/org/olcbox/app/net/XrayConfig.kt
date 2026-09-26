@@ -1,8 +1,6 @@
 package org.olcbox.app.net
 
 import kotlinx.serialization.json.JsonObjectBuilder
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -36,7 +34,7 @@ object XrayConfig {
      * Upload chunk size for xhttp packet-up, in bytes. Bounds what Xray buffers
      * per uploading connection (about twice this); see the builder for why.
      */
-    const val XHTTP_MAX_EACH_POST_BYTES = 200_000
+    const val XHTTP_MAX_EACH_POST_BYTES = XhttpExtraPolicy.MAX_UPLOAD_BYTES
 
     /**
      * The tunnel-side resolver under [answersDns], reached through `out`. The
@@ -211,7 +209,7 @@ object XrayConfig {
                                 // xhttpSettings field except host/path/mode.
                                 // Put the mobile buffer cap inside that object,
                                 // or the old top-level cap is silently ignored.
-                                put("extra", boundedXhttpExtra(xhttp.extra))
+                                put("extra", XhttpExtraPolicy.bounded(xhttp.extra))
                             }
                         }
                         // The server's own name goes through the resolver above
@@ -240,23 +238,6 @@ object XrayConfig {
             if (resolvesNames) putRouting(bypass?.let { geodata }, serverByName)
         }
         return obj.toString()
-    }
-
-    private fun boundedXhttpExtra(extra: JsonObject): JsonObject {
-        val setting = extra["scMaxEachPostBytes"]
-        if (setting != null) {
-            val raw = (setting as? JsonPrimitive)?.content.orEmpty()
-            val bounds = raw.split('-')
-            val values = bounds.map { it.toIntOrNull() }
-            require(bounds.size in 1..2 && values.all { it != null && it > 0 && it <= XHTTP_MAX_EACH_POST_BYTES } &&
-                (values.size == 1 || values[0]!! <= values[1]!!)) {
-                "XHTTP scMaxEachPostBytes must be a positive value or range up to $XHTTP_MAX_EACH_POST_BYTES"
-            }
-        }
-        return buildJsonObject {
-            extra.forEach { (key, value) -> put(key, value) }
-            if (setting == null) put("scMaxEachPostBytes", XHTTP_MAX_EACH_POST_BYTES)
-        }
     }
 
     /**

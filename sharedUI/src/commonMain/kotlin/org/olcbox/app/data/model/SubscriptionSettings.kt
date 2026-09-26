@@ -82,10 +82,11 @@ data class SubscriptionSettings(
     /**
      * Smart connect: when the exit the user connects is published over several
      * transports, try them in turn and end on olcRTC of the same country
-     * (SmartConnect). On by default; off is exactly the old behaviour.
+     * (SmartConnect). Opt-in: choosing a normal exit must not silently switch
+     * to an olcRTC room when the network changes.
      */
     @SerialName("smart_connect")
-    val smartConnect: Boolean = true,
+    val smartConnect: Boolean = false,
 
     /** The transport that last got through, per exit (SmartConnect.groupKey → storageId). */
     @SerialName("last_known_good_transport")

@@ -59,8 +59,8 @@ class RoutingRuleTest {
     }
 
     @Test fun rulesOfTheUsersOwnAskForRulesEvenUnderGlobal() {
-        assertEquals(false, RoutingSettings().needsRules)
-        assertEquals(true, RoutingSettings(directRules = listOf("example.com")).needsRules)
+        assertEquals(false, RoutingSettings(RoutingMode.Global).needsRules)
+        assertEquals(true, RoutingSettings(RoutingMode.Global, directRules = listOf("example.com")).needsRules)
         assertEquals(true, RoutingSettings(RoutingMode.BlockedOnly).needsRules)
     }
 

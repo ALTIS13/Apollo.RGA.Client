@@ -79,7 +79,9 @@ internal expect suspend fun <T> withProxyAuthentication(
 
 class LocationsRepositoryImpl(
     private val dataSource: LocationsDataSource,
-    private val httpClient: HttpClient = createProxyHttpClient(),
+    // A subscription URL can carry a bearer token. Never follow an HTTP
+    // redirect that could forward it to an untrusted or plaintext endpoint.
+    private val httpClient: HttpClient = createProxyHttpClient(followRedirects = false),
     private val deviceIdentityProvider: DeviceIdentityProvider = PersistentDeviceIdentityProvider(dataSource),
     private val nowEpochMs: () -> Long = { kotlin.time.Clock.System.now().toEpochMilliseconds() },
     private val cryptCodec: CryptCodec? = CryptCodec.default(),
@@ -768,6 +770,11 @@ class LocationsRepositoryImpl(
             return ImportSource(content = text.normalizedImportText())
         }
 
+        if (httpsUrlOrNull(text.trim()) == null) {
+            onFailure?.invoke(SubscriptionRefreshError.Rejected, null)
+            return null
+        }
+
         val downloaded = downloadTextFromUrl(
             url = text,
             requestMode = requestMode,
@@ -812,7 +819,7 @@ class LocationsRepositoryImpl(
         val client = if (subscriptionProxy == null) {
             httpClient
         } else {
-            createProxyHttpClient(subscriptionProxy)
+            createProxyHttpClient(subscriptionProxy, followRedirects = false)
         }
 
         return try {
@@ -946,36 +953,17 @@ class LocationsRepositoryImpl(
         subscriptionUrl: String? = null,
         updateIntervalHours: Int? = null
     ): ParsedImport? {
-        // Scheme dispatch: a subscription body may mix olcrtc:// lines with
-        // xray-side vless://+hysteria2:// lines. Parse each family and merge so a
-        // single import yields all locations (olcrtc entries first).
-        run {
-            val olc = parseOlcRtcText(text, subscriptionUrl, updateIntervalHours)
-            val sb = parseSingBoxText(text, subscriptionUrl, updateIntervalHours)
-            val merged = when {
-                olc != null && sb != null ->
-                    olc.copy(locations = olc.locations + sb.locations)
-                olc != null -> olc
-                sb != null -> sb
-                else -> null
-            }
-            if (merged != null) return ParsedImport(merged, ImportMode.Additive)
+        parseLinkList(text, subscriptionUrl, updateIntervalHours)?.let {
+            return ParsedImport(it, ImportMode.Additive)
         }
 
         // Standard subscription format (Happ / v2rayNG): the whole body is base64
         // of the scheme-line list. Only reached when direct parsing found nothing,
         // and the codec only accepts decodes that contain scheme links.
         SubscriptionBodyCodec.decodeBase64(text)?.let { decoded ->
-            val olc = parseOlcRtcText(decoded, subscriptionUrl, updateIntervalHours)
-            val sb = parseSingBoxText(decoded, subscriptionUrl, updateIntervalHours)
-            val merged = when {
-                olc != null && sb != null ->
-                    olc.copy(locations = olc.locations + sb.locations)
-                olc != null -> olc
-                sb != null -> sb
-                else -> null
+            parseLinkList(decoded, subscriptionUrl, updateIntervalHours)?.let {
+                return ParsedImport(it, ImportMode.Additive)
             }
-            if (merged != null) return ParsedImport(merged, ImportMode.Additive)
         }
 
         if (!text.startsWith("{") || !text.endsWith("}")) return null
@@ -1001,6 +989,42 @@ class LocationsRepositoryImpl(
                 ImportMode.Additive
             )
         }
+    }
+
+    /** A line-list is one update: never publish its supported subset. */
+    private fun parseLinkList(
+        text: String,
+        subscriptionUrl: String?,
+        updateIntervalHours: Int?
+    ): LocationBundleV4? {
+        val lines = text.lineSequence()
+            .map { it.normalizedImportText() }
+            .filter { it.isNotBlank() && !it.startsWith('#') }
+            .toList()
+        if (lines.isEmpty()) return null
+        val olcCount = lines.count { it.startsWith(OLCRTC_URI_PREFIX) }
+        val coreCount = lines.count { LinkParser.supports(it) }
+        if (olcCount + coreCount == 0 || olcCount + coreCount != lines.size) return null
+
+        val olc = parseOlcRtcText(text, subscriptionUrl, updateIntervalHours)
+        val core = parseSingBoxText(text, subscriptionUrl, updateIntervalHours)
+        if ((olc?.locations?.size ?: 0) != olcCount ||
+            (core?.locations?.size ?: 0) != coreCount
+        ) return null
+
+        // The restricted-network OlcRTC entry is manual/opt-in. Put ordinary
+        // links first even if the issuer listed OlcRTC first; a fresh import
+        // must not silently select the alternate transport.
+        // Both parsers allocate IDs independently. Reassign once across both
+        // families so equal display names cannot make normalized() drop a host.
+        val usedIds = mutableSetOf<String>()
+        val entries = (core?.locations.orEmpty() + olc?.locations.orEmpty()).map { entry ->
+            entry.copy(storageId = uniqueStorageId(entry.storageId, usedIds))
+        }
+        return LocationBundleV4(
+            activeLocationId = entries.firstOrNull()?.storageId,
+            locations = entries
+        )
     }
 
     private fun mergeImportedBundle(
@@ -1458,10 +1482,12 @@ class LocationsRepositoryImpl(
     private fun subscriptionSignature(location: LocationConfig): String {
         val normalized = location.normalized()
         return listOf(
+            normalized.kind.name,
             normalized.bypassProvider,
             normalized.transport,
             normalized.id,
-            normalized.key
+            normalized.key,
+            normalized.rawLink?.substringBefore('#').orEmpty()
         ).joinToString("|")
     }
 

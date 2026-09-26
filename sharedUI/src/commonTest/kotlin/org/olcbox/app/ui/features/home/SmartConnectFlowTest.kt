@@ -11,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.setMain
 import org.olcbox.app.data.datasource.LocationsDataSource
 import org.olcbox.app.data.datasource.LocationsRepositoryImpl
@@ -29,6 +30,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 
 /**
  * Smart connect as the home screen runs it: which transport ends up active, what
@@ -87,6 +89,19 @@ class SmartConnectFlowTest {
             it.whitelistCheck = { whitelist }
             models += it
         }
+
+    @Test fun defaultConnectKeepsTheChosenCoreInsteadOfSwitchingToOlcrtc() = runTest {
+        val repo = repository(reality, hy2, room)
+        val vpn = ProbingVpn(mapOf("us-reality" to false, "us-hy2" to false))
+        val vm = viewModel(repo, vpn, whitelist = true)
+
+        assertFalse(repo.getSubscriptionSettings().smartConnect)
+        vm.ToggleVpn()
+        advanceUntilIdle()
+
+        assertEquals("us-reality", repo.getActiveLocationId())
+        assertEquals(emptyList(), vpn.probed)
+    }
 
     @Test fun theFirstTransportThatGetsThroughBecomesActiveAndIsRemembered() = runTest {
         val repo = repository(reality, hy2, room)

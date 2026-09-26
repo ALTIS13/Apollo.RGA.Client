@@ -666,7 +666,7 @@ class LocationsRepositoryImplTest {
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
-        ).importText("http://example.test/sub.txt")
+        ).importText("https://example.test/sub.txt")
 
         val bundle = source.stored
         assertTrue(imported)
@@ -678,7 +678,24 @@ class LocationsRepositoryImplTest {
         assertNull(hwids[1])
         assertEquals("room", bundle.locations.single().location.id)
         assertEquals(12, bundle.locations.single().metadata?.subscription?.updateIntervalHours)
-        assertEquals("http://example.test/sub.txt", bundle.locations.single().subscriptionUrl)
+        assertEquals("https://example.test/sub.txt", bundle.locations.single().subscriptionUrl)
+    }
+
+    @Test
+    fun plainHttpSubscriptionUrlIsRejectedBeforeAnyRequest() = runTest {
+        var requests = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine {
+                requests++
+                respond("olcrtc://wbstream?vp8channel@room#${"d".repeat(64)}${'$'}Unsafe")
+            })
+        )
+
+        assertFalse(repo.importText("http://example.test/sub?token=private"))
+        assertEquals(0, requests)
+        assertNull(source.stored)
     }
 
     @Test
@@ -881,6 +898,95 @@ class LocationsRepositoryImplTest {
         assertEquals(1, locs.count { it.kind == org.olcbox.app.net.LocationKind.Olcrtc })
         assertEquals(1, locs.count { it.kind == org.olcbox.app.net.LocationKind.Vless })
         assertEquals(1, locs.count { it.kind == org.olcbox.app.net.LocationKind.Hysteria2 })
+    }
+
+    @Test
+    fun mixedImportRejectsMalformedVlessWithoutSavingPartialList() = runTest {
+        val source = FakeLocationsDataSource()
+        val body = """
+            olcrtc://telemost?vp8channel@12345#deadbeefdeadbeef${'$'}DE-rtc
+            vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?type=unsupported#DE-vless
+        """.trimIndent()
+
+        assertFalse(LocationsRepositoryImpl(source).importText(body))
+        assertNull(source.stored)
+    }
+
+    @Test
+    fun mixedImportRejectsUnknownProtocolWithoutSavingPartialList() = runTest {
+        val source = FakeLocationsDataSource()
+        val body = """
+            olcrtc://telemost?vp8channel@12345#deadbeefdeadbeef${'$'}DE-rtc
+            tuic://11111111-1111-1111-1111-111111111111@9.9.9.9:443#DE-tuic
+        """.trimIndent()
+
+        assertFalse(LocationsRepositoryImpl(source).importText(body))
+        assertNull(source.stored)
+    }
+
+    @Test
+    fun mixedImportKeepsOlcrtcAndVlessWithTheSameDisplayName() = runTest {
+        val source = FakeLocationsDataSource()
+        val body = """
+            olcrtc://telemost?vp8channel@12345#deadbeefdeadbeef${'$'}Shared
+            vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&type=tcp#Shared
+        """.trimIndent()
+
+        assertTrue(LocationsRepositoryImpl(source).importText(body))
+        val entries = source.stored!!.locations
+        assertEquals(2, entries.size)
+        assertEquals(2, entries.map { it.storageId }.toSet().size)
+        assertEquals(
+            setOf(org.olcbox.app.net.LocationKind.Olcrtc, org.olcbox.app.net.LocationKind.Vless),
+            entries.map { it.kind }.toSet()
+        )
+        // Restricted-network ingress is opt-in. A new mixed subscription must
+        // offer the ordinary host first even if the issuer listed OlcRTC first.
+        assertEquals(org.olcbox.app.net.LocationKind.Vless, entries.first().kind)
+        assertEquals(entries.first().storageId, source.stored!!.activeLocationId)
+    }
+
+    @Test
+    fun malformedMixedRefreshRetainsTheWholePreviousListAndSelection() = runTest {
+        val url = "https://example.test/mixed"
+        val validVless = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&type=tcp#DE-vless"
+        val olc = "olcrtc://telemost?vp8channel@12345#deadbeefdeadbeef${'$'}DE-rtc"
+        var body = "$olc\n$validVless"
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText(url))
+        val selected = source.stored!!.locations.last().storageId
+        repo.setActiveLocationId(selected)
+        val before = repo.getBundle()
+        body = "$olc\nvless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?type=unsupported#DE-vless"
+
+        val report = repo.refreshSubscription(url)
+
+        assertEquals(0, report.updatedCount)
+        assertEquals(SubscriptionRefreshError.Empty, report.failures.single().error)
+        assertEquals(before, repo.getBundle())
+    }
+
+    @Test
+    fun refreshDoesNotGiveSelectedHy2IdentityToVlessAtTheSameEndpoint() = runTest {
+        val url = "https://example.test/two-protocols"
+        val vless = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&type=tcp#Vless"
+        val hy2 = "hysteria2://PW@9.9.9.9:443?sni=x#Hy2"
+        var body = "$vless\n$hy2"
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText(url))
+        val selected = source.stored!!.locations.single { it.kind == org.olcbox.app.net.LocationKind.Hysteria2 }.storageId
+        repo.setActiveLocationId(selected)
+        body = "$hy2\n$vless"
+
+        val report = repo.refreshSubscription(url)
+
+        assertEquals(1, report.updatedCount)
+        val active = repo.getActiveLocation()
+        assertNotNull(active)
+        assertEquals(selected, active.storageId)
+        assertEquals(org.olcbox.app.net.LocationKind.Hysteria2, active.kind)
     }
 
     // ---- refresh failure reporting ----------------------------------------
@@ -1092,13 +1198,15 @@ class LocationsRepositoryImplTest {
         assertEquals("https://mirror.example.test/sub/alpha?token=1", source.listUrl())
     }
 
-    // Over plain http anyone on the path could write these headers, and a moved
-    // list never comes back by itself.
+    // Legacy plain-http subscriptions must remain untouched: even a refresh
+    // must not send their bearer URL or consume untrusted response headers.
     @Test
-    fun movesAndSparesFromAPlainHttpAnswerAreIgnored() = runTest {
+    fun legacyPlainHttpSubscriptionIsNotFetchedOnRefresh() = runTest {
         val url = "http://example.test/alpha"
         val source = subscribedSource(url)
+        var requests = 0
         val repo = repoRespondingWith(source, MockEngine {
+            requests++
             respond(
                 listBody,
                 headers = headersOf(
@@ -1110,9 +1218,10 @@ class LocationsRepositoryImplTest {
         })
 
         repo.refreshSubscription(url)
+        assertEquals(0, requests)
         assertEquals(url, source.listUrl())
         assertNull(source.subscription()?.fallbackUrl)
-        assertEquals("still shown", source.subscription()?.announce)
+        assertNull(source.subscription()?.announce)
     }
 
     @Test

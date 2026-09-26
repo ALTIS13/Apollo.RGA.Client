@@ -75,7 +75,7 @@ enum class RoutingMode {
 @Serializable
 data class RoutingSettings(
     @SerialName("mode")
-    val mode: RoutingMode = RoutingMode.Global,
+    val mode: RoutingMode = RoutingMode.BypassRussia,
     /** Opt-in core diagnostics. Off by default because debug logs name destinations. */
     @SerialName("verbose_debug_logs")
     val verboseDebugLogs: Boolean = false,
