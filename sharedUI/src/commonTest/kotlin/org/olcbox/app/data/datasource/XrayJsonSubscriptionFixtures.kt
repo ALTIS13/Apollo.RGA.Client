@@ -8,12 +8,12 @@ internal object XrayJsonSubscriptionFixtures {
       "dns":{"servers":["192.0.2.53","198.51.100.53","localhost"],"queryStrategy":"UseIPv4"},
       "inbounds":[
         {"tag":"local-socks","port":10808,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":true,"auth":"noauth"},"sniffing":{"enabled":true,"routeOnly":true,"destOverride":["http","tls","quic"]}},
-        {"tag":"local-http","port":10809,"listen":"127.0.0.1","protocol":"http","settings":{}}
+        {"tag":"local-http","port":10809,"listen":"127.0.0.1","protocol":"http","settings":{"allowTransparent":false}}
       ],
       "outbounds":[
         {"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"exit-a.invalid","port":443,"users":[{"id":"00000000-0000-4000-8000-000000000000","encryption":"none","flow":""}]}]},
          "streamSettings":{"network":"xhttp","security":"reality","xhttpSettings":{"mode":"auto","host":"cover.invalid","path":"/synthetic","extra":{"xmux":{"maxConcurrency":8}}},"realitySettings":{"serverName":"cover.invalid","publicKey":"SYNTHETIC_PUBLIC_KEY_NOT_REAL","shortId":"00","fingerprint":"chrome"}}},
-        {"tag":"direct","protocol":"freedom","settings":{}},
+        {"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"UseIP"}},
         {"tag":"block","protocol":"blackhole","settings":{}}
       ],
       "routing":{"domainMatcher":"hybrid","domainStrategy":"IPIfNonMatch","rules":[
