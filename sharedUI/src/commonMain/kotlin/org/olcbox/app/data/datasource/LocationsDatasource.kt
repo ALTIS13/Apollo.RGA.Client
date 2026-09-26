@@ -298,6 +298,7 @@ class LocationsRepositoryImpl(
         val activeBefore = bundle.activeLocationId
         var activeAfter = activeBefore
         var successfulRefreshes = 0
+        var metadataOnlyChanged = false
         val failures = mutableListOf<SubscriptionRefreshFailure>()
 
         fun preservePreviousEntries(entries: List<LocationEntry>) {
@@ -411,7 +412,32 @@ class LocationsRepositoryImpl(
                 (previousEndpointCounts[subscriptionSignature(selectedPrevious.location)] != 1 ||
                     refreshedEndpointCounts[subscriptionSignature(selectedPrevious.location)] != 1)
             ) {
-                preservePreviousEntries(previousEntries)
+                // The new profiles cannot be mapped to the selected old one. Do
+                // not swap endpoints or advance the rejected refresh timestamp,
+                // but a valid response can still revoke access for the whole list.
+                val fresh = source.profile
+                val limited = fresh?.let {
+                    it.quotaKnown && it.totalBytes != null && it.totalBytes > 0 &&
+                        it.usedBytes != null && it.usedBytes >= it.totalBytes
+                } == true
+                val expired = fresh?.let {
+                    it.expiryKnown && it.expiresAtEpochMs != null && refreshTimestamp >= it.expiresAtEpochMs
+                } == true
+                val denialProfile = if (limited || expired) SubscriptionProfile(
+                    usedBytes = fresh.usedBytes.takeIf { limited },
+                    totalBytes = fresh.totalBytes.takeIf { limited },
+                    quotaKnown = limited,
+                    expiresAtEpochMs = fresh.expiresAtEpochMs.takeIf { expired },
+                    expiryKnown = expired
+                ) else null
+                val retained = if (denialProfile == null) previousEntries else previousEntries.map { entry ->
+                    val metadata = entry.metadata ?: LocationMetadata()
+                    entry.copy(metadata = metadata.copy(
+                        subscription = metadata.subscription.withProfile(denialProfile)
+                    ))
+                }
+                metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
+                preservePreviousEntries(retained)
                 failures += SubscriptionRefreshFailure(url, SubscriptionRefreshError.Rejected)
                 return@forEach
             }
@@ -460,6 +486,12 @@ class LocationsRepositoryImpl(
         }
 
         if (successfulRefreshes == 0) {
+            if (metadataOnlyChanged) {
+                val retainedById = refreshedLocations.associateBy { it.storageId }
+                saveBundleUnlocked(bundle.copy(locations = bundle.locations.map { entry ->
+                    retainedById[entry.storageId] ?: entry
+                }))
+            }
             return SubscriptionRefreshReport(updatedCount = 0, failures = failures)
         }
 
