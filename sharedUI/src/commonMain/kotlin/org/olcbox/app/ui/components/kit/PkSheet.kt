@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -135,6 +136,8 @@ fun PkBottomSheet(
      * forbids.
      */
     dismissible: Boolean = true,
+    /** Opt in only for sheets with editable fields; all other sheet insets stay unchanged. */
+    imeAware: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -147,7 +150,9 @@ fun PkBottomSheet(
         modifier = modifier.padding(top = LocalWindowTitleBarInset.current),
         shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        contentWindowInsets = {
+            if (imeAware) WindowInsets.ime else WindowInsets(0, 0, 0, 0)
+        },
         // The handle lives in the surface, so the surface is complete on its own.
         dragHandle = null
     ) {

@@ -38,6 +38,10 @@
     <string name="add_from_phone_subtitle">کد را با گوشی اسکن کنید و پیوند را آنجا بچسبانید</string>
     <string name="add_paste">چسباندن پیوند یا URI</string>
     <string name="add_paste_subtitle">HTTP، HTTPS یا URI از نوع olcrtc</string>
+    <string name="add_manual_subscription">وارد کردن نشانی اشتراک</string>
+    <string name="add_manual_subscription_subtitle">پیوند اشتراک HTTPS موجود خود را وارد کنید</string>
+    <string name="add_manual_subscription_hint">نشانی اشتراک HTTPS</string>
+    <string name="add_manual_subscription_submit">وارد کردن اشتراک</string>
     <string name="add_scan_qr">اسکن کد QR</string>
     <string name="add_scan_qr_subtitle">فهرست سرورها یا URI از نوع olcrtc</string>
     <string name="add_server_list">افزودن فهرست سرورها</string>
@@ -120,6 +124,7 @@
     <string name="https_sources_none">منبع HTTPS وجود ندارد</string>
     <string name="import_empty">متن پیکربندی پیدا نشد</string>
     <string name="import_failed">وارد کردن ناموفق بود</string>
+    <string name="import_https_required">نشانی اشتراک HTTPS معتبر وارد کنید</string>
     <string name="import_not_a_link">این پیوند وارد کردن Apollo.RGA نیست</string>
     <string name="import_nothing_valid">پیکربندی معتبری از Apollo.RGA پیدا نشد</string>
     <string name="import_partner_unresolved">پیوند شناخته نشد. ربات ارائه‌دهنده را باز کنید و پیوند فهرست سرورها را دوباره کپی کنید.</string>

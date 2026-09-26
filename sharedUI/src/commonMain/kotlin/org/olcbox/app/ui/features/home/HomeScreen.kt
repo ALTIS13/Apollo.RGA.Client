@@ -9,6 +9,7 @@ import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.action_cancel
 import multiplatform_app.sharedui.generated.resources.action_remove
 import multiplatform_app.sharedui.generated.resources.imported_from_clipboard
+import multiplatform_app.sharedui.generated.resources.server_list_added
 import multiplatform_app.sharedui.generated.resources.latency_nothing_measurable
 import multiplatform_app.sharedui.generated.resources.latency_on_connected
 import multiplatform_app.sharedui.generated.resources.lowest_selected
@@ -858,6 +859,20 @@ fun HomeScreen(
                     { message -> scope.launch { snackbarHostState.showSnackbar(message) } }
                 )
             },
+            onManualSubscriptionUrl = { url ->
+                isAddSheetOpen = false
+                viewModel.onImportManualSubscriptionUrl(
+                    url,
+                    onComplete = {
+                        locationViewModel.loadLocations {
+                            viewModel.loadCurrentConfig {
+                                scope.launch { snackbarHostState.showSnackbar(getString(Res.string.server_list_added)) }
+                            }
+                        }
+                    },
+                    onError = { message -> scope.launch { snackbarHostState.showSnackbar(message) } }
+                )
+            },
             onImportFileClick = {
                 isAddSheetOpen = false
                 onImportFileRequested()
@@ -883,7 +898,8 @@ fun HomeScreen(
             showGetSubscription = showGetSubscription,
             // The same answer as the board above: these two disagreed once, so the
             // button appeared or vanished depending on which way in you took.
-            showCustomLocation = !isAndroid && canCreateCustomLocation
+            showCustomLocation = !isAndroid && canCreateCustomLocation,
+            showManualSubscriptionUrl = isAndroid
         )
     }
 

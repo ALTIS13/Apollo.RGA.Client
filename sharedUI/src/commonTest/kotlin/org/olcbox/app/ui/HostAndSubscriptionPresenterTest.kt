@@ -15,6 +15,36 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 
 class HostAndSubscriptionPresenterTest {
+    @Test fun liveDestinationNameFollowedByItsFlagIsPresentedAsTheExitCountry() {
+        listOf(
+            "Netherlands 🇳🇱 · 🚀 RU Relay · VLESS" to ("🇳🇱" to "Netherlands"),
+            "Finland 🇫🇮 · 🎮 RU Relay · Hysteria 2" to ("🇫🇮" to "Finland"),
+            "Germany 🇩🇪 · 🚀 RU Relay · VLESS" to ("🇩🇪" to "Germany"),
+            "Singapore 🇸🇬 · Layer · 🎮 RU Relay · Hysteria 2" to ("🇸🇬" to "Singapore")
+        ).forEach { (name, expected) ->
+            val host = LocationEntry.from(
+                "host-${expected.second}", LocationConfig(name = name, kind = LocationKind.Vless)
+            )
+            val row = HostPresenter.present(host)!!
+            assertEquals(expected.first, row.flag, name)
+            assertEquals(expected.second, row.country, name)
+            assertEquals(name, row.name, name)
+        }
+    }
+
+    @Test fun conflictingOrTransitFlagIsNotMistakenForTheExitCountry() {
+        listOf(
+            "Netherlands 🇫🇮 · RU Relay · VLESS",
+            "Transit through Russia 🇷🇺 · Netherlands 🇳🇱",
+            "Unknown 🇳🇱 · RU Relay · VLESS"
+        ).forEach { name ->
+            val host = LocationEntry.from("host", LocationConfig(name = name, kind = LocationKind.Vless))
+            val row = HostPresenter.present(host)!!
+            assertEquals("Страна не указана", row.country, name)
+            assertEquals("", row.flag, name)
+        }
+    }
+
     @Test fun destinationFlagAndCountryLeadWhileLongNameAndPurposeRemainSeparate() {
         val longName = "Netherlands via RU | A long descriptive host name that should not swallow the purpose"
         val purpose = "For ordinary browsing on an unstable mobile connection"

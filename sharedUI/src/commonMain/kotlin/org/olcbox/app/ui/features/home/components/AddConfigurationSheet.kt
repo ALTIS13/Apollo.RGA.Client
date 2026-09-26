@@ -6,6 +6,7 @@ import multiplatform_app.sharedui.generated.resources.Res
 import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.add_connection
 import multiplatform_app.sharedui.generated.resources.add_connection_subtitle
+import multiplatform_app.sharedui.generated.resources.action_back
 import multiplatform_app.sharedui.generated.resources.add_custom
 import multiplatform_app.sharedui.generated.resources.add_custom_subtitle
 import multiplatform_app.sharedui.generated.resources.add_file
@@ -14,6 +15,10 @@ import multiplatform_app.sharedui.generated.resources.add_paste
 import multiplatform_app.sharedui.generated.resources.add_paste_subtitle
 import multiplatform_app.sharedui.generated.resources.add_scan_qr
 import multiplatform_app.sharedui.generated.resources.add_scan_qr_subtitle
+import multiplatform_app.sharedui.generated.resources.add_manual_subscription
+import multiplatform_app.sharedui.generated.resources.add_manual_subscription_subtitle
+import multiplatform_app.sharedui.generated.resources.add_manual_subscription_hint
+import multiplatform_app.sharedui.generated.resources.add_manual_subscription_submit
 import multiplatform_app.sharedui.generated.resources.add_update_lists
 import multiplatform_app.sharedui.generated.resources.add_update_lists_subtitle
 import androidx.compose.foundation.background
@@ -35,8 +40,13 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,9 +54,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.testTag
 import org.olcbox.app.ui.components.kit.PkBottomSheet
 import org.olcbox.app.ui.components.kit.pkMono
 import org.olcbox.app.ui.icons.PkIcons
@@ -59,6 +72,7 @@ fun AddConfigurationSheet(
     onDismiss: () -> Unit,
     onScanQrClick: () -> Unit,
     onPasteLinkClick: () -> Unit,
+    onManualSubscriptionUrl: (String) -> Unit = {},
     onImportFileClick: () -> Unit,
     /** "From your phone", where the platform offers it; null leaves the row out. */
     onImportFromPhoneClick: (() -> Unit)? = null,
@@ -77,12 +91,14 @@ fun AddConfigurationSheet(
      * that wants such a row has to add it back deliberately.
      */
     showGetSubscription: Boolean = true,
-    showCustomLocation: Boolean = true
+    showCustomLocation: Boolean = true,
+    showManualSubscriptionUrl: Boolean = false
 ) {
     PkBottomSheet(
         title = stringResource(Res.string.add_connection),
         subtitle = stringResource(Res.string.add_connection_subtitle),
-        onDismiss = onDismiss
+        onDismiss = onDismiss,
+        imeAware = true
     ) {
         AddConfigurationBody(
             canScanQr = canScanQr,
@@ -90,6 +106,8 @@ fun AddConfigurationSheet(
             showCustomLocation = showCustomLocation,
             onScanQrClick = onScanQrClick,
             onPasteLinkClick = onPasteLinkClick,
+            onManualSubscriptionUrl = onManualSubscriptionUrl,
+            showManualSubscriptionUrl = showManualSubscriptionUrl,
             onImportFileClick = onImportFileClick,
             onImportFromPhoneClick = onImportFromPhoneClick,
             onUpdateSubscriptionsClick = onUpdateSubscriptionsClick,
@@ -107,13 +125,44 @@ internal fun AddConfigurationBody(
     showCustomLocation: Boolean,
     onScanQrClick: () -> Unit,
     onPasteLinkClick: () -> Unit,
+    onManualSubscriptionUrl: (String) -> Unit = {},
+    showManualSubscriptionUrl: Boolean = false,
     onImportFileClick: () -> Unit,
     /** "From your phone", where the platform offers it; null leaves the row out. */
     onImportFromPhoneClick: (() -> Unit)? = null,
     onUpdateSubscriptionsClick: () -> Unit,
     onAddCustomLocationClick: () -> Unit
 ) {
+    var isManualEntryOpen by remember { mutableStateOf(false) }
+    var manualUrl by remember { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (isManualEntryOpen) {
+            OutlinedTextField(
+                value = manualUrl,
+                onValueChange = { manualUrl = it },
+                label = { Text(stringResource(Res.string.add_manual_subscription_hint)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth().testTag("manual-subscription-url")
+            )
+            PkSheetButton(
+                label = stringResource(Res.string.add_manual_subscription_submit),
+                onClick = {
+                    val submitted = manualUrl
+                    manualUrl = ""
+                    isManualEntryOpen = false
+                    onManualSubscriptionUrl(submitted)
+                },
+                primary = true
+            )
+            PkSheetButton(
+                label = stringResource(Res.string.action_back),
+                onClick = {
+                    manualUrl = ""
+                    isManualEntryOpen = false
+                }
+            )
+        } else {
         // No row here points at a purchase. Someone with nothing yet gets the
         // import actions below and nothing else — where they obtained a server
         // list is not this app's business.
@@ -132,7 +181,10 @@ internal fun AddConfigurationBody(
         if (canScanQr) {
             PkSheetActionRow(
                 title = stringResource(Res.string.add_scan_qr),
-                subtitle = stringResource(Res.string.add_scan_qr_subtitle),
+                subtitle = stringResource(
+                    if (showManualSubscriptionUrl) Res.string.add_connection_subtitle
+                    else Res.string.add_scan_qr_subtitle
+                ),
                 icon = PkIcons.QrCodeScanner,
                 accent = true,
                 onClick = onScanQrClick
@@ -141,10 +193,22 @@ internal fun AddConfigurationBody(
 
         PkSheetActionRow(
             title = stringResource(Res.string.add_paste),
-            subtitle = stringResource(Res.string.add_paste_subtitle),
+            subtitle = stringResource(
+                if (showManualSubscriptionUrl) Res.string.add_connection_subtitle
+                else Res.string.add_paste_subtitle
+            ),
             icon = PkIcons.Input,
             onClick = onPasteLinkClick
         )
+
+        if (showManualSubscriptionUrl) {
+            PkSheetActionRow(
+                title = stringResource(Res.string.add_manual_subscription),
+                subtitle = stringResource(Res.string.add_manual_subscription_subtitle),
+                icon = PkIcons.Input,
+                onClick = { isManualEntryOpen = true }
+            )
+        }
 
         PkSheetActionRow(
             title = stringResource(Res.string.add_file),
@@ -170,6 +234,7 @@ internal fun AddConfigurationBody(
                 icon = Icons.Outlined.Add,
                 onClick = onAddCustomLocationClick
             )
+        }
         }
     }
 }

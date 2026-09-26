@@ -38,6 +38,10 @@
     <string name="add_from_phone_subtitle">Scan a code with your phone and paste the link there</string>
     <string name="add_paste">Paste link or URI</string>
     <string name="add_paste_subtitle">HTTP, HTTPS, or olcrtc URI</string>
+    <string name="add_manual_subscription">Enter subscription URL</string>
+    <string name="add_manual_subscription_subtitle">Enter your existing HTTPS subscription link</string>
+    <string name="add_manual_subscription_hint">HTTPS subscription URL</string>
+    <string name="add_manual_subscription_submit">Import subscription</string>
     <string name="add_scan_qr">Scan QR code</string>
     <string name="add_scan_qr_subtitle">Server list or olcrtc URI</string>
     <string name="add_server_list">Add server list</string>
@@ -120,6 +124,7 @@
     <string name="https_sources_none">No HTTPS sources</string>
     <string name="import_empty">No config text found</string>
     <string name="import_failed">Import failed</string>
+    <string name="import_https_required">Enter a valid HTTPS subscription URL</string>
     <string name="import_not_a_link">Not an Apollo.RGA import link</string>
     <string name="import_nothing_valid">No valid Apollo.RGA config found</string>
     <string name="import_partner_unresolved">Apollo.RGA cannot resolve this Happ link. Ask your provider for a direct server-list URL.</string>

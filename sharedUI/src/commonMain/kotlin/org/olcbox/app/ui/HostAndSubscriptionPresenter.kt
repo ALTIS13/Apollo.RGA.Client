@@ -33,7 +33,11 @@ object HostPresenter {
             code.length == 2 && code.all { it in 'A'..'Z' } &&
                 (withoutFlag.length == 2 || !withoutFlag[2].isLetter())
         }
-        val code = flagCode ?: nameCode
+        // Remnawave's current remarks put the destination name before its flag,
+        // e.g. "Netherlands 🇳🇱 · RU Relay". Only the first title segment and
+        // an exact matching name/flag pair may supply a destination here; a
+        // transit flag later in the label must never change the exit country.
+        val code = flagCode ?: nameCode ?: countryCodeFromNamedFlag(withoutFlag)
         val flag = if (flagCode != null) parsedFlag else code?.let(::flagForCode).orEmpty()
         val country = code?.let(::countryName) ?: "Страна не указана"
         val name = withoutFlag.ifBlank { country }
@@ -113,6 +117,17 @@ private fun countryCodeFromFlag(flag: String): String? {
         flag[1] !in '\uDDE6'..'\uDDFF' || flag[3] !in '\uDDE6'..'\uDDFF') return null
     return "${('A'.code + flag[1].code - '\uDDE6'.code).toChar()}${('A'.code + flag[3].code - '\uDDE6'.code).toChar()}"
 }
+
+private fun countryCodeFromNamedFlag(name: String): String? {
+    val destination = name.substringBefore('·').trim()
+    return DISPLAY_COUNTRY_CODES.firstOrNull { code ->
+        destination == "${countryName(code)} ${flagForCode(code)}"
+    }
+}
+
+private val DISPLAY_COUNTRY_CODES = listOf(
+    "NL", "US", "DE", "JP", "IT", "IN", "RU", "GB", "FR", "FI", "SG", "BY"
+)
 
 private fun flagForCode(code: String): String = buildString {
     code.forEach { letter ->

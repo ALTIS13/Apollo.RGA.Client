@@ -38,6 +38,10 @@
     <string name="add_from_phone_subtitle">用手机扫码，在手机上粘贴链接</string>
     <string name="add_paste">粘贴链接或 URI</string>
     <string name="add_paste_subtitle">HTTP、HTTPS 或 olcrtc URI</string>
+    <string name="add_manual_subscription">输入订阅网址</string>
+    <string name="add_manual_subscription_subtitle">输入您现有的 HTTPS 订阅链接</string>
+    <string name="add_manual_subscription_hint">HTTPS 订阅网址</string>
+    <string name="add_manual_subscription_submit">导入订阅</string>
     <string name="add_scan_qr">扫描二维码</string>
     <string name="add_scan_qr_subtitle">服务器列表或 olcrtc URI</string>
     <string name="add_server_list">添加服务器列表</string>
@@ -120,6 +124,7 @@
     <string name="https_sources_none">没有 HTTPS 来源</string>
     <string name="import_empty">未找到配置文本</string>
     <string name="import_failed">导入失败</string>
+    <string name="import_https_required">请输入有效的 HTTPS 订阅网址</string>
     <string name="import_not_a_link">这不是 Apollo.RGA 导入链接</string>
     <string name="import_nothing_valid">未找到有效的 Apollo.RGA 配置</string>
     <string name="import_partner_unresolved">无法识别链接。请打开服务商的机器人，重新复制服务器列表链接。</string>

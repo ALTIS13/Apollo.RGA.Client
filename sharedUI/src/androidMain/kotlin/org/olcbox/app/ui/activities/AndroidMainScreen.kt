@@ -329,9 +329,11 @@ fun AndroidMainScreen(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            viewModel.onFileSelected(it) {
-                reloadLocationsAfterImport()
-            }
+            viewModel.onFileSelected(
+                it,
+                onComplete = { reloadLocationsAfterImport() },
+                onError = { message -> Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
+            )
         }
     }
 

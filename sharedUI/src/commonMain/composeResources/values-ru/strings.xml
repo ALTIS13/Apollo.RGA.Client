@@ -38,6 +38,10 @@
     <string name="add_from_phone_subtitle">Отсканируйте код телефоном и вставьте ссылку там</string>
     <string name="add_paste">Вставить ссылку или URI</string>
     <string name="add_paste_subtitle">HTTP, HTTPS или URI olcrtc</string>
+    <string name="add_manual_subscription">Ввести ссылку подписки</string>
+    <string name="add_manual_subscription_subtitle">Введите существующую HTTPS-ссылку подписки</string>
+    <string name="add_manual_subscription_hint">HTTPS-ссылка подписки</string>
+    <string name="add_manual_subscription_submit">Импортировать подписку</string>
     <string name="add_scan_qr">Сканировать QR-код</string>
     <string name="add_scan_qr_subtitle">Список серверов или URI olcrtc</string>
     <string name="add_server_list">Добавить список серверов</string>
@@ -120,6 +124,7 @@
     <string name="https_sources_none">Нет источников HTTPS</string>
     <string name="import_empty">Текст конфигурации не найден</string>
     <string name="import_failed">Не удалось импортировать</string>
+    <string name="import_https_required">Введите корректную HTTPS-ссылку подписки</string>
     <string name="import_not_a_link">Это не ссылка для импорта в Apollo.RGA</string>
     <string name="import_nothing_valid">Не найдено подходящей конфигурации Apollo.RGA</string>
     <string name="import_partner_unresolved">Apollo.RGA пока не может раскрыть эту ссылку Happ. Запросите у провайдера прямую ссылку на список серверов.</string>

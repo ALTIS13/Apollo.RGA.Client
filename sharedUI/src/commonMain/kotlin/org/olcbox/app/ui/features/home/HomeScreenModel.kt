@@ -9,6 +9,7 @@ import multiplatform_app.sharedui.generated.resources.connect_select_failed
 import multiplatform_app.sharedui.generated.resources.connect_start_failed
 import multiplatform_app.sharedui.generated.resources.import_empty
 import multiplatform_app.sharedui.generated.resources.import_failed
+import multiplatform_app.sharedui.generated.resources.import_https_required
 import multiplatform_app.sharedui.generated.resources.import_not_a_link
 import multiplatform_app.sharedui.generated.resources.import_nothing_valid
 import multiplatform_app.sharedui.generated.resources.import_partner_unresolved
@@ -25,6 +26,8 @@ import multiplatform_app.sharedui.generated.resources.smart_through
 import multiplatform_app.sharedui.generated.resources.smart_unchecked
 import multiplatform_app.sharedui.generated.resources.smart_whitelist_through
 import org.jetbrains.compose.resources.getString
+import io.ktor.http.Url
+import io.ktor.http.URLProtocol
 import org.olcbox.app.data.datasource.createProxyHttpClient
 import org.olcbox.app.data.model.LocationEntry
 import org.olcbox.app.net.SmartConnect
@@ -672,7 +675,13 @@ class HomeScreenViewModel(
         onError: (String) -> Unit = {}
     ) {
         viewModelScope.launch {
-            val text = configImporter.readTextFromSource(fileSource)
+            val text = try {
+                configImporter.readTextFromSource(fileSource)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
             if (text == null) {
                 onError(getString(Res.string.import_read_failed))
             } else {
@@ -699,6 +708,19 @@ class HomeScreenViewModel(
             return
         }
         onImportFullConfig(payload, onComplete, onError)
+    }
+
+    fun onImportManualSubscriptionUrl(
+        rawUrl: String,
+        onComplete: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val url = validManualSubscriptionUrlOrNull(rawUrl)
+        if (url == null) {
+            viewModelScope.launch { onError(getString(Res.string.import_https_required)) }
+            return
+        }
+        onImportFullConfig(url, onComplete, onError)
     }
 
     fun onImportFullConfig(
@@ -970,3 +992,15 @@ data class HomeScreenState(
  */
 private const val SUBSCRIPTION_AUTO_REFRESH_POLL_MS = 5L * 60L * 1_000L
 private const val PRE_DISCONNECT_REFRESH_TIMEOUT_MS = 3_000L
+
+/** Validate only the manual URL field; other import sources retain their own contracts. */
+private fun validManualSubscriptionUrlOrNull(raw: String): String? {
+    val value = raw.trim()
+    if (value.isEmpty() || value.length > 8192 || !value.startsWith("https://", ignoreCase = true)) return null
+    if (value.any { it.isWhitespace() || it.code < 32 || it.code == 127 || it == '\\' || it == '#' }) return null
+    val authority = value.substring(8).substringBefore('/').substringBefore('?')
+    if (authority.isEmpty() || '@' in authority || '%' in authority) return null
+    val parsed = runCatching { Url(value) }.getOrNull() ?: return null
+    if (parsed.protocol != URLProtocol.HTTPS || parsed.host.isBlank()) return null
+    return value // Preserve the literal query/token; URL serialization can change its meaning.
+}
