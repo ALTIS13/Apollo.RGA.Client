@@ -27,6 +27,15 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "androidApp/jniLibs")
     args = parser.parse_args()
     source, out = args.source.resolve(), args.out.resolve()
+    try:
+        properties = (args.ndk / "source.properties").read_text(encoding="utf-8")
+        revisions = [value.strip() for line in properties.splitlines()
+                     for key, separator, value in [line.partition("=")]
+                     if separator and key.strip() == "Pkg.Revision"]
+    except (OSError, UnicodeError):
+        raise SystemExit("Android NDK source.properties is missing or unreadable")
+    if revisions != [PINS["ndk"]]:
+        raise SystemExit(f"Android NDK must have exact Pkg.Revision {PINS['ndk']}")
     if not source.exists():
         subprocess.run(["git", "clone", "--depth", "1", "--branch", "v" + PINS["version"],
                         "https://github.com/XTLS/Xray-core.git", str(source)], check=True)
@@ -34,9 +43,20 @@ def main():
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=source, text=True).strip()
     if commit != PINS["commit"] or dirty:
         raise SystemExit("Xray source must be clean and match the exact Android commit")
-    env = os.environ.copy()
-    env["GOTOOLCHAIN"] = "go" + PINS["go"]
-    env["GOWORK"] = "off"
+    # Do not inherit `go env -w`, architecture tuning, experiments, custom flags
+    # or compiler search paths. Keep ordinary OS/network/proxy settings intact.
+    compiler_environment = {
+        "CC", "CXX", "AR", "AS", "FC", "LD", "RANLIB", "PKG_CONFIG",
+        "CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
+        "GCC_EXEC_PREFIX", "CCC_OVERRIDE_OPTIONS", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET",
+        "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR", "SOURCE_DATE_EPOCH",
+        "INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "LINK", "_LINK_",
+    }
+    env = {key: value for key, value in os.environ.items()
+           if not key.upper().startswith(("GO", "CGO_")) and key.upper() not in compiler_environment}
+    env.update(GOENV="off", GOTOOLCHAIN="go" + PINS["go"], GOWORK="off",
+               GOFLAGS="", GOEXPERIMENT="", GOAMD64="v1", GOARM64="v8.0")
     version = subprocess.check_output([args.go, "env", "GOVERSION"], cwd=source, env=env, text=True).strip()
     if version != "go" + PINS["go"]:
         raise SystemExit("Unexpected Android Xray Go toolchain")
