@@ -1108,10 +1108,13 @@ class LocationsRepositoryImpl(
     ): LocationBundleV4 {
         val currentBundle = current?.normalized()
         if (currentBundle == null || currentBundle.locations.isEmpty()) {
-            // The imported bundle carries default settings; the user's are on the
-            // one being replaced. Returning `imported` unchanged silently reset
-            // every preference the moment someone imported into an empty app.
-            return imported.copy(settings = currentBundle?.settings ?: imported.settings)
+            // Even before the first location, the stored bundle owns device-level
+            // preferences and acknowledgements. An import contributes only its
+            // locations and selected location, never its device identity.
+            return (currentBundle ?: LocationBundleV4()).copy(
+                activeLocationId = imported.activeLocationId,
+                locations = imported.locations
+            )
         }
 
         // Importing a subscription URL that is already here is nearly always

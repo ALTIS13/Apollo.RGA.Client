@@ -14,6 +14,9 @@ import org.olcbox.app.data.identity.PersistentDeviceIdentityProvider
 import org.olcbox.app.data.model.LocationBundleV4
 import org.olcbox.app.data.model.LocationConfig
 import org.olcbox.app.data.model.LocationEntry
+import org.olcbox.app.data.model.RoutingMode
+import org.olcbox.app.data.model.RoutingSettings
+import org.olcbox.app.data.model.SubscriptionSettings
 import org.olcbox.app.data.share.ConfigShareService
 import io.ktor.http.HttpStatusCode
 import org.olcbox.app.net.PartnerLinkResolver
@@ -29,6 +32,33 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LocationsRepositoryImplTest {
+    @Test fun firstLiteralImportKeepsEmptyDevicesSettingsRoutingAndAcknowledgements() = runTest {
+        val localSettings = SubscriptionSettings(connectOnLaunch = true, autoUpdate = false)
+        val localRouting = RoutingSettings(mode = RoutingMode.Global, verboseDebugLogs = true)
+        val source = FakeLocationsDataSource(LocationBundleV4(
+            settings = localSettings,
+            routing = localRouting,
+            vpnDisclosureAcceptedAt = 111L,
+            apolloVpnDisclosureAcceptedAt = 222L,
+            apolloVpnDisclosureVersion = 1,
+            onboardingSeenAt = 333L
+        ))
+        val repo = LocationsRepositoryImpl(source)
+        val link = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443" +
+            "?security=reality&pbk=PUBKEY&sid=ab&sni=example.test&flow=xtls-rprx-vision&type=tcp#NL"
+
+        assertTrue(repo.importText(link))
+        val stored = assertNotNull(source.stored)
+        assertEquals(1, stored.locations.size)
+        assertEquals(stored.locations.single().storageId, stored.activeLocationId)
+        assertEquals(localSettings, stored.settings)
+        assertEquals(localRouting, stored.routing)
+        assertEquals(111L, stored.vpnDisclosureAcceptedAt)
+        assertEquals(222L, stored.apolloVpnDisclosureAcceptedAt)
+        assertEquals(1, stored.apolloVpnDisclosureVersion)
+        assertEquals(333L, stored.onboardingSeenAt)
+    }
+
     @Test fun releaseRepositoryHidesStoredOlcrtcWithoutDeletingItsRecord() = runTest {
         val room = LocationEntry.from("room", LocationConfig(name = "Private room", id = "room-a", key = "key-a"))
         val ordinary = LocationEntry.from(
