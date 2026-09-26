@@ -7,9 +7,16 @@ import org.olcbox.app.ui.tv.hasCamera
 import org.olcbox.app.ui.tv.PhoneImportSheet
 import org.olcbox.app.ui.features.home.localizedSingleMessage
 import multiplatform_app.sharedui.generated.resources.Res
+import multiplatform_app.sharedui.generated.resources.action_cancel
+import multiplatform_app.sharedui.generated.resources.action_close
 import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.location_qr
 import multiplatform_app.sharedui.generated.resources.subscription_enrollment_unavailable
+import multiplatform_app.sharedui.generated.resources.apollo_external_import_title
+import multiplatform_app.sharedui.generated.resources.apollo_external_import_body
+import multiplatform_app.sharedui.generated.resources.apollo_external_import_confirm
+import multiplatform_app.sharedui.generated.resources.apollo_external_import_conflict
+import multiplatform_app.sharedui.generated.resources.apollo_external_import_conflict_title
 import multiplatform_app.sharedui.generated.resources.qr_imported
 import multiplatform_app.sharedui.generated.resources.server_list_added
 import multiplatform_app.sharedui.generated.resources.server_list_not_found
@@ -36,6 +43,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -147,6 +157,7 @@ fun AndroidMainScreen(
     val pendingVpnAction = remember {
         mutableStateOf<PendingVpnPermissionAction?>(null)
     }
+    val externalImportConfirmation = remember { ExternalImportConfirmationState() }
     var isAppSettingsOpen by remember { mutableStateOf(false) }
     var appSettingsInitialRoute by remember { mutableStateOf(AppSettingsInitialRoute.Hub) }
     var shareSheetPayload by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -310,24 +321,56 @@ fun AndroidMainScreen(
         }
     }
 
-    // A link from a bot or a panel goes through the same import as a paste;
-    // the person sees the list appear, or a toast saying why not.
+    // The policy hands us a literal HTTPS subscription URL, not its App Link
+    // envelope. Stage it until the person confirms it below.
     if (pendingImportLink != null) {
         LaunchedEffect(pendingImportLink) {
             pendingImportLink.collect { link ->
                 if (link == null) return@collect
-                pendingImportLink.value = null
-                viewModel.onImportLink(
-                    uri = link,
-                    onComplete = {
-                        reloadLocationsAfterImport {
-                            Toast.makeText(context, serverListAddedText, Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onError = { message -> Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
-                )
+                if (pendingImportLink.compareAndSet(link, null)) {
+                    externalImportConfirmation.offer(link)
+                }
             }
         }
+    }
+
+    if (externalImportConfirmation.hasConflict) {
+        AlertDialog(
+            onDismissRequest = externalImportConfirmation::dismiss,
+            title = { Text(stringResource(Res.string.apollo_external_import_conflict_title)) },
+            text = { Text(stringResource(Res.string.apollo_external_import_conflict)) },
+            confirmButton = {
+                TextButton(onClick = externalImportConfirmation::dismiss) {
+                    Text(stringResource(Res.string.action_close))
+                }
+            }
+        )
+    } else if (externalImportConfirmation.pendingLink != null) {
+        AlertDialog(
+            onDismissRequest = externalImportConfirmation::dismiss,
+            title = { Text(stringResource(Res.string.apollo_external_import_title)) },
+            text = { Text(stringResource(Res.string.apollo_external_import_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    externalImportConfirmation.confirm { link ->
+                        viewModel.onImportManualSubscriptionUrl(
+                            rawUrl = link,
+                            onComplete = {
+                                reloadLocationsAfterImport {
+                                    Toast.makeText(context, serverListAddedText, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onError = { message -> Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
+                        )
+                    }
+                }) { Text(stringResource(Res.string.apollo_external_import_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = externalImportConfirmation::dismiss) {
+                    Text(stringResource(Res.string.action_cancel))
+                }
+            }
+        )
     }
 
     val vpnRequestLauncher = rememberLauncherForActivityResult(

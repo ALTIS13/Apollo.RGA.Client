@@ -548,6 +548,11 @@
     <string name="apollo_onboarding_import">添加我的订阅</string>
     <string name="apollo_onboarding_skip">暂不</string>
     <string name="apollo_onboarding_hint">扫描二维码或粘贴准确的 HTTPS 链接。无需新建账号。</string>
+    <string name="apollo_external_import_title">添加此订阅？</string>
+    <string name="apollo_external_import_body">Apollo.RGA 收到了来自其他应用的订阅链接。仅当你亲自打开了自己的订阅页面时才继续。此处不会显示私密链接。</string>
+    <string name="apollo_external_import_confirm">添加订阅</string>
+    <string name="apollo_external_import_conflict">添加订阅的请求已改变。为确保安全，请重新打开订阅页面。</string>
+    <string name="apollo_external_import_conflict_title">导入请求已更改</string>
     <string name="vpn_disclosure_decline">暂不</string>
     <string name="vpn_disclosure_subtitle">系统 VPN · 需要你的同意</string>
     <string name="vpn_disclosure_title">VPN 连接如何工作</string>

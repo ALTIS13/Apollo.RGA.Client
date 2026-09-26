@@ -558,6 +558,11 @@
     <string name="apollo_onboarding_import">Добавить мою подписку</string>
     <string name="apollo_onboarding_skip">Не сейчас</string>
     <string name="apollo_onboarding_hint">Отсканируйте QR-код или вставьте точную HTTPS-ссылку. Новый аккаунт не нужен.</string>
+    <string name="apollo_external_import_title">Добавить подписку?</string>
+    <string name="apollo_external_import_body">Apollo.RGA получил ссылку из другого приложения. Продолжайте, только если вы открыли свою страницу подписки. Секретная ссылка здесь не показывается.</string>
+    <string name="apollo_external_import_confirm">Добавить подписку</string>
+    <string name="apollo_external_import_conflict">Запрос на добавление изменился. Для безопасности откройте страницу подписки ещё раз.</string>
+    <string name="apollo_external_import_conflict_title">Запрос изменился</string>
     <string name="vpn_disclosure_decline">Не сейчас</string>
     <string name="vpn_disclosure_subtitle">Системный VPN · с вашего согласия</string>
     <string name="vpn_disclosure_title">Как работает VPN-подключение</string>

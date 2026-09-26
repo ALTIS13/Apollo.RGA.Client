@@ -548,6 +548,11 @@
     <string name="apollo_onboarding_import">افزودن اشتراک من</string>
     <string name="apollo_onboarding_skip">فعلاً نه</string>
     <string name="apollo_onboarding_hint">کد QR را اسکن کنید یا پیوند دقیق HTTPS را جای‌گذاری کنید. حساب جدید لازم نیست.</string>
+    <string name="apollo_external_import_title">افزودن این اشتراک؟</string>
+    <string name="apollo_external_import_body">Apollo.RGA پیوند اشتراک را از برنامهٔ دیگری دریافت کرده است. فقط اگر خودتان صفحهٔ اشتراک را باز کرده‌اید، ادامه دهید. پیوند خصوصی در اینجا نمایش داده نمی‌شود.</string>
+    <string name="apollo_external_import_confirm">افزودن اشتراک</string>
+    <string name="apollo_external_import_conflict">درخواست افزودن اشتراک تغییر کرد. برای امنیت، صفحهٔ اشتراک را دوباره باز کنید.</string>
+    <string name="apollo_external_import_conflict_title">درخواست تغییر کرد</string>
     <string name="vpn_disclosure_decline">الان نه</string>
     <string name="vpn_disclosure_subtitle">VPN سیستم · با اجازهٔ شما</string>
     <string name="vpn_disclosure_title">اتصال VPN چگونه کار می‌کند</string>

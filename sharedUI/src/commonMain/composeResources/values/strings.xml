@@ -558,6 +558,11 @@
     <string name="apollo_onboarding_import">Add my subscription</string>
     <string name="apollo_onboarding_skip">Not now</string>
     <string name="apollo_onboarding_hint">Scan its QR code or paste the exact HTTPS link. No new account is needed.</string>
+    <string name="apollo_external_import_title">Add this subscription?</string>
+    <string name="apollo_external_import_body">Apollo.RGA received a subscription link from another app. Continue only if you opened your own subscription page. The private link is not shown here.</string>
+    <string name="apollo_external_import_confirm">Add subscription</string>
+    <string name="apollo_external_import_conflict">The import request changed. For safety, open your subscription page again.</string>
+    <string name="apollo_external_import_conflict_title">Import request changed</string>
     <string name="vpn_disclosure_decline">Not now</string>
     <string name="vpn_disclosure_subtitle">System VPN · your approval</string>
     <string name="vpn_disclosure_title">How the VPN connection works</string>
