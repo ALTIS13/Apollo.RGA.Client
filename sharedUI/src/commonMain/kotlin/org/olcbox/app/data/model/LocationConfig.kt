@@ -398,6 +398,7 @@ data class SubscriptionMetadata(
             updateIntervalHours = updateIntervalHours?.coerceIn(MIN_UPDATE_INTERVAL_HOURS, MAX_UPDATE_INTERVAL_HOURS),
             lastRefreshAtEpochMs = lastRefreshAtEpochMs?.takeIf { it > 0 },
             expiresAtEpochMs = expiresAtEpochMs?.takeIf { it > 0 },
+            expiryKnown = expiryKnown || expiresAtEpochMs != null,
             usedBytes = usedBytes?.takeIf { it >= 0 },
             totalBytes = totalBytes?.takeIf { it >= 0 },
             supportUrl = supportUrl.cleanMetadataValue(),
@@ -436,9 +437,9 @@ data class SubscriptionMetadata(
     enum class AccessState { ALLOWED, UNKNOWN, EXPIRED, LIMITED }
 
     fun accessStateAt(nowEpochMs: Long): AccessState = when {
-        expiryKnown && expiresAtEpochMs != null && nowEpochMs >= expiresAtEpochMs -> AccessState.EXPIRED
+        (expiryKnown || expiresAtEpochMs != null) && expiresAtEpochMs != null && nowEpochMs >= expiresAtEpochMs -> AccessState.EXPIRED
         quotaKnown && totalBytes != null && totalBytes > 0 && usedBytes != null && usedBytes >= totalBytes -> AccessState.LIMITED
-        !expiryKnown || !quotaKnown -> AccessState.UNKNOWN
+        !(expiryKnown || expiresAtEpochMs != null) || !quotaKnown -> AccessState.UNKNOWN
         else -> AccessState.ALLOWED
     }
 

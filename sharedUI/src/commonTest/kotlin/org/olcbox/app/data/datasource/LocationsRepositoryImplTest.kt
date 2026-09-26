@@ -731,6 +731,46 @@ class LocationsRepositoryImplTest {
     }
 
     @Test
+    fun reorderedSameEndpointXrayProfilesKeepSelectedExactConfig() = runTest {
+        val first = XrayJsonSubscriptionFixtures.vless
+        val second = first
+            .replace("Synthetic exit A", "Synthetic exit C")
+            .replace("00000000-0000-4000-8000-000000000000", "11111111-1111-4111-8111-111111111111")
+            .replace("domain:example.invalid", "domain:alternate.invalid")
+        var body = "[$first,$second]"
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        val selected = source.stored!!.locations[1]
+        repo.setActiveLocationId(selected.storageId)
+
+        body = "[$second,$first]"
+        assertEquals(1, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertEquals(selected.storageId, repo.getActiveLocationId())
+        assertEquals(selected.location.xrayConfig, repo.getActiveLocation()!!.location.xrayConfig)
+    }
+
+    @Test
+    fun changedAmbiguousSelectedXrayProfileDoesNotGuessByListOrder() = runTest {
+        val first = XrayJsonSubscriptionFixtures.vless
+        val second = first.replace("Synthetic exit A", "Synthetic exit C")
+            .replace("00000000-0000-4000-8000-000000000000", "11111111-1111-4111-8111-111111111111")
+        var body = "[$first,$second]"
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText("https://example.test/sub"))
+        repo.setActiveLocationId(source.stored!!.locations[1].storageId)
+        val before = source.stored
+
+        val changedSecond = second.replace("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
+        body = "[$changedSecond,$first]"
+        val report = repo.refreshSubscription("https://example.test/sub")
+        assertEquals(0, report.updatedCount)
+        assertTrue(report.hasFailures)
+        assertEquals(before, source.stored)
+    }
+
+    @Test
     fun xrayJsonImportRetainsLiteralUserUrlDespiteMoveHeader() = runTest {
         val source = FakeLocationsDataSource()
         val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
@@ -843,6 +883,30 @@ class LocationsRepositoryImplTest {
         assertEquals(11L, metadata.usedBytes)
         assertEquals(10L, metadata.totalBytes)
         assertEquals(2_001_000L, metadata.expiresAtEpochMs)
+    }
+
+    @Test
+    fun oldBundleExpiryRemainsEnforcedOfflineAndAfterHeaderlessRefresh() = runTest {
+        val oldBundle = kotlinx.serialization.json.Json.decodeFromString<LocationBundleV4>("""
+            {"active_location_id":"old","locations":[{"storage_id":"old","name":"Old",
+             "subscription_url":"https://example.test/sub","endpoint":{"room_id":"room","key":"${"k".repeat(64)}"},
+             "metadata":{"subscription":{"expires_at_epoch_ms":2001000}}}]}
+        """.trimIndent())
+        var online = false
+        val source = FakeLocationsDataSource(oldBundle)
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            if (online) respond(XrayJsonSubscriptionFixtures.body)
+            else respond("offline", HttpStatusCode.ServiceUnavailable)
+        }), nowEpochMs = { 2_002_000L })
+
+        assertNull(repo.getActiveLocation(), "legacy persisted expiry is known, even while offline")
+        assertEquals(0, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertNull(repo.getActiveLocation())
+
+        online = true
+        assertEquals(1, repo.refreshSubscription("https://example.test/sub").updatedCount)
+        assertNull(repo.getActiveLocation(), "a headerless refresh cannot erase a known old expiry")
+        assertTrue(source.stored!!.locations.all { it.metadata?.subscription?.expiryKnown == true })
     }
 
     @Test

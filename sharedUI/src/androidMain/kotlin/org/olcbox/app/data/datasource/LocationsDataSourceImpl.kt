@@ -36,11 +36,13 @@ class LocationsDataSourceImpl(
         val file = primary.takeIf { it.exists() || File(it.path + ".bak").exists() }
             ?: File(context.filesDir, LEGACY_LOCATIONS_BUNDLE_FILE_NAME).takeIf { it.exists() }
             ?: return@withContext null
-        runCatching {
+        val bundle = runCatching {
             val content = if (file == primary) AtomicFile(file).openRead().bufferedReader().use { it.readText() }
                 else file.readText()
             json.decodeFromString(LocationBundleV4.serializer(), content).normalized()
         }.getOrNull()
+        if (bundle != null) reconcileActiveLocationConfig(bundle)
+        bundle
     }
 
     override suspend fun saveLocationBundle(bundle: LocationBundleV4): Unit = withContext(Dispatchers.IO) {
@@ -105,6 +107,29 @@ class LocationsDataSourceImpl(
             it[KEY_IS_VPN_CONFIG_READY] = active.location.isComplete()
             it[KEY_VPN_CONFIG_PATH] = file.absolutePath
         }
+    }
+
+    private suspend fun reconcileActiveLocationConfig(bundle: LocationBundleV4) {
+        val active = bundle.locations.firstOrNull { it.storageId == bundle.activeLocationId }
+        val file = File(context.filesDir, ACTIVE_LOCATION_CONFIG_FILE_NAME)
+        val prefs = context.vpnPrefDataStore.data.first()
+        val expected = active?.let { bundle.copy(locations = listOf(it)).normalized() }
+        val actual = runCatching {
+            AtomicFile(file).openRead().bufferedReader().use { reader ->
+                json.decodeFromString(LocationBundleV4.serializer(), reader.readText()).normalized()
+            }
+        }.getOrNull()
+        val ready = active?.location?.isComplete() == true
+        val pathMatches = if (active == null) {
+            prefs[KEY_VPN_CONFIG_PATH] == null && !file.exists() && !File(file.path + ".bak").exists()
+        } else {
+            prefs[KEY_VPN_CONFIG_PATH] == file.absolutePath
+        }
+        if (actual == expected && prefs[KEY_IS_VPN_CONFIG_READY] == ready && pathMatches
+        ) return
+
+        context.vpnPrefDataStore.edit { it[KEY_IS_VPN_CONFIG_READY] = false }
+        updateActiveLocationConfig(bundle)
     }
 
     private fun writeAtomic(file: File, content: String) {

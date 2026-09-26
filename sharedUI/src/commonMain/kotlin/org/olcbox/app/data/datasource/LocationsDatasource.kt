@@ -353,7 +353,7 @@ class LocationsRepositoryImpl(
             }
 
             val reusedBySignature = previousEntries
-                .groupBy { subscriptionSignature(it.location) }
+                .groupBy { exactSubscriptionSignature(it.location) }
                 .mapValues { (_, entries) -> entries.toMutableList() }
 
             // Which previous entry each refreshed line inherits, decided for all of them
@@ -362,9 +362,32 @@ class LocationsRepositoryImpl(
             // list names one origin's carriers alike): named while an inherited id was
             // still free, the new line got that very id, normalized() kept one entry per
             // id, and the new carrier vanished beside the old one.
-            val reusedEntries = refreshed.map { entry ->
-                val reusedPool = reusedBySignature[subscriptionSignature(entry.location)]
+            val exactMatches = refreshed.map { entry ->
+                val reusedPool = reusedBySignature[exactSubscriptionSignature(entry.location)]
                 if (reusedPool.isNullOrEmpty()) null else reusedPool.removeAt(0)
+            }
+            val matchedIds = exactMatches.filterNotNull().mapTo(mutableSetOf()) { it.storageId }
+            val previousEndpointCounts = previousEntries.groupingBy { subscriptionSignature(it.location) }.eachCount()
+            val refreshedEndpointCounts = refreshed.groupingBy { subscriptionSignature(it.location) }.eachCount()
+            val reusedEntries = refreshed.mapIndexed { index, entry ->
+                exactMatches[index] ?: run {
+                    val endpoint = subscriptionSignature(entry.location)
+                    if (previousEndpointCounts[endpoint] == 1 && refreshedEndpointCounts[endpoint] == 1) {
+                        previousEntries.singleOrNull {
+                            it.storageId !in matchedIds && subscriptionSignature(it.location) == endpoint
+                        }?.also { matchedIds += it.storageId }
+                    } else null
+                }
+            }
+            val selectedPrevious = previousEntries.firstOrNull { it.storageId == activeBefore }
+            if (selectedPrevious?.location?.xrayConfig != null &&
+                reusedEntries.none { it?.storageId == activeBefore } &&
+                (previousEndpointCounts[subscriptionSignature(selectedPrevious.location)] != 1 ||
+                    refreshedEndpointCounts[subscriptionSignature(selectedPrevious.location)] != 1)
+            ) {
+                preservePreviousEntries(previousEntries)
+                failures += SubscriptionRefreshFailure(url, SubscriptionRefreshError.Rejected)
+                return@forEach
             }
             reusedEntries.forEach { reused -> reused?.let { usedStorageIds.add(it.storageId) } }
 
@@ -1488,6 +1511,12 @@ class LocationsRepositoryImpl(
             normalized.key,
             normalized.rawLink?.substringBefore('#').orEmpty()
         ).joinToString("|")
+    }
+
+    private fun exactSubscriptionSignature(location: LocationConfig): String {
+        val config = location.normalized()
+        return config.xrayConfig?.let { "${config.kind}|${config.name}|$it" }
+            ?: subscriptionSignature(config)
     }
 
     private fun LocationConfig.storageSlug(): String {
