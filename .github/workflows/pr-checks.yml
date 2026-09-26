@@ -186,13 +186,61 @@ jobs:
           export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
           gomobile init
 
+      # APK assembly now rejects missing cores. Build the same pinned Android
+      # executables as release.yml, but only for the arm64 ABI this PR job needs.
+      - name: Build pinned sing-box for Android arm64
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "v${SINGBOX_VERSION}" \
+            https://github.com/SagerNet/sing-box.git "${RUNNER_TEMP}/sing-box"
+          cd "${RUNNER_TEMP}/sing-box"
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          OUT="${GITHUB_WORKSPACE}/olcbox/androidApp/jniLibs/arm64-v8a"
+          mkdir -p "${OUT}"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 GOARM=7 \
+          CC="${NDK_BIN}/aarch64-linux-android23-clang" \
+          CXX="${NDK_BIN}/aarch64-linux-android23-clang++" \
+          go build -trimpath -o "${OUT}/libsingboxcore.so" -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
+            ./cmd/sing-box
+
+      - name: Build pinned Xray for Android arm64
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "v${XRAY_VERSION}" \
+            https://github.com/XTLS/Xray-core.git "${RUNNER_TEMP}/xray"
+          cd "${RUNNER_TEMP}/xray"
+          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          OUT="${GITHUB_WORKSPACE}/olcbox/androidApp/jniLibs/arm64-v8a"
+          mkdir -p "${OUT}"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 GOARM=7 \
+          CC="${NDK_BIN}/aarch64-linux-android23-clang" \
+          CXX="${NDK_BIN}/aarch64-linux-android23-clang++" \
+          go build -trimpath -buildvcs=false -o "${OUT}/libxraycore.so" \
+            -ldflags "-X github.com/xtls/xray-core/core.build=v${XRAY_VERSION} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
+            ./main
+
+      - name: Verify Android cores have 16 KB alignment
+        working-directory: olcbox
+        run: |
+          set -euo pipefail
+          for core in androidApp/jniLibs/arm64-v8a/libsingboxcore.so androidApp/jniLibs/arm64-v8a/libxraycore.so; do
+            align="$(readelf -lW "$core" | awk '/^  LOAD/{print $NF; exit}')"
+            if [ -z "$align" ] || [ $(( align % 16384 )) -ne 0 ]; then
+              echo "Android core is not 16 KB aligned: ${core} (${align})" >&2
+              exit 1
+            fi
+          done
+
       - name: Run checks
         working-directory: olcbox
         run: |
           export OLCRTC_REPO="${{ github.workspace }}/olcrtc"
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
-          ./gradlew :sharedUI:jvmTest :desktopApp:compileKotlin :androidApp:assembleDebug --stacktrace
+          ./gradlew -Polcbox.android.abiFilters=arm64-v8a :sharedUI:jvmTest :desktopApp:compileKotlin :androidApp:assembleDebug --stacktrace
 
       # Instrumented tests still exercise resource loading on a device, while
       # this cheap archive check protects every normal PR build as well.
