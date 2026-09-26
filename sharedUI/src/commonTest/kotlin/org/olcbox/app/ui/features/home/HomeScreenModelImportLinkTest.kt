@@ -65,6 +65,36 @@ class HomeScreenModelImportLinkTest {
     private val realityLink = "vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443" +
         "?security=reality&encryption=none&pbk=PUBKEY&sid=ab12&fp=chrome&sni=www.example.com&flow=xtls-rprx-vision&type=tcp#DE"
 
+    @Test fun selectedOnlyToggleBypassesPersistedLowestChoice() = runTest {
+        source.stored = LocationBundleV4(
+            activeLocationId = "one",
+            locations = listOf(
+                org.olcbox.app.data.model.LocationEntry(
+                    storageId = "one", subscriptionUrl = "https://example.com/sub",
+                    kind = org.olcbox.app.net.LocationKind.Vless, rawLink = realityLink
+                ),
+                org.olcbox.app.data.model.LocationEntry(
+                    storageId = "two", subscriptionUrl = "https://example.com/sub",
+                    kind = org.olcbox.app.net.LocationKind.Vless, rawLink = realityLink
+                )
+            ),
+            settings = org.olcbox.app.data.model.SubscriptionSettings(autoUpdate = false, autoSelectLowest = true)
+        )
+        val vpn = IdleVpnManager()
+        vpn.probe = { error("Selected-only connect must not probe another host") }
+        val vm = viewModel(vpn)
+        try {
+            withContext(Dispatchers.Default) { withTimeout(10_000) { vm.subscriptionSettingsLoaded.first { it } } }
+            vm.requestSelectedOnlyForNextToggle()
+            vm.ToggleVpn()
+            withContext(Dispatchers.Default) { withTimeout(10_000) {
+                while (vpn.starts == 0) kotlinx.coroutines.delay(10)
+            } }
+            assertEquals(1, vpn.starts)
+            assertEquals("one", repository.getActiveLocation()?.storageId)
+        } finally { vm.viewModelScope.cancel() }
+    }
+
     @Test fun stopDuringLowestRankingCancelsThePendingStart() = runTest {
         source.stored = LocationBundleV4(
             activeLocationId = "one",

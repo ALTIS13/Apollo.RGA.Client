@@ -4,6 +4,7 @@ import multiplatform_app.sharedui.generated.resources.Res
 import org.jetbrains.compose.resources.stringResource
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_accept
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_body
+import multiplatform_app.sharedui.generated.resources.apollo_vpn_disclosure_body
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_decline
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_subtitle
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_title
@@ -57,6 +58,7 @@ import org.olcbox.app.ui.theme.LocalPkPalette
 fun VpnDisclosureScreen(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
+    apolloCopy: Boolean = false,
 ) {
     PkBottomSheet(
         title = stringResource(Res.string.vpn_disclosure_title),
@@ -64,13 +66,13 @@ fun VpnDisclosureScreen(
         onDismiss = onDecline,
         dismissible = false
     ) {
-        VpnDisclosureBody(onAccept = onAccept, onDecline = onDecline)
+        VpnDisclosureBody(onAccept = onAccept, onDecline = onDecline, apolloCopy = apolloCopy)
     }
 }
 
 /** The sheet's contents, separately so a test can render them. */
 @Composable
-internal fun VpnDisclosureBody(onAccept: () -> Unit, onDecline: () -> Unit) {
+internal fun VpnDisclosureBody(onAccept: () -> Unit, onDecline: () -> Unit, apolloCopy: Boolean = false) {
     val palette = LocalPkPalette.current
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(
@@ -87,7 +89,9 @@ internal fun VpnDisclosureBody(onAccept: () -> Unit, onDecline: () -> Unit) {
                 .padding(15.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            disclosureBlocks(stringResource(Res.string.vpn_disclosure_body)).forEach { block ->
+            val body = if (apolloCopy) stringResource(Res.string.apollo_vpn_disclosure_body)
+                else stringResource(Res.string.vpn_disclosure_body)
+            disclosureBlocks(body).forEach { block ->
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     block.heading?.let { heading ->
                         Text(

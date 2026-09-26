@@ -6,6 +6,7 @@ import multiplatform_app.sharedui.generated.resources.locations_count
 import multiplatform_app.sharedui.generated.resources.routing_bypass_russia_note
 import multiplatform_app.sharedui.generated.resources.settings_title
 import multiplatform_app.sharedui.generated.resources.vpn_disclosure_body
+import multiplatform_app.sharedui.generated.resources.apollo_vpn_disclosure_body
 import org.jetbrains.compose.resources.getPluralString
 import org.jetbrains.compose.resources.getString
 import multiplatform_app.sharedui.generated.resources.allStringResources
@@ -67,6 +68,16 @@ class LocalizationTest {
     // resource, so the English resource is that text, character for character.
     @Test fun theDisclosureShownIsTheOneTested() {
         assertEquals(DISCLOSURE_BODY, inLocale("en") { getString(Res.string.vpn_disclosure_body) })
+    }
+
+    @Test fun apolloAndroidDisclosureExplainsSplitRoutingAndMetadataWithoutOverpromising() {
+        val body = inLocale("en") { getString(Res.string.apollo_vpn_disclosure_body) }
+        assertTrue("system VPN permission" in body)
+        assertTrue("RU Relay" in body)
+        assertTrue("may go directly" in body)
+        assertTrue("connection metadata" in body)
+        assertFalse("nowhere else" in body)
+        assertFalse("Nothing is collected" in body)
     }
 
     // Every translation of the notice keeps every section and paragraph of a required

@@ -103,6 +103,12 @@ class HomeScreenViewModel(
 
     private var selectionJob: Job? = null
     private var pendingLowestCandidates: List<String>? = null
+    private var selectedOnlyForNextToggle = false
+
+    /** The Android home names one selected host, so its action must start that host. */
+    fun requestSelectedOnlyForNextToggle() {
+        selectedOnlyForNextToggle = true
+    }
 
     /** Manual choice/stop wins over a pending rank or failover cooldown. */
     fun cancelAutomaticSelection() {
@@ -245,6 +251,7 @@ class HomeScreenViewModel(
 
     /** Android calls this when its system permission sheet is declined. */
     fun cancelPendingLowest() {
+        selectedOnlyForNextToggle = false
         if (pendingLowestCandidates != null) {
             pendingLowestCandidates = null
             _state.update { it.copy(isVpnLoading = false) }
@@ -495,6 +502,9 @@ class HomeScreenViewModel(
 
     fun ToggleVpn() {
         val status = vpnManager.status.value
+        val selectedOnly = selectedOnlyForNextToggle
+        selectedOnlyForNextToggle = false
+        if (selectedOnly) pendingLowestCandidates = null
         pendingLowestCandidates?.let { ranked ->
             pendingLowestCandidates = null
             startLowest(ranked)
@@ -541,9 +551,9 @@ class HomeScreenViewModel(
                         return@launch
                     }
                     val settings = locationsRepository.getSubscriptionSettings()
-                    if (settings.lowestEnabledFor(active.subscriptionUrl)) {
+                    if (!selectedOnly && settings.lowestEnabledFor(active.subscriptionUrl)) {
                         startLowest()
-                    } else if (settings.smartConnect && vpnManager.canProbeTransports) {
+                    } else if (!selectedOnly && settings.smartConnect && vpnManager.canProbeTransports) {
                         startSmartConnect(active)
                     } else {
                         vpnManager.startVpn()

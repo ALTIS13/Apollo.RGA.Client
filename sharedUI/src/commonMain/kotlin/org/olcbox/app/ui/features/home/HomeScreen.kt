@@ -53,7 +53,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.olcbox.app.admin.AdminState
 import org.olcbox.app.data.model.LocationConfig
+import org.olcbox.app.data.model.LocationEntry
+import org.olcbox.app.data.repository.SubscriptionRefreshError
 import org.olcbox.app.net.TransportKind
+import org.olcbox.app.net.LocationKind
 import org.olcbox.app.net.transportKind
 import org.olcbox.app.ui.components.AdminPasswordDialog
 import org.olcbox.app.ui.components.CameraRationaleSheet
@@ -75,6 +78,10 @@ import org.olcbox.app.ui.features.home.components.pingFor
 import org.olcbox.app.ui.features.home.components.rememberBoardModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
 import org.olcbox.app.ui.features.onboarding.OnboardingScreen
+import org.olcbox.app.ui.features.onboarding.ApolloOnboardingScreen
+import org.olcbox.app.ui.HostPresenter
+import org.olcbox.app.ui.SubscriptionPresenter
+import org.olcbox.app.update.currentUpdatePlatform
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.nowMillis
 
@@ -117,6 +124,7 @@ fun HomeScreen(
     var isAddSheetOpen by remember { mutableStateOf(false) }
     var isRefreshingSubscriptions by remember { mutableStateOf(false) }
     var refreshingSubscriptionUrl by remember { mutableStateOf<String?>(null) }
+    var refreshErrors by remember { mutableStateOf<Map<String, SubscriptionRefreshError>>(emptyMap()) }
     var showAdminDialog by remember { mutableStateOf(false) }
     var lowestMeasureRequest by remember { mutableStateOf(0L) }
     // Asked once per launch, before the system's own prompt. On iOS that prompt
@@ -127,6 +135,7 @@ fun HomeScreen(
     // the list is unusable. Chips only appear for transports actually present.
     var transportFilter by rememberSaveable { mutableStateOf<String?>(null) }
 
+    val isAndroid = remember { currentUpdatePlatform().os == "android" }
     val state by viewModel.state.collectAsState()
     val connectedSince by viewModel.connectedSince.collectAsState()
     val channelLatency by viewModel.channelLatency.collectAsState()
@@ -183,6 +192,7 @@ fun HomeScreen(
     // for the same reason: collectAsState here would subscribe this function to
     // something that changes every second.
     val nowTick = remember { mutableStateOf(nowMillis()) }
+    val subscriptionNow = remember { mutableStateOf(nowMillis()) }
     val trafficSamples = remember { mutableStateOf(emptyList<Long>()) }
     val bytesLine = remember { mutableStateOf("") }
     LaunchedEffect(state.isVpnConnected, connectedSince) {
@@ -212,10 +222,17 @@ fun HomeScreen(
     // not get three screens of introduction flashed at them on every launch.
     val onboardingSeen by viewModel.onboardingSeen.collectAsState()
     if (onboardingSeen == false) {
-        OnboardingScreen(
-            onFinished = { viewModel.markOnboardingSeen() },
-            onAddServerList = { isAddSheetOpen = true }
-        )
+        if (isAndroid) {
+            ApolloOnboardingScreen(
+                onFinished = { viewModel.markOnboardingSeen() },
+                onAddServerList = { isAddSheetOpen = true }
+            )
+        } else {
+            OnboardingScreen(
+                onFinished = { viewModel.markOnboardingSeen() },
+                onAddServerList = { isAddSheetOpen = true }
+            )
+        }
         return
     }
 
@@ -288,6 +305,7 @@ fun HomeScreen(
         viewModel.refreshSubscriptions { report ->
             locationViewModel.loadLocations {
                 isRefreshingSubscriptions = false
+                refreshErrors = report.failures.associate { it.url to it.error }
                 restartIfActiveChanged(activeBefore)
                 scope.launch { snackbarHostState.showSnackbar(report.localizedBulkMessage()) }
             }
@@ -300,6 +318,8 @@ fun HomeScreen(
         viewModel.refreshSubscription(url) { report ->
             locationViewModel.loadLocations {
                 refreshingSubscriptionUrl = null
+                val failure = report.failures.firstOrNull { it.url == url }?.error
+                refreshErrors = if (failure == null) refreshErrors - url else refreshErrors + (url to failure)
                 restartIfActiveChanged(activeBefore)
                 scope.launch { snackbarHostState.showSnackbar(report.localizedSingleMessage()) }
             }
@@ -349,6 +369,14 @@ fun HomeScreen(
         locationViewModel.markPingsStale()
     }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(isAndroid, lifecycle) {
+        if (isAndroid) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                subscriptionNow.value = nowMillis()
+                delay(60_000)
+            }
+        }
+    }
     LaunchedEffect(state.isVpnConnected, state.isVpnLoading, connectedSince, lifecycle) {
         if (state.isVpnConnected && !state.isVpnLoading) {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -399,6 +427,7 @@ fun HomeScreen(
         if (settings.refreshOnOpen && hasSubscriptions) refreshSubscriptions()
         if (settings.pingOnLaunch) refreshHttpPings()
         if (settings.connectOnLaunch && state.canStartVpn && !state.isVpnConnected) {
+            if (isAndroid) viewModel.requestSelectedOnlyForNextToggle()
             onToggleClick()
         }
     }
@@ -432,7 +461,13 @@ fun HomeScreen(
         pingsState = pingsState
     )
     val lowestActive = selectedItem?.subscriptionUrl?.trim()?.let { it in lowestSubscriptionUrls } == true
-    val actualSelectedName = selectedItem?.let { locationDisplayParts(it).second }
+    val actualSelectedName = selectedItem?.let { item ->
+        val config = item.config
+        if (!isAndroid || config == null || config.kind == LocationKind.Olcrtc) locationDisplayParts(item).second
+        else HostPresenter.present(LocationEntry.from(item.storageId, config, item.subscriptionUrl,
+            item.subscriptionOriginLink, item.metadata))?.let { "${it.flag} ${it.country}".trim() }
+            ?: "Host"
+    }
     val selectedName = if (lowestActive) {
         stringResource(Res.string.lowest_selected, actualSelectedName.orEmpty())
     } else {
@@ -486,12 +521,63 @@ fun HomeScreen(
         startLowestConnection(selectedSubscription)
     }
 
+    fun startVisibleConnection() {
+        if (isAndroid) {
+            viewModel.requestSelectedOnlyForNextToggle()
+            onToggleClick()
+        } else {
+            startSelectedConnection()
+        }
+    }
+
+    fun handlePrimaryAction() {
+        when {
+            requiresSetup -> isAddSheetOpen = true
+            !vpnDisclosureAccepted && !state.isVpnConnected -> showVpnDisclosure = true
+            else -> startVisibleConnection()
+        }
+    }
+
+    fun selectLocation(id: String) {
+        viewModel.cancelAutomaticSelection()
+        val wasConnected = state.isVpnConnected
+        val target = locations.firstOrNull { it.storageId == id }
+        val name = target?.let { item ->
+            val config = item.config
+            if (!isAndroid || config == null || config.kind == LocationKind.Olcrtc) locationDisplayParts(item).second
+            else HostPresenter.present(LocationEntry.from(item.storageId, config, item.subscriptionUrl,
+                item.subscriptionOriginLink, item.metadata))?.let { "${it.flag} ${it.country}".trim() }
+                ?: "Host"
+        }
+        val settings = subscriptionSettings.withLowestEnabled(
+            target?.subscriptionUrl,
+            enabled = false,
+            knownSubscriptionUrls = knownSubscriptionUrls
+        )
+        viewModel.updateSubscriptionSettings(settings) {
+            locationViewModel.selectLocation(id) {
+                viewModel.loadCurrentConfig()
+                viewModel.restartVpnIfRunning()
+                if (wasConnected) {
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            name?.takeIf { it.isNotBlank() }
+                                ?.let { getString(Res.string.reconnecting_through, it) }
+                                ?: getString(Res.string.reconnecting_new_location)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     if (showVpnDisclosure) {
         VpnDisclosureScreen(
+            apolloCopy = isAndroid,
             onAccept = {
                 showVpnDisclosure = false
                 viewModel.acceptVpnDisclosure()
-                startSelectedConnection()
+                startVisibleConnection()
             },
             onDecline = { showVpnDisclosure = false }
         )
@@ -501,7 +587,28 @@ fun HomeScreen(
     val statusWords = statusWords()
     val boardWords = boardWords()
     val thisServerList = stringResource(Res.string.this_server_list)
-    HomeScreenContent(
+    if (isAndroid) {
+        ApolloHomeContent(
+            locations = locations,
+            selectedLocationId = selectedId,
+            subscription = SubscriptionPresenter.present(
+                selectedItem?.metadata?.subscription,
+                subscriptionNow.value,
+                selectedItem?.subscriptionUrl?.let { refreshErrors[it] }
+            ),
+            isConnected = state.isVpnConnected,
+            isConnecting = state.isVpnLoading,
+            canStartVpn = state.canStartVpn,
+            isRefreshing = isRefreshingSubscriptions,
+            showSettings = showAppSettingsButton,
+            onAction = ::handlePrimaryAction,
+            onRefresh = ::refreshSubscriptions,
+            onAdd = { isAddSheetOpen = true },
+            onSettings = onAppSettingsClick,
+            onLocationSelected = ::selectLocation,
+            snackbarHostState = snackbarHostState
+        )
+    } else HomeScreenContent(
         chrome = HomeChrome(
             tag = HEADER_TAG,
             statusLabel = statusLabel(
@@ -585,49 +692,10 @@ fun HomeScreen(
                 )
             },
             onFilterSelected = { transportFilter = it },
-            onActionClick = {
-                when {
-                    requiresSetup -> isAddSheetOpen = true
-                    // Only on the way up, and before the system's own VPN dialog:
-                    // the disclosure has to be what explains that prompt, not
-                    // something the user meets after granting it. Stopping never
-                    // asks.
-                    !vpnDisclosureAccepted && !state.isVpnConnected -> showVpnDisclosure = true
-                    else -> startSelectedConnection()
-                }
-            },
+            onActionClick = ::handlePrimaryAction,
             onDismissNotice = { viewModel.dismissFailure() },
             onPullToRefresh = { refreshSubscriptions() },
-            onLocationSelected = { id ->
-                viewModel.cancelAutomaticSelection()
-                // Read before the switch: picking a card while connected tears the
-                // tunnel down and builds a new one, which took seconds and
-                // announced itself only as a spinner.
-                val wasConnected = state.isVpnConnected
-                val name = locations.firstOrNull { it.storageId == id }
-                    ?.let { locationDisplayParts(it).second }
-                val target = locations.firstOrNull { it.storageId == id }
-                val settings = subscriptionSettings.withLowestEnabled(
-                    target?.subscriptionUrl,
-                    enabled = false,
-                    knownSubscriptionUrls = knownSubscriptionUrls
-                )
-                viewModel.updateSubscriptionSettings(settings) {
-                    locationViewModel.selectLocation(id) {
-                        viewModel.loadCurrentConfig()
-                        viewModel.restartVpnIfRunning()
-                        if (wasConnected) {
-                            scope.launch {
-                                snackbarHostState.showSnackbar(
-                                    name?.takeIf { it.isNotBlank() }
-                                        ?.let { getString(Res.string.reconnecting_through, it) }
-                                        ?: getString(Res.string.reconnecting_new_location)
-                                )
-                            }
-                        }
-                    }
-                }
-            },
+            onLocationSelected = ::selectLocation,
             onLowestSelected = { subscriptionUrl, fallbackId ->
                 viewModel.cancelAutomaticSelection()
                 val wasConnected = state.isVpnConnected
@@ -746,7 +814,7 @@ fun HomeScreen(
             showGetSubscription = showGetSubscription,
             // The same answer as the board above: these two disagreed once, so the
             // button appeared or vanished depending on which way in you took.
-            showCustomLocation = canCreateCustomLocation
+            showCustomLocation = !isAndroid && canCreateCustomLocation
         )
     }
 
