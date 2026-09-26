@@ -522,6 +522,8 @@
     <string name="apollo_no_hosts">برای دیدن مقصدهای موجود، اشتراک فعلی خود را اضافه کنید.</string>
     <string name="apollo_route_configured">مسیر تنظیم‌شده: از طریق روسیه → %1$s</string>
     <string name="apollo_route_unknown">مسیر تأیید نشده است</string>
+    <string name="apollo_route_device">دستگاه</string>
+    <string name="apollo_route_relay">روسیه</string>
     <string name="apollo_country_unknown">کشور مشخص نشده است</string>
     <string name="apollo_country_netherlands">هلند</string>
     <string name="apollo_country_finland">فنلاند</string>

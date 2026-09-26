@@ -1,6 +1,9 @@
 package org.olcbox.app.ui.features.home
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -45,20 +48,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import multiplatform_app.sharedui.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
@@ -73,7 +81,6 @@ import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.formatDate
 import org.olcbox.app.ui.theme.LocalPkPalette
-import org.olcbox.app.ui.components.kit.pkScreenBackground
 
 /** Android's operating surface. It receives the repository's policy-filtered projection. */
 internal enum class ApolloConnectionNotice { NONE, FAILED, CHECKING, BLOCKED }
@@ -153,9 +160,18 @@ internal fun ApolloHomeContent(
             else MaterialTheme.colorScheme.surfaceContainer,
         animationSpec = tween(280), label = "connection surface"
     )
+    val scrollState = rememberScrollState()
+    var heroHeightPx by remember { mutableIntStateOf(0) }
+    val compactDestination = selected?.let { destination(it) }
+        ?: if (selectedExperimental) stringResource(Res.string.apollo_experimental) else null
+    val showCompactAction by remember(scrollState, compactDestination, heroHeightPx) {
+        derivedStateOf {
+            compactDestination != null && heroHeightPx > 0 && scrollState.value >= heroHeightPx
+        }
+    }
 
     Scaffold(
-        modifier = modifier.fillMaxSize().then(pkScreenBackground()),
+        modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -179,11 +195,48 @@ internal fun ApolloHomeContent(
                     }
                 }
             }
+        },
+        bottomBar = {
+            AnimatedVisibility(
+                visible = showCompactAction,
+                enter = fadeIn(animationSpec = tween(160)),
+                exit = fadeOut(animationSpec = tween(120)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                    shadowElevation = 8.dp
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(compactDestination.orEmpty(), style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            selected?.let {
+                                Text(hostMode(it, selectedPair.first.config?.kind),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        Button(onClick = onAction, enabled = actionEnabled,
+                            modifier = Modifier.defaultMinSize(minWidth = 132.dp, minHeight = 52.dp)
+                                .semantics { testTag = "apollo-sticky-action" }) {
+                            Text(actionTitle, maxLines = 1)
+                        }
+                    }
+                }
+            }
         }
     ) { innerPadding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(rememberScrollState())
-                .navigationBarsPadding()
+            modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(scrollState)
                 .padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -191,7 +244,8 @@ internal fun ApolloHomeContent(
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 shape = RoundedCornerShape(28.dp),
                 border = BorderStroke(1.dp, signalColor.copy(alpha = if (isConnected) 0.62f else 0.34f)),
-                modifier = Modifier.semantics { testTag = "apollo-hero" }) {
+                modifier = Modifier.onSizeChanged { heroHeightPx = it.height }
+                    .semantics { testTag = "apollo-hero" }) {
                 Box(
                     Modifier.fillMaxWidth().background(
                         Brush.verticalGradient(
@@ -207,7 +261,7 @@ internal fun ApolloHomeContent(
                         Text(connectionTitle, style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.SemiBold, color = signalColor,
                             modifier = Modifier.weight(1f))
-                        ApolloConnectionSignal(signalColor, isConnected, isConnecting)
+                        ApolloStatusSignal(signalColor, isConnected, isConnecting)
                     }
                     if (selected != null) {
                         Text(destination(selected), style = MaterialTheme.typography.titleLarge)
@@ -250,7 +304,12 @@ internal fun ApolloHomeContent(
                     }
                     if (selected != null || selectedExperimental) {
                         if (selected?.relay != null) {
-                            ApolloRoutePath(route, signalColor, isConnected, isConnecting)
+                            ApolloRoutePath(
+                                description = route,
+                                destination = localizedCountry(selected.country, unknownCountry),
+                                color = signalColor,
+                                isConnected = isConnected
+                            )
                         } else {
                             Text(route, style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -308,12 +367,14 @@ internal fun ApolloHomeContent(
                 }
             }
 
-            Text(stringResource(Res.string.apollo_destinations),
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.semantics { heading() })
-            Text(stringResource(Res.string.apollo_single_connection_note),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(stringResource(Res.string.apollo_destinations),
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.semantics { heading() })
+                Text(stringResource(Res.string.apollo_single_connection_note),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (ordinary.isEmpty()) {
                 Text(stringResource(Res.string.apollo_no_hosts), style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -323,8 +384,12 @@ internal fun ApolloHomeContent(
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     ordinary.groupBy { it.second.country }.forEach { (country, hosts) ->
+                        val sharedIngress = hosts.map { (_, host) ->
+                            host.relay?.let { stringResource(Res.string.apollo_ingress_configured) }
+                        }.distinct().singleOrNull()
                         ApolloCountryHostCard(
                             countryTitle = destination(hosts.first().second),
+                            sharedIngress = sharedIngress,
                             choices = hosts.map { (item, host) ->
                                 val protocol = if (host.protocol == "Протокол не указан")
                                     stringResource(Res.string.apollo_protocol_unknown) else host.protocol
@@ -335,8 +400,9 @@ internal fun ApolloHomeContent(
                                     id = item.storageId,
                                     destination = destination(host),
                                     mode = hostMode(host, item.config?.kind),
-                                    technical = listOfNotNull(protocol, ingress).joinToString(" · "),
-                                    selected = item.storageId == selectedLocationId
+                                    technical = protocol,
+                                    selected = item.storageId == selectedLocationId,
+                                    ingress = ingress
                                 )
                             },
                             onSelect = onLocationSelected,
@@ -364,7 +430,7 @@ internal fun ApolloHomeContent(
                     }
                 }
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(12.dp))
         }
     }
 }
@@ -421,44 +487,59 @@ private fun ApolloHeroBackdrop(color: Color, modifier: Modifier = Modifier) {
 @Composable
 private fun ApolloRoutePath(
     description: String,
+    destination: String,
     color: Color,
-    isConnected: Boolean,
-    isConnecting: Boolean
+    isConnected: Boolean
 ) {
     val progress by animateFloatAsState(
-        targetValue = when {
-            isConnected -> 1f
-            isConnecting -> 0.65f
-            else -> 0f
-        },
+        targetValue = if (isConnected) 1f else 0f,
         animationSpec = tween(460),
         label = "configured route"
     )
-    Row(verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        Canvas(Modifier.size(width = 52.dp, height = 18.dp)) {
+    val trackColor = MaterialTheme.colorScheme.outlineVariant
+    Column(
+        modifier = Modifier.fillMaxWidth().semantics { testTag = "apollo-route" },
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Text(description, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Canvas(Modifier.fillMaxWidth().height(18.dp)) {
             val y = size.height / 2f
-            val left = 5.dp.toPx()
+            val left = 6.dp.toPx()
             val right = size.width - left
-            drawLine(color.copy(alpha = 0.35f), Offset(left, y), Offset(right, y),
+            drawLine(trackColor, Offset(left, y), Offset(right, y),
                 strokeWidth = 2.dp.toPx())
             if (progress > 0f) {
                 drawLine(color, Offset(left, y),
                     Offset(left + (right - left) * progress, y), strokeWidth = 2.dp.toPx())
             }
             listOf(left, size.width / 2f, right).forEach { x ->
-                drawCircle(color.copy(alpha = if (x <= left + (right - left) * progress) 1f else 0.46f),
-                    radius = 3.dp.toPx(), center = Offset(x, y))
+                drawCircle(if (x <= left + (right - left) * progress) color else trackColor,
+                    radius = 5.dp.toPx(), center = Offset(x, y))
             }
         }
-        Text(description, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(Res.string.apollo_route_device),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f))
+            Text(stringResource(Res.string.apollo_route_relay),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f))
+            Text(destination, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.End,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+        }
     }
 }
 
-/** One short arrival pulse marks a real connection; only in-flight work spins. */
+/** Decorative status dot, not a second connect control. Only in-flight work spins. */
 @Composable
-private fun ApolloConnectionSignal(color: Color, isConnected: Boolean, isConnecting: Boolean) {
+private fun ApolloStatusSignal(color: Color, isConnected: Boolean, isConnecting: Boolean) {
     val arrival = remember { Animatable(1f) }
     LaunchedEffect(isConnected) {
         if (isConnected) {
@@ -468,29 +549,22 @@ private fun ApolloConnectionSignal(color: Color, isConnected: Boolean, isConnect
             arrival.snapTo(1f)
         }
     }
-    androidx.compose.foundation.layout.Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(42.dp)) {
+    Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(28.dp)) {
             val stroke = 2.dp.toPx()
             if (arrival.value < 1f) {
                 drawCircle(
                     color.copy(alpha = (1f - arrival.value) * 0.5f),
-                    radius = size.minDimension * (0.18f + arrival.value * 0.28f),
+                    radius = size.minDimension * (0.16f + arrival.value * 0.34f),
                     style = Stroke(width = stroke * (1.5f - arrival.value))
                 )
             }
-            drawCircle(color.copy(alpha = 0.11f), radius = size.minDimension * 0.46f)
-            drawArc(color.copy(alpha = 0.88f), startAngle = -50f, sweepAngle = 280f,
-                useCenter = false,
-                topLeft = Offset(size.width * 0.17f, size.height * 0.17f),
-                size = Size(size.width * 0.66f, size.height * 0.66f),
-                style = Stroke(width = stroke * 1.3f))
-            drawLine(color, start = Offset(size.width / 2f, size.height * 0.08f),
-                end = Offset(size.width / 2f, size.height * 0.47f),
-                strokeWidth = stroke * 1.3f)
+            drawCircle(color.copy(alpha = 0.14f), radius = size.minDimension * 0.48f)
+            drawCircle(color, radius = size.minDimension * 0.18f)
         }
         if (isConnecting) {
             CircularProgressIndicator(
-                modifier = Modifier.size(48.dp), color = color,
+                modifier = Modifier.size(32.dp), color = color,
                 strokeWidth = 2.dp, trackColor = Color.Transparent
             )
         }

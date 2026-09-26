@@ -522,6 +522,8 @@
     <string name="apollo_no_hosts">添加现有订阅以查看可用目的地。</string>
     <string name="apollo_route_configured">设置的路径：经俄罗斯 → %1$s</string>
     <string name="apollo_route_unknown">路由尚未验证</string>
+    <string name="apollo_route_device">设备</string>
+    <string name="apollo_route_relay">俄罗斯</string>
     <string name="apollo_country_unknown">未指定国家</string>
     <string name="apollo_country_netherlands">荷兰</string>
     <string name="apollo_country_finland">芬兰</string>

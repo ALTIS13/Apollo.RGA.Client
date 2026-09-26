@@ -522,6 +522,8 @@
     <string name="apollo_no_hosts">Добавьте действующую подписку, чтобы увидеть страны выхода.</string>
     <string name="apollo_route_configured">По настройке: через Россию → %1$s</string>
     <string name="apollo_route_unknown">Маршрут не подтверждён</string>
+    <string name="apollo_route_device">Устройство</string>
+    <string name="apollo_route_relay">Россия</string>
     <string name="apollo_country_unknown">Страна не указана</string>
     <string name="apollo_country_netherlands">Нидерланды</string>
     <string name="apollo_country_finland">Финляндия</string>

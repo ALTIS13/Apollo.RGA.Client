@@ -2,6 +2,7 @@ package org.olcbox.app.ui.features.home
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -11,6 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.v2.runComposeUiTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -111,6 +113,83 @@ class ApolloHomeContentTest {
         onNodeWithTag("apollo-country-choice-synthetic-fi").performClick()
         assertEquals(finnish.storageId, selected)
         onNodeWithText("Experimental mode").assertDoesNotExist()
+    }
+
+    @Test fun selectingALowerCountryKeepsTheConnectActionAvailable() = runComposeUiTest {
+        var actions = 0
+        val selectedId = mutableStateOf(dutchWeb.storageId)
+        val german = finnish.copy(storageId = "synthetic-de", fullName = "🇩🇪 DE · Berlin")
+        val singaporean = finnish.copy(storageId = "synthetic-sg", fullName = "🇸🇬 SG · Singapore")
+        val american = finnish.copy(storageId = "synthetic-us", fullName = "🇺🇸 US · New York")
+        val italian = finnish.copy(storageId = "synthetic-it", fullName = "🇮🇹 IT · Milan")
+        val british = finnish.copy(storageId = "synthetic-gb", fullName = "🇬🇧 GB · London")
+        val lower = finnish.copy(storageId = "synthetic-jp", fullName = "🇯🇵 JP · Tokyo")
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(dutchWeb, finnishGaming, finnish, german, singaporean,
+                        american, italian, british, lower),
+                    selectedLocationId = selectedId.value,
+                    subscription = active,
+                    isConnected = false, isConnecting = false, canStartVpn = true,
+                    isRefreshing = false, showSettings = false,
+                    onAction = { actions++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = { selectedId.value = it }, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithTag("apollo-sticky-action").assertDoesNotExist()
+        onNodeWithTag("apollo-country-choice-synthetic-jp").performScrollTo()
+        onNodeWithTag("apollo-country-choice-synthetic-jp").performClick()
+        assertEquals(lower.storageId, selectedId.value)
+        onNodeWithTag("apollo-sticky-action").performClick()
+        assertEquals(1, actions)
+    }
+
+    @Test fun configuredRelayExplainsEachStageWithoutCallingItMeasuredTraffic() = runComposeUiTest {
+        val relayed = dutchWeb.copy(config = dutchWeb.config!!.copy(
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"rw-nl-relay.gate-altas.tech"}]},"streamSettings":{"network":"xhttp","security":"reality"}}]}"""
+            ).jsonObject
+        ))
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(relayed), selectedLocationId = relayed.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithTag("apollo-route").assertExists()
+        onNodeWithText("Device").assertExists()
+        onNodeWithText("Russia").assertExists()
+        onNodeWithText("Netherlands").assertExists()
+        onNodeWithText("Configured path: via Russia → Netherlands").assertExists()
+    }
+
+    @Test fun sharedCountryIngressIsExplainedOnceInsteadOfRepeatedInEveryHost() = runComposeUiTest {
+        val relayed = dutchWeb.copy(config = dutchWeb.config!!.copy(
+            xrayConfig = Json.parseToJsonElement(
+                """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"rw-nl-relay.gate-altas.tech"}]},"streamSettings":{"network":"xhttp","security":"reality"}}]}"""
+            ).jsonObject
+        ))
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(relayed, relayed.copy(storageId = "synthetic-nl-web-2")),
+                    selectedLocationId = relayed.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onAllNodesWithText("Via a server in Russia", substring = true).assertCountEquals(1)
+        onAllNodesWithText("VLESS · XHTTP · Reality").assertCountEquals(2)
     }
 
     @Test fun experimentalModeIsSeparateAndDoesNotPrintRoomKey() = runComposeUiTest {

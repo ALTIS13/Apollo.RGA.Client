@@ -40,7 +40,8 @@ internal data class ApolloHostChoice(
     val destination: String,
     val mode: String,
     val technical: String,
-    val selected: Boolean
+    val selected: Boolean,
+    val ingress: String? = null
 )
 
 /** One country surface with purpose-first choices and native radio semantics. */
@@ -49,7 +50,8 @@ internal fun ApolloCountryHostCard(
     countryTitle: String,
     choices: List<ApolloHostChoice>,
     onSelect: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    sharedIngress: String? = null
 ) {
     if (choices.isEmpty()) return
 
@@ -59,16 +61,24 @@ internal fun ApolloCountryHostCard(
         shape = RoundedCornerShape(20.dp)
     ) {
         Column(Modifier.selectableGroup()) {
-            Text(
-                text = countryTitle,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)
-                    .semantics { heading() }
-            )
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = countryTitle,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.semantics { heading() }
+                )
+                if (sharedIngress != null) {
+                    Text(sharedIngress, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             choices.forEachIndexed { index, choice ->
-                ApolloCountryChoiceRow(countryTitle, choice, onSelect)
+                ApolloCountryChoiceRow(countryTitle, choice, sharedIngress, onSelect)
                 if (index != choices.lastIndex) {
                     HorizontalDivider(
                         modifier = Modifier.padding(horizontal = 18.dp),
@@ -84,6 +94,7 @@ internal fun ApolloCountryHostCard(
 private fun ApolloCountryChoiceRow(
     countryTitle: String,
     choice: ApolloHostChoice,
+    sharedIngress: String?,
     onSelect: (String) -> Unit
 ) {
     val background by animateColorAsState(
@@ -98,7 +109,10 @@ private fun ApolloCountryChoiceRow(
         label = "host selection edge"
     )
     val destinationDetail = choice.destination.takeIf { it.isNotBlank() && it != countryTitle }
-    val spokenLabel = listOfNotNull(countryTitle, choice.mode, destinationDetail, choice.technical)
+    val shownTechnical = listOfNotNull(choice.technical,
+        choice.ingress?.takeUnless { it == sharedIngress }).joinToString(" · ")
+    val spokenLabel = listOfNotNull(countryTitle, choice.mode, destinationDetail,
+        choice.technical, choice.ingress)
         .filter(String::isNotBlank).joinToString(", ")
 
     Surface(color = background) {
@@ -138,9 +152,9 @@ private fun ApolloCountryChoiceRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (choice.technical.isNotBlank()) {
+                if (shownTechnical.isNotBlank()) {
                     Text(
-                        text = choice.technical,
+                        text = shownTechnical,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

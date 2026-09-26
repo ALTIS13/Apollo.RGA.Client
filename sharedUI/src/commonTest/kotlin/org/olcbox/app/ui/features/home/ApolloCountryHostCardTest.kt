@@ -53,4 +53,29 @@ class ApolloCountryHostCardTest {
         onNodeWithTag("apollo-country-choice-web").performClick()
         assertEquals("web", selectedId)
     }
+
+    @Test fun mixedIngressDoesNotClaimTheWholeCountryUsesARelay() = runComposeUiTest {
+        setContent {
+            MaterialTheme {
+                ApolloCountryHostCard(
+                    countryTitle = "🇫🇮 Finland",
+                    choices = listOf(
+                        ApolloHostChoice("relayed", "🇫🇮 Finland", "Sites and apps", "VLESS",
+                            selected = true, ingress = "Via a server in Russia"),
+                        ApolloHostChoice("direct", "🇫🇮 Finland", "Games and calls", "Hysteria 2",
+                            selected = false)
+                    ),
+                    onSelect = {}
+                )
+            }
+        }
+
+        onAllNodesWithText("Via a server in Russia", substring = true).assertCountEquals(1)
+        onNodeWithTag("apollo-country-choice-relayed").assertContentDescriptionEquals(
+            "🇫🇮 Finland, Sites and apps, VLESS, Via a server in Russia"
+        )
+        onNodeWithTag("apollo-country-choice-direct").assertContentDescriptionEquals(
+            "🇫🇮 Finland, Games and calls, Hysteria 2"
+        )
+    }
 }

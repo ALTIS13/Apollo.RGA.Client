@@ -522,6 +522,8 @@
     <string name="apollo_no_hosts">Add your existing subscription to see available destinations.</string>
     <string name="apollo_route_configured">Configured path: via Russia → %1$s</string>
     <string name="apollo_route_unknown">Route not verified</string>
+    <string name="apollo_route_device">Device</string>
+    <string name="apollo_route_relay">Russia</string>
     <string name="apollo_country_unknown">Country not specified</string>
     <string name="apollo_country_netherlands">Netherlands</string>
     <string name="apollo_country_finland">Finland</string>
