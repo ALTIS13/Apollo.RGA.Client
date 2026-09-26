@@ -1,0 +1,76 @@
+package org.olcbox.app.data.datasource
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlin.test.*
+
+class XrayJsonSubscriptionCodecTest {
+    private val fixture = XrayJsonSubscriptionFixtures
+    private fun reject(body: String) = assertIs<XrayJsonSubscriptionCodec.Rejected>(XrayJsonSubscriptionCodec.decode(body))
+
+    @Test fun preservesEntireConfigsAndOrderWithoutRebuildingDnsRoutingOrSecrets() {
+        val result = assertIs<XrayJsonSubscriptionCodec.Success>(XrayJsonSubscriptionCodec.decode(fixture.body))
+        assertEquals(listOf("Synthetic exit A", "Synthetic exit B"), result.profiles.map { it.displayName })
+        assertEquals(listOf(XrayJsonSubscriptionCodec.Protocol.VLESS, XrayJsonSubscriptionCodec.Protocol.HYSTERIA2), result.profiles.map { it.protocol })
+        val original = Json.parseToJsonElement(fixture.body).jsonArray
+        assertEquals(original.map { it.jsonObject }, result.profiles.map { it.effectiveConfig })
+        assertFalse(result.toString().contains("Synthetic"))
+        assertFalse(result.profiles.toString().contains("SYNTHETIC_AUTH"))
+    }
+
+    @Test fun rejectsUnknownTransportInsteadOfReturningAWorkingLookingProfile() {
+        assertEquals(XrayJsonSubscriptionCodec.Reason.UNSUPPORTED_TRANSPORT, reject("[${fixture.vless.replace("\"network\":\"xhttp\"", "\"network\":\"future-transport\"")}]").reason)
+    }
+
+    @Test fun rejectsWholeVersionWhenOneEntryIsInvalid() {
+        val bad = fixture.hysteria.replace("\"auth\":\"SYNTHETIC_AUTH_NOT_REAL\"", "\"auth\":\"\"")
+        val result = reject("[${fixture.vless},$bad]")
+        assertEquals(1, result.profileIndex)
+        assertFalse(result.toString().contains("SYNTHETIC"))
+        assertFalse(result.toString().contains("exit-"))
+    }
+
+    @Test fun rejectsMissingAndMistypedRequiredProtocolFields() {
+        for ((from, to) in listOf(
+            "\"publicKey\":\"SYNTHETIC_PUBLIC_KEY_NOT_REAL\"" to "\"publicKey\":null",
+            "\"id\":\"00000000-0000-4000-8000-000000000000\"" to "\"id\":17",
+            "\"port\":443" to "\"port\":0",
+            "\"encryption\":\"none\"" to "\"encryption\":\"unknown\"",
+            "\"xhttpSettings\":" to "\"unknownSettings\":"
+        )) reject("[${fixture.vless.replace(from,to)}]")
+        reject("[${fixture.hysteria.replace("\"version\":2", "\"version\":1")}]")
+        reject("[${fixture.hysteria.replace("\"security\":\"tls\"", "\"security\":\"none\"")}]")
+    }
+
+    @Test fun rejectsMalformedJsonAndNonArrayWithoutLeakingParserInput() {
+        for (body in listOf("[{secret-token", fixture.vless, "[]", "[null]", "[17]", "{\"outbounds\":[]}")) {
+            val result = reject(body)
+            assertFalse(result.toString().contains("secret-token"))
+            assertFalse(result.toString().contains("outbounds"))
+        }
+    }
+
+    @Test fun validatesDnsRoutingAndTagRelationships() {
+        for ((from, to) in listOf(
+            "\"servers\":[\"192.0.2.53\",\"198.51.100.53\",\"localhost\"]" to "\"servers\":[]",
+            "\"queryStrategy\":\"UseIPv4\"" to "\"queryStrategy\":\"future\"",
+            "\"outboundTag\":\"direct\"" to "\"outboundTag\":\"missing\"",
+            "\"inboundTag\":[\"local-socks\"]" to "\"inboundTag\":[\"missing\"]",
+            "\"type\":\"field\"" to "\"type\":\"unknown\"",
+            "\"protocol\":[\"bittorrent\"]" to "\"futureRule\":[\"bittorrent\"]",
+            "\"tag\":\"block\"" to "\"tag\":\"direct\"",
+            "\"protocol\":\"vless\"" to "\"protocol\":\"unknown\""
+        )) reject("[${fixture.vless.replace(from,to)}]")
+    }
+
+    @Test fun rejectsUnknownRequiredFieldsAndMistypedOptionalControls() {
+        for ((from, to) in listOf(
+            "\"encryption\":\"none\"" to "\"encryption\":\"none\",\"requiredFutureField\":true",
+            "\"publicKey\":\"SYNTHETIC_PUBLIC_KEY_NOT_REAL\"" to "\"publicKey\":\"SYNTHETIC_PUBLIC_KEY_NOT_REAL\",\"requiredFutureField\":true",
+            "\"queryStrategy\":\"UseIPv4\"" to "\"queryStrategy\":\"UseIPv4\",\"disableCache\":\"yes\"",
+            "\"protocol\":[\"bittorrent\"]" to "\"network\":\"invalid-network\""
+        )) reject("[${fixture.vless.replace(from,to)}]")
+        reject("[${fixture.hysteria.replace("\"enableSessionResumption\":true", "\"enableSessionResumption\":17")}]")
+    }
+}
