@@ -10,9 +10,12 @@ internal object XrayJsonRuntimeConfig {
     enum class Reason { INVALID_PROFILE, INVALID_INBOUND, REFERENCED_HTTP_INBOUND, INVALID_LOGIN, INVALID_PORT, UNSUPPORTED_PROXY_MODE }
     class Rejected(val reason: Reason) : IllegalArgumentException("Xray runtime rejected: $reason")
 
-    /** Re-admit persisted data, retaining every non-inbound JSON value verbatim.
+    /** Re-admit persisted data, retaining every network JSON value verbatim.
      * Android TUN has exactly one authenticated SOCKS ingress. An unused HTTP
      * listener may be removed, but no rule graph may be changed to achieve it.
+     * Runtime logging is the sole additional override: provider paths and
+     * payload logging must never execute with the Android app's permissions.
+     * The persisted provider object remains untouched.
      */
     fun adapt(config: JsonObject, port: Int, login: SocksLogin?, tunMode: Boolean = true): Adapted {
         requireSafe(tunMode, Reason.UNSUPPORTED_PROXY_MODE)
@@ -41,7 +44,13 @@ internal object XrayJsonRuntimeConfig {
             }) }
         ))
         val adapted = JsonObject(socks + mapOf("listen" to JsonPrimitive("127.0.0.1"), "port" to JsonPrimitive(port), "settings" to settings))
-        return Adapted(JsonObject(config + ("inbounds" to JsonArray(listOf(adapted)))))
+        val noPayloadLogs = buildJsonObject {
+            put("access", "none")
+            put("error", "none")
+            put("loglevel", "none")
+            put("dnsLog", false)
+        }
+        return Adapted(JsonObject(config + mapOf("inbounds" to JsonArray(listOf(adapted)), "log" to noPayloadLogs)))
     }
 
     private fun requireSafe(value: Boolean, reason: Reason = Reason.INVALID_INBOUND) {

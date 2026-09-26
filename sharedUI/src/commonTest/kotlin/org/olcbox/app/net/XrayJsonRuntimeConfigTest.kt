@@ -8,11 +8,30 @@ class XrayJsonRuntimeConfigTest {
     private val login = SocksLogin("local-user", "local-secret")
     private fun config(body: String = XrayJsonSubscriptionFixtures.vless) = Json.parseToJsonElement(body).jsonObject
 
+    @Test fun runtimeOverridesOnlyLoggingWithoutMutatingPersistedProviderConfig() {
+        for (providerLog in listOf(
+            """{"loglevel":"warning","access":"../SYNTHETIC_SECRET_PATH"}""",
+            """{"loglevel":"debug","error":"/private/SYNTHETIC_SECRET_PATH","dnsLog":true}""",
+            """{"loglevel":"warning"}""",
+            """{"unknownLoggingExtension":"SYNTHETIC_SECRET_PATH"}""",
+            "[]", "null"
+        )) {
+            val log = Json.parseToJsonElement(providerLog)
+            val stored = JsonObject(config() + ("log" to log))
+            val adapted = XrayJsonRuntimeConfig.adapt(stored, 32001, login).config
+            assertEquals(Json.parseToJsonElement("""{"access":"none","error":"none","loglevel":"none","dnsLog":false}"""), adapted["log"])
+            assertEquals(log, stored["log"])
+            assertEquals(stored.filterKeys { it !in setOf("log", "inbounds") }, adapted.filterKeys { it !in setOf("log", "inbounds") })
+            assertFalse(adapted.toString().contains("SYNTHETIC_SECRET_PATH"))
+        }
+    }
+
     @Test fun preservesExactProfileAndAuthenticatesOnlyTunInbound() {
         for (body in listOf(XrayJsonSubscriptionFixtures.vless, XrayJsonSubscriptionFixtures.hysteria)) {
             val input = config(body)
             val result = XrayJsonRuntimeConfig.adapt(input, 32001, login).config
-            assertEquals(input.filterKeys { it != "inbounds" }, result.filterKeys { it != "inbounds" })
+            assertEquals(input.filterKeys { it !in setOf("inbounds", "log") }, result.filterKeys { it !in setOf("inbounds", "log") })
+            assertEquals(Json.parseToJsonElement("""{"access":"none","error":"none","loglevel":"none","dnsLog":false}"""), result["log"])
             val inbound = result.getValue("inbounds").jsonArray.single().jsonObject
             assertEquals("local-socks", inbound.getValue("tag").jsonPrimitive.content)
             assertEquals("127.0.0.1", inbound.getValue("listen").jsonPrimitive.content)

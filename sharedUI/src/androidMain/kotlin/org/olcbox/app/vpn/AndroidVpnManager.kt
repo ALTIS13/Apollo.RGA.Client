@@ -348,12 +348,13 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
 
     override suspend fun diagnosticsLog(): String = withContext(Dispatchers.IO) { buildString {
         val verbose = locationsDataSource.loadLocationBundle()?.routing?.verboseDebugLogs == true
-        // Android core stdout lives in app-private cache files. Include only a
-        // bounded tail in the ordinary scrubbed Export/Share path so no ADB is required.
-        // Warn-level output remains useful with the switch off; the larger tail
-        // is reserved for an explicitly requested detailed capture.
+        // Xray output can contain arbitrary provider credentials, not merely
+        // patterns LogScrubber recognizes. Withhold it globally, including
+        // stale files after disconnect or switching to another profile.
+        // Preserve the existing bounded sing-box diagnostics path.
         val maxLines = if (verbose) MAX_EXPORTED_CORE_LOG_LINES else MAX_EXPORTED_STANDARD_LOG_LINES
-        listOf("singbox", "xray").forEach { core ->
+        appendLine("Xray raw diagnostics withheld")
+        listOf("singbox").forEach { core ->
             val log = File(File(appContext.cacheDir, "olcbox-$core"), "$core.log")
             val lines = runCatching {
                 org.olcbox.app.net.AndroidCoreProcess.readLogTail(log, maxLines)
