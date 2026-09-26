@@ -4,8 +4,14 @@ import org.olcbox.app.data.model.LocationBundleV4
 import org.olcbox.app.data.model.SubscriptionMetadata
 
 internal object SubscriptionTunnelAccess {
-    fun denial(bundle: LocationBundleV4, storageId: String?, nowEpochMs: Long): String? {
+    fun denial(
+        bundle: LocationBundleV4,
+        storageId: String?,
+        nowEpochMs: Long,
+        policy: RuntimeLocationPolicy = RuntimeLocationPolicy.OrdinaryOnly
+    ): String? {
         val entry = bundle.locations.firstOrNull { it.storageId == storageId } ?: return "No active location"
+        policy.denial(entry.location.kind)?.let { return it }
         return when (entry.metadata?.subscription?.accessStateAt(nowEpochMs)) {
             SubscriptionMetadata.AccessState.EXPIRED -> "Subscription expired"
             SubscriptionMetadata.AccessState.LIMITED -> "Subscription traffic limit reached"

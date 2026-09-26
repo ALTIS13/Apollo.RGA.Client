@@ -4,9 +4,20 @@ import org.olcbox.app.data.model.*
 import kotlin.test.*
 
 class SubscriptionTunnelAccessTest {
+    @Test fun releaseDeniesStoredOlcrtcBeforeServiceCanStartOrRecoverIt() {
+        val room = LocationEntry.from("room", LocationConfig(name = "Private room", id = "r", key = "k"))
+        val data = LocationBundleV4(activeLocationId = "room", locations = listOf(room))
+        assertEquals("Experimental mode unavailable", SubscriptionTunnelAccess.denial(data, "room", 1000))
+    }
+
     private fun bundle(metadata: SubscriptionMetadata) = LocationBundleV4(
         activeLocationId = "selected-other",
-        locations = listOf(LocationEntry("connected", metadata = LocationMetadata(subscription = metadata)))
+        locations = listOf(LocationEntry.from(
+            "connected",
+            LocationConfig(name = "Ordinary exit", kind = LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { }),
+            metadata = LocationMetadata(subscription = metadata)
+        ))
     )
 
     @Test fun connectedTunnelAndBenignRecoveryCannotOutliveKnownExpiry() {

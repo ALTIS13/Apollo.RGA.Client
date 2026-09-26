@@ -19,6 +19,7 @@ import org.olcbox.app.ui.activities.AndroidMainScreen
 import org.olcbox.app.ui.features.home.HomeScreenViewModel
 import org.olcbox.app.ui.features.locations.LocationViewModel
 import org.olcbox.app.ui.theme.AppTheme
+import org.olcbox.app.net.AndroidRuntimeLocationPolicy
 import org.olcbox.app.update.AppUpdateService
 import org.olcbox.app.vpn.AndroidVpnManager
 
@@ -44,7 +45,10 @@ class AppActivity : ComponentActivity() {
 
         val vpnManager = AndroidVpnManager(this)
         val locationsDataSource = LocationsDataSourceImpl(this)
-        val locationsRepository = LocationsRepositoryImpl(locationsDataSource)
+        val locationsRepository = LocationsRepositoryImpl(
+            locationsDataSource,
+            runtimePolicy = AndroidRuntimeLocationPolicy.forApp(applicationContext)
+        )
         val configImporter = AndroidConfigImporter(this)
         val logExporter = AndroidLogExporter(this)
         // Null where the store owns updates (the `play` flavor): the screen then

@@ -135,7 +135,10 @@ private class IosAppDependencies(
     packetTunnelBridge: IosPacketTunnelBridge
 ) {
     private val locationsDataSource = IosLocationsDataSourceImpl()
-    val locationsRepository = LocationsRepositoryImpl(locationsDataSource)
+    val locationsRepository = LocationsRepositoryImpl(
+        locationsDataSource,
+        runtimePolicy = org.olcbox.app.net.RuntimeLocationPolicy.ExperimentalDebug
+    )
     val vpnManager = IosVpnManager(locationsRepository, olcRtcBridge, packetTunnelBridge)
     // No AppUpdateService here on purpose — see the comment in IosApp.
     val homeViewModel = HomeScreenViewModel(

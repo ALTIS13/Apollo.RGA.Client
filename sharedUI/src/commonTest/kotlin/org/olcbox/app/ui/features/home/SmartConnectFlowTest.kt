@@ -22,6 +22,7 @@ import org.olcbox.app.data.model.LocationConfig
 import org.olcbox.app.data.model.LocationEntry
 import org.olcbox.app.data.model.SubscriptionSettings
 import org.olcbox.app.net.LocationKind
+import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.net.SmartConnect
 import org.olcbox.app.vpn.TrafficCounters
 import org.olcbox.app.vpn.VpnManager
@@ -76,7 +77,8 @@ class SmartConnectFlowTest {
                 locations = entries.toList(),
                 settings = SubscriptionSettings(autoUpdate = false)
             )
-        )
+        ),
+        runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug
     )
 
     private fun viewModel(repository: LocationsRepositoryImpl, vpn: VpnManager, whitelist: Boolean = false) =

@@ -72,6 +72,8 @@ import org.olcbox.app.net.DirectDns
 import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.LocationKind
 import org.olcbox.app.net.OlcrtcDirectRules
+import org.olcbox.app.net.AndroidRuntimeLocationPolicy
+import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.net.OutboundSpec
 import org.olcbox.app.net.Routing
 import org.olcbox.app.net.RuleSets
@@ -121,8 +123,11 @@ class OlcboxVpnService : VpnService() {
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Default + job)
     private val tunnelMutex = Mutex()
+    private val runtimePolicy: RuntimeLocationPolicy by lazy {
+        AndroidRuntimeLocationPolicy.forApp(applicationContext)
+    }
     private val repository: LocationsRepository by lazy {
-        LocationsRepositoryImpl(LocationsDataSourceImpl(applicationContext))
+        LocationsRepositoryImpl(LocationsDataSourceImpl(applicationContext), runtimePolicy = runtimePolicy)
     }
     private val deviceIdentityProvider by lazy {
         PersistentDeviceIdentityProvider(LocationsDataSourceImpl(applicationContext))
@@ -531,7 +536,7 @@ class OlcboxVpnService : VpnService() {
                     if (requestedGeneration != generation) return@withLock
 
                     val bundle = repository.getBundle()
-                    val denial = SubscriptionTunnelAccess.denial(bundle, bundle.activeLocationId, System.currentTimeMillis())
+                    val denial = SubscriptionTunnelAccess.denial(bundle, bundle.activeLocationId, System.currentTimeMillis(), runtimePolicy)
                     if (denial != null) {
                         setStatus(VpnStatus.Error(denial))
                         updateNotification(denial)
@@ -786,6 +791,10 @@ class OlcboxVpnService : VpnService() {
         setErrorOnFailure: Boolean,
         reuseBridge: Boolean = false
     ): Boolean {
+        runtimePolicy.denial(location.kind)?.let { denial ->
+            if (setErrorOnFailure) setStatus(VpnStatus.Error(denial))
+            return false
+        }
         // Persisted Xray profiles already own DNS and routing. Never ask the
         // local routing builder or choose a lossy URI/sing-box fallback here.
         if (location.xrayConfig != null) {
@@ -1372,7 +1381,7 @@ class OlcboxVpnService : VpnService() {
         val status = OlcboxVpnState.status.value
         if (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) return false
         val id = connectedStorageId ?: return false
-        val denial = SubscriptionTunnelAccess.denial(repository.getBundle(), id, System.currentTimeMillis()) ?: return false
+        val denial = SubscriptionTunnelAccess.denial(repository.getBundle(), id, System.currentTimeMillis(), runtimePolicy) ?: return false
         ++generation
         startupJob?.cancel()
         recoveryJob?.cancel()

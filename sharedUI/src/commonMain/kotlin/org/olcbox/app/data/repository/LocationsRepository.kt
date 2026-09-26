@@ -9,6 +9,8 @@ import org.olcbox.app.data.model.RoutingSettings
 
 interface LocationsRepository {
     val changes: StateFlow<Long>
+    /** Runtime projection only; never save it in place of the complete stored bundle. */
+    suspend fun getVisibleBundle(): LocationBundleV4 = getBundle()
     suspend fun getBundle(): LocationBundleV4
     suspend fun saveBundle(bundle: LocationBundleV4)
     /**

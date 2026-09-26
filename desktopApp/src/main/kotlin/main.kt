@@ -132,7 +132,10 @@ private class DesktopAppDependencies {
     private val locationsDataSource = JvmLocationsDataSourceImpl()
     val configImporter = JvmConfigImporter()
 
-    val locationsRepository = LocationsRepositoryImpl(locationsDataSource)
+    val locationsRepository = LocationsRepositoryImpl(
+        locationsDataSource,
+        runtimePolicy = org.olcbox.app.net.RuntimeLocationPolicy.ExperimentalDebug
+    )
     val updateService = AppUpdateService(
         deviceIdentityProvider = PersistentDeviceIdentityProvider(locationsDataSource)
     )

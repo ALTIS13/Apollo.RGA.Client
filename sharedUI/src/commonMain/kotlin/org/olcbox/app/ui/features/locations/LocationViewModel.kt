@@ -172,7 +172,7 @@ class LocationViewModel(
         val requestId = ++loadLocationsRequest
         loadLocationsJob?.cancel()
         loadLocationsJob = viewModelScope.launch {
-            val bundle = locationsRepository.getBundle()
+            val bundle = locationsRepository.getVisibleBundle()
             val savedConfigs = bundle.locations
             val currentSelectedId = bundle.activeLocationId
 

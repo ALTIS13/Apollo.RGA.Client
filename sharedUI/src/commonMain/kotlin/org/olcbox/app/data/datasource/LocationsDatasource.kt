@@ -47,6 +47,7 @@ import org.olcbox.app.net.isPartnerLink
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.net.LocationKind
 import org.olcbox.app.net.OutboundSpec
+import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.data.repository.SubscriptionFetchProxy
 import org.olcbox.app.data.repository.SubscriptionRefreshError
 import org.olcbox.app.data.repository.SubscriptionRefreshFailure
@@ -85,7 +86,8 @@ class LocationsRepositoryImpl(
     private val deviceIdentityProvider: DeviceIdentityProvider = PersistentDeviceIdentityProvider(dataSource),
     private val nowEpochMs: () -> Long = { kotlin.time.Clock.System.now().toEpochMilliseconds() },
     private val cryptCodec: CryptCodec? = CryptCodec.default(),
-    private val partnerLinkResolver: PartnerLinkResolver? = HttpPartnerLinkResolver(httpClient)
+    private val partnerLinkResolver: PartnerLinkResolver? = HttpPartnerLinkResolver(httpClient),
+    private val runtimePolicy: RuntimeLocationPolicy = RuntimeLocationPolicy.OrdinaryOnly
 ) : LocationsRepository {
     private data class ImportSource(
         val content: String,
@@ -171,6 +173,8 @@ class LocationsRepositoryImpl(
         }
     }
 
+    override suspend fun getVisibleBundle(): LocationBundleV4 = runtimePolicy.visible(getBundle())
+
     private suspend fun getBundleUnlocked(): LocationBundleV4 {
         val stored = dataSource.loadLocationBundle()?.normalized()
         if (stored != null && stored.locations.isNotEmpty()) return stored
@@ -195,7 +199,21 @@ class LocationsRepositoryImpl(
 
     override suspend fun saveBundle(bundle: LocationBundleV4) {
         mutationMutex.withLock {
-            saveBundleUnlocked(bundle)
+            val current = getBundleUnlocked()
+            val retained = current.locations.filterNot { runtimePolicy.permits(it.location.kind) }
+            val existingById = retained.associateBy { it.storageId }
+            val retainedIds = existingById.keys
+            if (bundle.locations.any { entry ->
+                    if (runtimePolicy.permits(entry.location.kind)) entry.storageId in retainedIds
+                    else existingById[entry.storageId] != entry.normalized()
+                }) return@withLock
+            val complete = bundle.copy(
+                activeLocationId = bundle.activeLocationId?.takeUnless(retainedIds::contains),
+                locations = bundle.locations + retained.filterNot { old ->
+                    bundle.locations.any { it.storageId == old.storageId }
+                }
+            )
+            saveBundleUnlocked(complete)
         }
     }
 
@@ -213,6 +231,7 @@ class LocationsRepositoryImpl(
             text = text,
             subscriptionProxy = subscriptionProxy
         ) ?: return false
+        if (resolved.parsed.bundle.locations.any { !runtimePolicy.permits(it.location.kind) }) return false
 
         mutationMutex.withLock {
             val merged = mergeImportedBundle(
@@ -261,16 +280,20 @@ class LocationsRepositoryImpl(
             .mapNotNull { entry -> entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() }?.let { it to entry } }
             .groupBy({ it.first }, { it.second })
             .filterKeys { url -> onlyUrls == null || url in onlyUrls }
+            .filterValues { entries -> entries.any { runtimePolicy.permits(it.location.kind) } }
         if (groupedByUrl.isEmpty()) return SubscriptionRefreshReport.EMPTY
 
         val targetUrls = groupedByUrl.keys
         val refreshedLocations = bundle.locations
             .filter { entry ->
                 val url = entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() }
-                url == null || (onlyUrls != null && url !in targetUrls)
+                url == null || url !in targetUrls
             }
             .toMutableList()
         val usedStorageIds = refreshedLocations.mapTo(mutableSetOf()) { it.storageId }
+        groupedByUrl.values.flatten()
+            .filterNot { runtimePolicy.permits(it.location.kind) }
+            .forEach { usedStorageIds += it.storageId }
         val activeBefore = bundle.activeLocationId
         var activeAfter = activeBefore
         var successfulRefreshes = 0
@@ -278,7 +301,8 @@ class LocationsRepositoryImpl(
 
         fun preservePreviousEntries(entries: List<LocationEntry>) {
             entries.forEach { entry ->
-                if (usedStorageIds.add(entry.storageId)) {
+                if (refreshedLocations.none { it.storageId == entry.storageId }) {
+                    usedStorageIds.add(entry.storageId)
                     refreshedLocations += entry
                 }
             }
@@ -346,9 +370,10 @@ class LocationsRepositoryImpl(
                 ?: SubscriptionMetadata.DEFAULT_UPDATE_INTERVAL_HOURS
             val refreshTimestamp = nowEpochMs()
             val refreshed = resolved.parsed.bundle.locations
-            if (refreshed.isEmpty()) {
+            if (refreshed.isEmpty() || refreshed.any { !runtimePolicy.permits(it.location.kind) }) {
                 preservePreviousEntries(previousEntries)
-                failures += SubscriptionRefreshFailure(url, SubscriptionRefreshError.Empty)
+                failures += SubscriptionRefreshFailure(url,
+                    if (refreshed.isEmpty()) SubscriptionRefreshError.Empty else SubscriptionRefreshError.Rejected)
                 return@forEach
             }
 
@@ -410,7 +435,7 @@ class LocationsRepositoryImpl(
                         profile = carriedProfile
                     )
                 ).normalized()
-            }
+            } + previousEntries.filterNot { runtimePolicy.permits(it.location.kind) }
 
             // Move the selection only when the server it points at is gone.
             //
@@ -504,10 +529,12 @@ class LocationsRepositoryImpl(
     }
 
     override suspend fun saveLocation(storageId: String, location: LocationConfig) {
+        if (!runtimePolicy.permits(location.kind)) return
         mutationMutex.withLock {
             val normalizedId = storageId.ifBlank { location.storageSlug() }
             val bundle = getBundleUnlocked()
             val current = bundle.locations.firstOrNull { it.storageId == normalizedId }
+            if (current != null && !runtimePolicy.permits(current.location.kind)) return@withLock
             val entry = LocationEntry.from(
                 storageId = normalizedId,
                 location = location,
@@ -528,7 +555,8 @@ class LocationsRepositoryImpl(
 
     override suspend fun loadLocation(storageId: String): LocationConfig? {
         return mutationMutex.withLock {
-            getBundleUnlocked().locations.firstOrNull { it.storageId == storageId }?.location
+            getBundleUnlocked().locations.firstOrNull { it.storageId == storageId }
+                ?.location?.takeIf { runtimePolicy.permits(it.kind) }
         }
     }
 
@@ -538,7 +566,7 @@ class LocationsRepositoryImpl(
         return mutationMutex.withLock {
             val bundle = getBundleUnlocked()
             val remaining = bundle.locations.filterNot { entry ->
-                entry.subscriptionUrl?.trim() == normalizedUrl
+                runtimePolicy.permits(entry.location.kind) && entry.subscriptionUrl?.trim() == normalizedUrl
             }
             val removed = bundle.locations.size - remaining.size
             if (removed > 0) {
@@ -559,6 +587,7 @@ class LocationsRepositoryImpl(
     override suspend fun deleteLocation(storageId: String) {
         mutationMutex.withLock {
             val bundle = getBundleUnlocked()
+            if (bundle.locations.any { it.storageId == storageId && !runtimePolicy.permits(it.location.kind) }) return@withLock
             saveBundleUnlocked(
                 bundle.copy(
                     activeLocationId = bundle.activeLocationId?.takeUnless { it == storageId },
@@ -570,19 +599,22 @@ class LocationsRepositoryImpl(
 
     override suspend fun getAllLocations(): List<LocationEntry> {
         return mutationMutex.withLock {
-            getBundleUnlocked().locations
+            runtimePolicy.visible(getBundleUnlocked()).locations
         }
     }
 
     override suspend fun getActiveLocationId(): String? {
         return mutationMutex.withLock {
-            getBundleUnlocked().activeLocationId
+            runtimePolicy.visible(getBundleUnlocked()).activeLocationId
         }
     }
 
     override suspend fun setActiveLocationId(storageId: String?) {
         mutationMutex.withLock {
             val bundle = getBundleUnlocked()
+            if (storageId != null && bundle.locations.any {
+                    it.storageId == storageId && !runtimePolicy.permits(it.location.kind)
+                }) return@withLock
             val nextActive = storageId?.takeIf { id -> bundle.locations.any { it.storageId == id } }
             saveBundleUnlocked(bundle.copy(activeLocationId = nextActive))
         }
@@ -593,6 +625,7 @@ class LocationsRepositoryImpl(
             val bundle = getBundleUnlocked()
             bundle.locations.firstOrNull { it.storageId == bundle.activeLocationId }
                 ?.takeUnless { entry ->
+                    !runtimePolicy.permits(entry.location.kind) ||
                     entry.metadata?.subscription?.accessStateAt(nowEpochMs()) in
                         setOf(SubscriptionMetadata.AccessState.EXPIRED, SubscriptionMetadata.AccessState.LIMITED)
                 }
@@ -1070,7 +1103,9 @@ class LocationsRepositoryImpl(
             .mapNotNull { it.subscriptionUrl?.trim()?.takeIf { url -> url.isNotBlank() } }
             .toSet()
         val keptLocations = if (currentBundle.settings.preventDuplicates && importedUrls.isNotEmpty()) {
-            currentBundle.locations.filterNot { it.subscriptionUrl?.trim() in importedUrls }
+            currentBundle.locations.filterNot {
+                runtimePolicy.permits(it.location.kind) && it.subscriptionUrl?.trim() in importedUrls
+            }
         } else {
             currentBundle.locations
         }
@@ -1083,11 +1118,14 @@ class LocationsRepositoryImpl(
         } else {
             emptyMap()
         }
-        val replacedStorageIds = importedByStorageId.keys.intersect(currentStorageIds)
+        val replacedStorageIds = importedByStorageId.keys.intersect(currentStorageIds).filterTo(mutableSetOf()) { id ->
+            keptLocations.any { it.storageId == id && runtimePolicy.permits(it.location.kind) }
+        }
 
         val mergedLocations = keptLocations
             .map { existing ->
-                importedByStorageId[existing.storageId]?.also {
+                if (!runtimePolicy.permits(existing.location.kind)) existing
+                else importedByStorageId[existing.storageId]?.also {
                     existingStorageIds.add(it.storageId)
                 } ?: existing
             }

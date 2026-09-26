@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runTest
 import org.olcbox.app.CurrentAppInfo
 import org.olcbox.app.crypt.CryptCodec
 import org.olcbox.app.data.identity.DeviceIdentityProvider
+import org.olcbox.app.data.identity.PersistentDeviceIdentityProvider
 import org.olcbox.app.data.model.LocationBundleV4
 import org.olcbox.app.data.model.LocationConfig
 import org.olcbox.app.data.model.LocationEntry
@@ -17,6 +18,8 @@ import org.olcbox.app.data.share.ConfigShareService
 import io.ktor.http.HttpStatusCode
 import org.olcbox.app.net.PartnerLinkResolver
 import org.olcbox.app.net.PartnerLinkResult
+import org.olcbox.app.net.HttpPartnerLinkResolver
+import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.data.repository.SubscriptionRefreshError
 import kotlin.test.assertFalse
 import kotlin.test.Test
@@ -26,11 +29,198 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LocationsRepositoryImplTest {
+    @Test fun releaseRepositoryHidesStoredOlcrtcWithoutDeletingItsRecord() = runTest {
+        val room = LocationEntry.from("room", LocationConfig(name = "Private room", id = "room-a", key = "key-a"))
+        val ordinary = LocationEntry.from(
+            "ordinary",
+            LocationConfig(name = "NL via RU", kind = org.olcbox.app.net.LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { })
+        )
+        val source = FakeLocationsDataSource(LocationBundleV4(activeLocationId = "room", locations = listOf(room, ordinary)))
+        val repo = LocationsRepositoryImpl(source)
+
+        assertEquals(listOf("ordinary"), repo.getAllLocations().map { it.storageId })
+        assertEquals(listOf("ordinary"), repo.getVisibleBundle().locations.map { it.storageId })
+        assertNull(repo.getVisibleBundle().activeLocationId)
+        assertNull(repo.getActiveLocationId())
+        assertNull(repo.getActiveLocation())
+        assertEquals(listOf("room", "ordinary"), source.stored?.locations?.map { it.storageId })
+    }
+
+    @Test fun releaseRejectsOlcrtcImportAndRestoreAtomically() = runTest {
+        val ordinary = LocationEntry.from(
+            "ordinary", LocationConfig(name = "NL", kind = org.olcbox.app.net.LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { })
+        )
+        val source = FakeLocationsDataSource(LocationBundleV4(activeLocationId = "ordinary", locations = listOf(ordinary)))
+        val repo = LocationsRepositoryImpl(source)
+        val before = source.stored
+        val roomLink = "olcrtc://wbstream?vp8channel@room-a#${"c".repeat(64)}${'$'}Room"
+
+        assertFalse(repo.importText(roomLink))
+        val restore = kotlinx.serialization.json.Json.encodeToString(
+            LocationBundleV4.serializer(),
+            LocationBundleV4(locations = listOf(LocationEntry.from("room", LocationConfig("Room", "r", "k"))))
+        )
+        assertFalse(repo.importText(restore))
+        assertEquals(before, source.stored)
+    }
+
+    @Test fun releaseDirectSaveAndSelectionCannotActivateOlcrtc() = runTest {
+        val ordinary = LocationEntry.from(
+            "ordinary", LocationConfig(name = "NL", kind = org.olcbox.app.net.LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { })
+        )
+        val legacyRoom = LocationEntry.from("legacy-room", LocationConfig("Room", "r", "k"))
+        val source = FakeLocationsDataSource(LocationBundleV4(activeLocationId = "ordinary", locations = listOf(ordinary, legacyRoom)))
+        val repo = LocationsRepositoryImpl(source)
+
+        repo.saveLocation("new-room", LocationConfig("New room", "r2", "k2"))
+        repo.setActiveLocationId("legacy-room")
+        assertEquals(listOf("ordinary", "legacy-room"), source.stored?.locations?.map { it.storageId })
+        assertEquals("ordinary", source.stored?.activeLocationId)
+
+        repo.saveBundle(LocationBundleV4(activeLocationId = "ordinary", locations = listOf(ordinary)))
+        assertEquals(listOf("ordinary", "legacy-room"), source.stored?.locations?.map { it.storageId })
+
+        repo.saveLocation("legacy-room", ordinary.location)
+        assertEquals(org.olcbox.app.net.LocationKind.Olcrtc,
+            source.stored?.locations?.first { it.storageId == "legacy-room" }?.location?.kind)
+        repo.saveBundle(LocationBundleV4(activeLocationId = "ordinary", locations = listOf(
+            ordinary, ordinary.copy(storageId = "legacy-room")
+        )))
+        assertEquals(org.olcbox.app.net.LocationKind.Olcrtc,
+            source.stored?.locations?.first { it.storageId == "legacy-room" }?.location?.kind)
+    }
+
+    @Test fun releaseSaveBundleWithoutSelectionDoesNotReinstateHiddenRoomAsActive() = runTest {
+        val ordinary = LocationEntry.from(
+            "ordinary", LocationConfig(name = "NL", kind = org.olcbox.app.net.LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { })
+        )
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"))
+        val source = FakeLocationsDataSource(LocationBundleV4(activeLocationId = "room", locations = listOf(room, ordinary)))
+        val repo = LocationsRepositoryImpl(source)
+
+        repo.saveBundle(LocationBundleV4(activeLocationId = null, locations = listOf(ordinary)))
+        assertEquals("ordinary", source.stored?.activeLocationId)
+        assertEquals(listOf("ordinary", "room"), source.stored?.locations?.map { it.storageId })
+    }
+
+    @Test fun releaseRefreshesOrdinaryEntryWithoutErasingLegacyRoom() = runTest {
+        val url = "https://example.invalid/sub/synthetic"
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = url)
+        val source = FakeLocationsDataSource()
+        val body = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&flow=xtls-rprx-vision&type=tcp#NL"
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText(url))
+        source.stored = source.stored!!.copy(locations = source.stored!!.locations + room)
+
+        val refresh = repo.refreshSubscriptions()
+        assertEquals(1, refresh.updatedCount, refresh.failures.toString())
+        assertEquals(2, source.stored?.locations?.size)
+        assertTrue(source.stored?.locations?.any { it.storageId == "room" && it.location.kind == org.olcbox.app.net.LocationKind.Olcrtc } == true)
+    }
+
+    @Test fun releaseDoesNotFetchAnOlcrtcOnlySubscription() = runTest {
+        val url = "https://example.invalid/sub/legacy-room"
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = url)
+        val source = FakeLocationsDataSource(LocationBundleV4(locations = listOf(room)))
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { error("Hidden OlcRTC subscription was fetched") }))
+
+        assertEquals(0, repo.refreshSubscriptions().updatedCount)
+        assertEquals(listOf(room), source.stored?.locations)
+    }
+
+    @Test fun releaseRefreshOfAnotherSubscriptionKeepsSeparateHiddenRoom() = runTest {
+        val ordinaryUrl = "https://example.invalid/sub/ordinary"
+        val hiddenUrl = "https://example.invalid/sub/hidden"
+        val body = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&flow=xtls-rprx-vision&type=tcp#NL"
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        assertTrue(repo.importText(ordinaryUrl))
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = hiddenUrl)
+        source.stored = source.stored!!.copy(locations = source.stored!!.locations + room)
+
+        assertEquals(1, repo.refreshSubscriptions().updatedCount)
+        assertTrue(source.stored!!.locations.any { it.storageId == "room" })
+    }
+
+    @Test fun releaseFailedMixedRefreshKeepsHiddenRoomWhenOtherListSucceeds() = runTest {
+        val goodUrl = "https://example.invalid/sub/good"
+        val badUrl = "https://example.invalid/sub/bad"
+        val body = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&flow=xtls-rprx-vision&type=tcp#NL"
+        var failBad = false
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { request ->
+            respond(if (failBad && request.url.toString() == badUrl) "invalid-response" else body)
+        }))
+        assertTrue(repo.importText(goodUrl))
+        assertTrue(repo.importText(badUrl))
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = badUrl)
+        source.stored = source.stored!!.copy(locations = source.stored!!.locations + room)
+        failBad = true
+
+        assertEquals(1, repo.refreshSubscriptions().updatedCount)
+        assertTrue(source.stored!!.locations.any { it.storageId == "room" })
+    }
+
+    @Test fun releaseOrdinaryImportAndRestoreCannotReplaceHiddenRoom() = runTest {
+        val url = "https://example.invalid/sub/shared"
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = url)
+        val source = FakeLocationsDataSource(LocationBundleV4(locations = listOf(room)))
+        val body = "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&flow=xtls-rprx-vision&type=tcp#NL"
+        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+
+        assertTrue(repo.importText(url))
+        assertTrue(source.stored!!.locations.any { it.storageId == "room" && it.location.kind == org.olcbox.app.net.LocationKind.Olcrtc })
+        val restore = kotlinx.serialization.json.Json.encodeToString(
+            LocationBundleV4.serializer(),
+            LocationBundleV4(locations = listOf(LocationEntry.from("room", LocationConfig(
+                name = "NL", kind = org.olcbox.app.net.LocationKind.Vless,
+                xrayConfig = kotlinx.serialization.json.buildJsonObject { }
+            ))))
+        )
+        assertTrue(repo.importText(restore))
+        assertTrue(source.stored!!.locations.any { it.storageId == "room" && it.location.kind == org.olcbox.app.net.LocationKind.Olcrtc })
+    }
+
+    @Test fun releaseDeletionOfOrdinarySubscriptionKeepsHiddenRoomRecord() = runTest {
+        val url = "https://example.invalid/sub/shared"
+        val ordinary = LocationEntry.from("ordinary", LocationConfig(name = "NL", kind = org.olcbox.app.net.LocationKind.Vless,
+            xrayConfig = kotlinx.serialization.json.buildJsonObject { }), subscriptionUrl = url)
+        val room = LocationEntry.from("room", LocationConfig("Room", "r", "k"), subscriptionUrl = url)
+        val source = FakeLocationsDataSource(LocationBundleV4(activeLocationId = "ordinary", locations = listOf(ordinary, room)))
+        val repo = LocationsRepositoryImpl(source)
+
+        repo.deleteLocation("room")
+        assertEquals(2, source.stored?.locations?.size)
+        assertEquals(1, repo.deleteSubscription(url))
+        assertEquals(listOf("room"), source.stored?.locations?.map { it.storageId })
+    }
+
+    private fun experimentalRepository(
+        dataSource: LocationsDataSource,
+        httpClient: HttpClient = createProxyHttpClient(followRedirects = false),
+        deviceIdentityProvider: DeviceIdentityProvider = PersistentDeviceIdentityProvider(dataSource),
+        nowEpochMs: () -> Long = { kotlin.time.Clock.System.now().toEpochMilliseconds() },
+        cryptCodec: CryptCodec? = CryptCodec.default(),
+        partnerLinkResolver: PartnerLinkResolver? = HttpPartnerLinkResolver(httpClient)
+    ): LocationsRepositoryImpl = LocationsRepositoryImpl(
+        dataSource = dataSource,
+        httpClient = httpClient,
+        deviceIdentityProvider = deviceIdentityProvider,
+        nowEpochMs = nowEpochMs,
+        cryptCodec = cryptCodec,
+        partnerLinkResolver = partnerLinkResolver,
+        runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug
+    )
+
     @Test fun cancellingARefreshPreservesTheListAndPropagatesCancellation() = runTest {
         var cancel = false
         var now = 1_000L
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             if (cancel) throw kotlinx.coroutines.CancellationException("settings changed")
             respond("olcrtc://wbstream?vp8channel@first#${"c".repeat(64)}${'$'}First")
         }), nowEpochMs = { now })
@@ -47,7 +237,7 @@ class LocationsRepositoryImplTest {
         var body = "olcrtc://wbstream?vp8channel@first#${"c".repeat(64)}${'$'}First"
         var requests = 0
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             requests++
             respond(body, headers = headersOf("profile-update-interval", "24"))
         }), nowEpochMs = { now })
@@ -84,7 +274,7 @@ class LocationsRepositoryImplTest {
                 locations = listOf(first, second)
             )
         )
-        val exported = LocationsRepositoryImpl(source).exportBundle()
+        val exported = experimentalRepository(source).exportBundle()
         assertTrue("\"version\": 5" in exported)
         assertTrue("\"endpoint\"" in exported)
         assertTrue("\"auth_provider\"" in exported)
@@ -92,7 +282,7 @@ class LocationsRepositoryImplTest {
         assertTrue("\"bypass_provider\"" !in exported)
         val importedSource = FakeLocationsDataSource()
 
-        LocationsRepositoryImpl(importedSource).importText(exported)
+        experimentalRepository(importedSource).importText(exported)
 
         val imported = importedSource.stored
         assertNotNull(imported)
@@ -114,7 +304,7 @@ class LocationsRepositoryImplTest {
             ),
             legacyActive = "legacy_b"
         )
-        val bundle = LocationsRepositoryImpl(source).getBundle()
+        val bundle = experimentalRepository(source).getBundle()
 
         assertEquals("legacy_b", bundle.activeLocationId)
         assertEquals(listOf("legacy_a", "legacy_b"), bundle.locations.map { it.storageId })
@@ -142,7 +332,7 @@ class LocationsRepositoryImplTest {
             )
         )
 
-        val active = LocationsRepositoryImpl(source).getActiveLocation()
+        val active = experimentalRepository(source).getActiveLocation()
 
         assertNotNull(active)
         assertEquals(LocationConfig.PROVIDER_WB_STREAM, active.bypassProvider)
@@ -168,7 +358,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -191,7 +381,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -209,7 +399,7 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource()
         val input = "olcrtc://wbstream?seichannel@room-01#${"a".repeat(64)}%android-01${'$'}RU / olc free sub / IPv6"
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -233,7 +423,7 @@ class LocationsRepositoryImplTest {
         val key = "e".repeat(64)
         val input = "olcrtc://salutejazz?datachannel@zzz999:pw123456#$key${'$'}DE · olcRTC · SJ"
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -256,7 +446,7 @@ class LocationsRepositoryImplTest {
         val key = "b".repeat(64)
         val input = "olcrtc://jitsi?vp8channel<vp8-fps=25&vp8-batch=1>@https://meet.egovm.ru/olcrtc-x#$key"
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val entry = assertNotNull(source.stored).locations.single()
         assertEquals(LocationConfig.TRANSPORT_DATACHANNEL, entry.location.transport)
@@ -272,7 +462,7 @@ class LocationsRepositoryImplTest {
             "olcrtc://jitsi?datachannel@https://meet.egovm.ru/olcrtc-y#$key"
         ).joinToString("\n")
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val entries = assertNotNull(source.stored).locations
         assertEquals(2, entries.size)
@@ -287,7 +477,7 @@ class LocationsRepositoryImplTest {
         val key = "b".repeat(64)
         val input = "olcrtc://jitsi?datachannel@https://meet.cryptopro.ru/myroom#$key${'$'}Jitsi room"
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -323,7 +513,7 @@ class LocationsRepositoryImplTest {
             ##name: DE-Backup
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -419,7 +609,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -435,7 +625,7 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource()
         val incomplete = LocationConfig(name = "Broken", id = "room", key = "")
 
-        LocationsRepositoryImpl(source).saveLocation("broken", incomplete)
+        experimentalRepository(source).saveLocation("broken", incomplete)
 
         val bundle = source.stored
         assertNotNull(bundle)
@@ -470,7 +660,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -502,7 +692,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -563,7 +753,7 @@ class LocationsRepositoryImplTest {
             )
         )
 
-        LocationsRepositoryImpl(source).importText(
+        experimentalRepository(source).importText(
             "olcrtc://wbstream?seichannel@room-01#${"b".repeat(64)}${'$'}New"
         )
 
@@ -609,7 +799,7 @@ class LocationsRepositoryImplTest {
             }
         """.trimIndent()
 
-        LocationsRepositoryImpl(source).importText(input)
+        experimentalRepository(source).importText(input)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -631,7 +821,7 @@ class LocationsRepositoryImplTest {
         }
         val source = FakeLocationsDataSource()
 
-        LocationsRepositoryImpl(
+        experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
@@ -663,7 +853,7 @@ class LocationsRepositoryImplTest {
         }
         val source = FakeLocationsDataSource()
 
-        val imported = LocationsRepositoryImpl(
+        val imported = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
@@ -680,7 +870,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun xrayJsonImportKeepsEveryValidatedProfileAndOriginalConfig() = runTest {
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             respond(XrayJsonSubscriptionFixtures.body)
         }))
 
@@ -700,7 +890,7 @@ class LocationsRepositoryImplTest {
     fun invalidXrayRefreshPreservesWholeSelectedVersion() = runTest {
         var body = XrayJsonSubscriptionFixtures.body
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         val first = assertNotNull(source.stored)
         repo.setActiveLocationId(first.locations[1].storageId)
@@ -719,7 +909,7 @@ class LocationsRepositoryImplTest {
     fun successfulXrayRefreshKeepsSelectionAcrossDnsChange() = runTest {
         var body = XrayJsonSubscriptionFixtures.body
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         val chosen = assertNotNull(source.stored).locations[1].storageId
         repo.setActiveLocationId(chosen)
@@ -739,7 +929,7 @@ class LocationsRepositoryImplTest {
             .replace("domain:example.invalid", "domain:alternate.invalid")
         var body = "[$first,$second]"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         val selected = source.stored!!.locations[1]
         repo.setActiveLocationId(selected.storageId)
@@ -757,7 +947,7 @@ class LocationsRepositoryImplTest {
             .replace("00000000-0000-4000-8000-000000000000", "11111111-1111-4111-8111-111111111111")
         var body = "[$first,$second]"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         repo.setActiveLocationId(source.stored!!.locations[1].storageId)
         val before = source.stored
@@ -773,7 +963,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun xrayJsonImportRetainsLiteralUserUrlDespiteMoveHeader() = runTest {
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             respond(XrayJsonSubscriptionFixtures.body, headers = headersOf("new-url", "https://example.test/json"))
         }))
 
@@ -785,7 +975,7 @@ class LocationsRepositoryImplTest {
     fun http200HwidDenialDoesNotRetryAsBrowserOrPublish() = runTest {
         var requests = 0
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             requests++
             respond("", headers = headersOf("x-hwid-active" to listOf("true"), "x-hwid-max-devices-reached" to listOf("true")))
         }))
@@ -802,7 +992,7 @@ class LocationsRepositoryImplTest {
         var deny = false
         val asked = mutableListOf<String>()
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { request ->
+        val repo = experimentalRepository(source, HttpClient(MockEngine { request ->
             asked += request.url.toString()
             if (deny && request.url.host == "example.test") respond("denied", HttpStatusCode.Forbidden)
             else respond(XrayJsonSubscriptionFixtures.body, headers = headersOf("fallback-url", spare))
@@ -822,7 +1012,7 @@ class LocationsRepositoryImplTest {
         var reject = false
         var now = 2_000_000L
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             if (reject) respond("denied", HttpStatusCode.Forbidden)
             else respond(
                 XrayJsonSubscriptionFixtures.body,
@@ -849,7 +1039,7 @@ class LocationsRepositoryImplTest {
         var now = 2_000_000L
         var reject = false
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             if (reject) respond("offline", HttpStatusCode.ServiceUnavailable)
             else respond(XrayJsonSubscriptionFixtures.body,
                 headers = headersOf("subscription-userinfo", "upload=1; download=1; total=10; expire=2001"))
@@ -869,7 +1059,7 @@ class LocationsRepositoryImplTest {
         var userinfo = "upload=6; download=5; total=10; expire=2001"
         var now = 2_000_000L
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             respond(XrayJsonSubscriptionFixtures.body,
                 headers = if (userinfo.isEmpty()) headersOf() else headersOf("subscription-userinfo", userinfo))
         }), nowEpochMs = { now })
@@ -894,7 +1084,7 @@ class LocationsRepositoryImplTest {
         """.trimIndent())
         var online = false
         val source = FakeLocationsDataSource(oldBundle)
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             if (online) respond(XrayJsonSubscriptionFixtures.body)
             else respond("offline", HttpStatusCode.ServiceUnavailable)
         }), nowEpochMs = { 2_002_000L })
@@ -912,7 +1102,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun malformedNegativeExpiryRemainsUnknownRatherThanUnlimited() = runTest {
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
             respond(XrayJsonSubscriptionFixtures.body,
                 headers = headersOf("subscription-userinfo", "upload=1; download=1; total=10; expire=-1"))
         }))
@@ -927,7 +1117,7 @@ class LocationsRepositoryImplTest {
     fun plainHttpSubscriptionUrlIsRejectedBeforeAnyRequest() = runTest {
         var requests = 0
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(
+        val repo = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(MockEngine {
                 requests++
@@ -963,7 +1153,7 @@ class LocationsRepositoryImplTest {
             respond("olcrtc://wbstream?vp8channel@room-alpha-new#${"c".repeat(64)}${'$'}Alpha")
         }
 
-        val updated = LocationsRepositoryImpl(
+        val updated = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
@@ -998,7 +1188,7 @@ class LocationsRepositoryImplTest {
             respond("<html>not a config</html>")
         }
 
-        val updated = LocationsRepositoryImpl(
+        val updated = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
@@ -1031,7 +1221,7 @@ class LocationsRepositoryImplTest {
         val shared = ConfigShareService.olcRtcUri(config)
         assertTrue("%" !in shared)
 
-        LocationsRepositoryImpl(source).importText(shared)
+        experimentalRepository(source).importText(shared)
 
         val imported = source.stored
         assertNotNull(imported)
@@ -1072,7 +1262,7 @@ class LocationsRepositoryImplTest {
         val lineBlob =
             "Zqjg1M-z4N-c8Tr6FkkyALBXUMbQOMBnSreruYGLPpucGBUyebLLhNxo8VqV9MXMEjfiDiJm-CB8Z0y2-4DObbUMS4Z_sJElAdEoELy2nP2LThWtmT4zTYTD7RHXyENGI6I4webacShIYERWoNE25A"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(
+        val repo = experimentalRepository(
             source,
             cryptCodec = CryptCodec(CryptCodec.decodeMaster(keyB64)!!)
         )
@@ -1092,7 +1282,7 @@ class LocationsRepositoryImplTest {
         // Marker-only: a plain link is untouched even when a codec is baked.
         val keyB64 = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio="
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(
+        val repo = experimentalRepository(
             source,
             cryptCodec = CryptCodec(CryptCodec.decodeMaster(keyB64)!!)
         )
@@ -1134,7 +1324,7 @@ class LocationsRepositoryImplTest {
             hysteria2://PW@8.8.8.8:443?sni=h#DE-hy2
         """.trimIndent()
         val source = FakeLocationsDataSource()
-        LocationsRepositoryImpl(source).importText(body)
+        experimentalRepository(source).importText(body)
         val locs = source.stored!!.locations.map { it.location }
         assertEquals(3, locs.size)
         assertEquals(1, locs.count { it.kind == org.olcbox.app.net.LocationKind.Olcrtc })
@@ -1150,7 +1340,7 @@ class LocationsRepositoryImplTest {
             vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?type=unsupported#DE-vless
         """.trimIndent()
 
-        assertFalse(LocationsRepositoryImpl(source).importText(body))
+        assertFalse(experimentalRepository(source).importText(body))
         assertNull(source.stored)
     }
 
@@ -1162,7 +1352,7 @@ class LocationsRepositoryImplTest {
             tuic://11111111-1111-1111-1111-111111111111@9.9.9.9:443#DE-tuic
         """.trimIndent()
 
-        assertFalse(LocationsRepositoryImpl(source).importText(body))
+        assertFalse(experimentalRepository(source).importText(body))
         assertNull(source.stored)
     }
 
@@ -1174,7 +1364,7 @@ class LocationsRepositoryImplTest {
             vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?security=reality&pbk=P&sid=ab&sni=x&type=tcp#Shared
         """.trimIndent()
 
-        assertTrue(LocationsRepositoryImpl(source).importText(body))
+        assertTrue(experimentalRepository(source).importText(body))
         val entries = source.stored!!.locations
         assertEquals(2, entries.size)
         assertEquals(2, entries.map { it.storageId }.toSet().size)
@@ -1195,7 +1385,7 @@ class LocationsRepositoryImplTest {
         val olc = "olcrtc://telemost?vp8channel@12345#deadbeefdeadbeef${'$'}DE-rtc"
         var body = "$olc\n$validVless"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText(url))
         val selected = source.stored!!.locations.last().storageId
         repo.setActiveLocationId(selected)
@@ -1216,7 +1406,7 @@ class LocationsRepositoryImplTest {
         val hy2 = "hysteria2://PW@9.9.9.9:443?sni=x#Hy2"
         var body = "$vless\n$hy2"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText(url))
         val selected = source.stored!!.locations.single { it.kind == org.olcbox.app.net.LocationKind.Hysteria2 }.storageId
         repo.setActiveLocationId(selected)
@@ -1250,7 +1440,7 @@ class LocationsRepositoryImplTest {
     )
 
     private fun repoRespondingWith(source: FakeLocationsDataSource, engine: MockEngine) =
-        LocationsRepositoryImpl(
+        experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             deviceIdentityProvider = StaticIdentityProvider("hwid-test")
@@ -1509,7 +1699,7 @@ class LocationsRepositoryImplTest {
         val subA = "https://proofkit.org/sub/aaa"
         val subB = "https://proofkit.org/sub/bbb"
         val source = subSource("a1", subEntry("a1", subA), subEntry("a2", subA), subEntry("b1", subB))
-        val repo = LocationsRepositoryImpl(source)
+        val repo = experimentalRepository(source)
 
         assertEquals(2, repo.deleteSubscription(subA))
         assertEquals(listOf("b1"), repo.getAllLocations().map { it.storageId })
@@ -1519,7 +1709,7 @@ class LocationsRepositoryImplTest {
     fun deleteSubscriptionKeepsManuallyAddedLocations() = runTest {
         val subA = "https://proofkit.org/sub/aaa"
         val source = subSource("manual", subEntry("manual", null), subEntry("a1", subA))
-        val repo = LocationsRepositoryImpl(source)
+        val repo = experimentalRepository(source)
 
         assertEquals(1, repo.deleteSubscription(subA))
         assertEquals(listOf("manual"), repo.getAllLocations().map { it.storageId })
@@ -1530,7 +1720,7 @@ class LocationsRepositoryImplTest {
         val subA = "https://proofkit.org/sub/aaa"
         val subB = "https://proofkit.org/sub/bbb"
         val source = subSource("a1", subEntry("a1", subA), subEntry("b1", subB))
-        val repo = LocationsRepositoryImpl(source)
+        val repo = experimentalRepository(source)
 
         repo.deleteSubscription(subA)
 
@@ -1540,7 +1730,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun deleteSubscriptionClearsActiveWhenNothingRemains() = runTest {
         val subA = "https://proofkit.org/sub/aaa"
-        val repo = LocationsRepositoryImpl(subSource("a1", subEntry("a1", subA)))
+        val repo = experimentalRepository(subSource("a1", subEntry("a1", subA)))
 
         assertEquals(1, repo.deleteSubscription(subA))
         assertTrue(repo.getAllLocations().isEmpty())
@@ -1550,7 +1740,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun deleteSubscriptionTrimsTheUrl() = runTest {
         val subA = "https://proofkit.org/sub/aaa"
-        val repo = LocationsRepositoryImpl(subSource("a1", subEntry("a1", subA)))
+        val repo = experimentalRepository(subSource("a1", subEntry("a1", subA)))
 
         assertEquals(1, repo.deleteSubscription("  $subA  "))
     }
@@ -1558,7 +1748,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun deleteSubscriptionIgnoresUnknownAndBlankUrls() = runTest {
         val subA = "https://proofkit.org/sub/aaa"
-        val repo = LocationsRepositoryImpl(subSource("a1", subEntry("a1", subA)))
+        val repo = experimentalRepository(subSource("a1", subEntry("a1", subA)))
 
         assertEquals(0, repo.deleteSubscription("https://example.com/other"))
         assertEquals(0, repo.deleteSubscription("   "))
@@ -1583,7 +1773,7 @@ class LocationsRepositoryImplTest {
         val resolved = "olcrtc://wbstream?seichannel@room-01#${"c".repeat(64)}${'$'}DE / partner"
         val resolver = FakeResolver(PartnerLinkResult.Resolved(resolved))
 
-        val imported = LocationsRepositoryImpl(
+        val imported = experimentalRepository(
             dataSource = source,
             partnerLinkResolver = resolver,
         ).importText(happLink)
@@ -1599,7 +1789,7 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource()
         val resolver = FakeResolver(PartnerLinkResult.NotFound)
 
-        val imported = LocationsRepositoryImpl(
+        val imported = experimentalRepository(
             dataSource = source,
             partnerLinkResolver = resolver,
         ).importText(happLink)
@@ -1614,7 +1804,7 @@ class LocationsRepositoryImplTest {
         val resolver = FakeResolver(PartnerLinkResult.NotFound)
         val input = "olcrtc://wbstream?seichannel@room-01#${"d".repeat(64)}${'$'}RU / plain"
 
-        val imported = LocationsRepositoryImpl(
+        val imported = experimentalRepository(
             dataSource = source,
             partnerLinkResolver = resolver,
         ).importText(input)
@@ -1641,7 +1831,7 @@ class LocationsRepositoryImplTest {
         val engine = MockEngine { respond(subscriptionBody) }
         val link = "olcrtc://crypt1/$cryptUrlBlob"
 
-        val ok = LocationsRepositoryImpl(
+        val ok = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             cryptCodec = CryptCodec(CryptCodec.decodeMaster(cryptKeyB64)!!)
@@ -1661,7 +1851,7 @@ class LocationsRepositoryImplTest {
         val engine = MockEngine { respond(subscriptionBody) }
         val resolver = FakeResolver(PartnerLinkResult.Resolved("olcrtc://crypt1/$cryptUrlBlob"))
 
-        val ok = LocationsRepositoryImpl(
+        val ok = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine),
             cryptCodec = CryptCodec(CryptCodec.decodeMaster(cryptKeyB64)!!),
@@ -1677,7 +1867,7 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource()
         val engine = MockEngine { respond(subscriptionBody) }
 
-        val ok = LocationsRepositoryImpl(
+        val ok = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine)
         ).importText("https://example.test/sub/plain")
@@ -1695,7 +1885,7 @@ class LocationsRepositoryImplTest {
             "olcrtc://telemost?vp8channel@22222#deadbeefdeadbeef\$NL"
         val url = "https://example.test/sub/two"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(
+        val repo = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(MockEngine { respond(body) })
         )
@@ -1728,7 +1918,7 @@ class LocationsRepositoryImplTest {
             "olcrtc://telemost?vp8channel@11111#deadbeefdeadbeef\$DE"
         )
         var call = 0
-        val repo = LocationsRepositoryImpl(
+        val repo = experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(MockEngine { respond(bodies[minOf(call++, 1)]) })
         )
@@ -1764,7 +1954,7 @@ class LocationsRepositoryImplTest {
         val source = FakeLocationsDataSource(stored = stored)
         val engine = MockEngine { respond(subscriptionBody) }
 
-        LocationsRepositoryImpl(
+        experimentalRepository(
             dataSource = source,
             httpClient = HttpClient(engine)
         ).refreshSubscription(cryptUrl)
@@ -1808,7 +1998,7 @@ class LocationsRepositoryImplTest {
     @Test
     fun importsTheRoomsHeaderAndKeepsItInTheStoredEntry() = runTest {
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source)
+        val repo = experimentalRepository(source)
         val key = "a".repeat(64)
         val input = """
             olcrtc://telemost?vp8channel@11115586048655#$key${'$'}Israel
@@ -1838,7 +2028,7 @@ class LocationsRepositoryImplTest {
         val key = "c".repeat(64)
         var body = "olcrtc://telemost?vp8channel@R1#$key${'$'}Room\n##rooms: R2"
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         assertEquals(listOf("R1", "R2"), repo.getActiveLocation()?.location?.failoverRooms())
 
@@ -1859,7 +2049,7 @@ class LocationsRepositoryImplTest {
         val telemost = "olcrtc://telemost?vp8channel@T1#$key${'$'}DE · VP8"
         var body = telemost
         val source = FakeLocationsDataSource()
-        val repo = LocationsRepositoryImpl(source, HttpClient(MockEngine { respond(body) }))
+        val repo = experimentalRepository(source, HttpClient(MockEngine { respond(body) }))
         assertTrue(repo.importText("https://example.test/sub"))
         assertEquals(1, source.stored?.locations?.size)
 
