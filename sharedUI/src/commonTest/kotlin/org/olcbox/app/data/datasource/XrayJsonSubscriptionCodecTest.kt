@@ -8,6 +8,45 @@ import kotlin.test.*
 class XrayJsonSubscriptionCodecTest {
     private val fixture = XrayJsonSubscriptionFixtures
     private fun reject(body: String) = assertIs<XrayJsonSubscriptionCodec.Rejected>(XrayJsonSubscriptionCodec.decode(body))
+    private fun String.mutate(from: String, to: String): String {
+        assertTrue(contains(from), "Fixture mutation target must exist")
+        assertNotEquals(from, to, "Fixture mutation must change the input")
+        return replace(from, to)
+    }
+
+    @Test fun rejectsUnvalidatedHysteriaUp() = rejectsHysteriaExtension("up")
+    @Test fun rejectsUnvalidatedHysteriaDown() = rejectsHysteriaExtension("down")
+    @Test fun rejectsUnvalidatedHysteriaUdpHop() = rejectsHysteriaExtension("udphop")
+    @Test fun rejectsUnvalidatedHysteriaCongestion() = rejectsHysteriaExtension("congestion")
+    private fun rejectsHysteriaExtension(key: String) {
+        reject("[${fixture.hysteria.mutate("\"auth\":\"SYNTHETIC_AUTH_NOT_REAL\"", "\"auth\":\"SYNTHETIC_AUTH_NOT_REAL\",\"$key\":[]")}]")
+    }
+
+    @Test fun rejectsMistypedTlsFingerprint() {
+        reject("[${fixture.hysteria.mutate("\"fingerprint\":\"chrome\"", "\"fingerprint\":[]")}]")
+    }
+
+    @Test fun rejectsMistypedDnsTimeout() {
+        val config = fixture.vless.mutate("\"192.0.2.53\"", """{"address":"192.0.2.53","timeoutMs":[]} """.trim())
+        assertEquals(XrayJsonSubscriptionCodec.Reason.INVALID_DNS, reject("[$config]").reason)
+    }
+
+    @Test fun rejectsMistypedRuleDomainMatcher() {
+        val config = fixture.vless.mutate("\"outboundTag\":\"direct\"", "\"outboundTag\":\"direct\",\"domainMatcher\":[]")
+        assertEquals(XrayJsonSubscriptionCodec.Reason.INVALID_ROUTING, reject("[$config]").reason)
+    }
+
+    @Test fun rejectsUnknownFreedomSettings() {
+        reject("[${fixture.vless.mutate("\"domainStrategy\":\"UseIP\"", "\"requiredFutureField\":true")}]")
+    }
+
+    @Test fun rejectsMistypedFreedomDomainStrategy() {
+        reject("[${fixture.vless.mutate("\"domainStrategy\":\"UseIP\"", "\"domainStrategy\":[]")}]")
+    }
+
+    @Test fun rejectsUnknownBlackholeSettings() {
+        reject("[${fixture.vless.mutate("\"protocol\":\"blackhole\",\"settings\":{}", "\"protocol\":\"blackhole\",\"settings\":{\"requiredFutureField\":true}")}]")
+    }
 
     @Test fun preservesEntireConfigsAndOrderWithoutRebuildingDnsRoutingOrSecrets() {
         val result = assertIs<XrayJsonSubscriptionCodec.Success>(XrayJsonSubscriptionCodec.decode(fixture.body))

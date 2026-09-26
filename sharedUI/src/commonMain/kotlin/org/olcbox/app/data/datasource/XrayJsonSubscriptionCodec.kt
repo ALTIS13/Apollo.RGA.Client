@@ -72,7 +72,15 @@ internal object XrayJsonSubscriptionCodec {
             out.keysOnly("tag", "protocol", "settings", "streamSettings", "mux")
             val settings = out["settings"].obj()
             when (out["protocol"].string()) {
-                "freedom", "blackhole" -> check(out["streamSettings"] == null)
+                "freedom" -> {
+                    check(out["streamSettings"] == null)
+                    settings.keysOnly("domainStrategy")
+                    optionalChoice(settings, "domainStrategy", setOf("AsIs", "UseIP", "UseIPv4", "UseIPv6"))
+                }
+                "blackhole" -> {
+                    check(out["streamSettings"] == null)
+                    settings.keysOnly()
+                }
                 "vless" -> {
                     settings.keysOnly("vnext")
                     val servers = settings["vnext"].array()
@@ -113,11 +121,13 @@ internal object XrayJsonSubscriptionCodec {
                     stream.keysOnly("network", "security", "hysteriaSettings", "tlsSettings", "sockopt")
                     check(stream["security"].string() == "tls")
                     val hy = stream["hysteriaSettings"].obj()
-                    hy.keysOnly("version", "auth", "up", "down", "udphop", "congestion")
+                    // Admit only the observed subset; optional extensions need explicit validation.
+                    hy.keysOnly("version", "auth")
                     check(hy["version"].number() == 2); hy["auth"].string()
                     val tls = stream["tlsSettings"].obj(); tls["serverName"].string()
                     tls.keysOnly("serverName", "enableSessionResumption", "fingerprint", "alpn", "pinnedPeerCertSha256", "allowInsecure", "disableSystemRoot")
                     booleans(tls, "enableSessionResumption", "allowInsecure", "disableSystemRoot")
+                    tls["fingerprint"]?.string()
                     tls["alpn"]?.strings()
                     tls["pinnedPeerCertSha256"]?.string()
                     tunnels += Protocol.HYSTERIA2
@@ -143,6 +153,7 @@ internal object XrayJsonSubscriptionCodec {
                 o.keysOnly("address", "port", "domains", "expectIPs", "skipFallback", "queryStrategy", "timeoutMs", "disableCache", "finalQuery", "tag")
                 o["address"].string()
                 o["port"]?.let { check(it.number() in 1..65535) }
+                o["timeoutMs"]?.let { check(it.number() >= 0) }
                 o["domains"]?.strings(); o["expectIPs"]?.strings()
                 optionalChoice(o, "queryStrategy", setOf("UseIP", "UseIPv4", "UseIPv6"))
                 booleans(o, "skipFallback", "disableCache", "finalQuery")
@@ -160,6 +171,7 @@ internal object XrayJsonSubscriptionCodec {
                 val rule = r.obj()
                 rule.keysOnly("type", "domain", "ip", "port", "sourcePort", "network", "source", "user", "inboundTag", "protocol", "attrs", "outboundTag", "domainMatcher")
                 check(rule["type"].string() == "field")
+                optionalChoice(rule, "domainMatcher", setOf("hybrid", "linear"))
                 check(rule["outboundTag"].string() in tags, Reason.INVALID_TAG_REFERENCE)
                 rule["inboundTag"]?.strings()?.let { check(it.all { tag -> tag in inTags }, Reason.INVALID_TAG_REFERENCE) }
                 check(rule.keys.any { it in setOf("domain", "ip", "port", "sourcePort", "network", "source", "user", "inboundTag", "protocol", "attrs") })
