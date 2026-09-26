@@ -81,7 +81,7 @@ object HostPresenter {
         val settings = outbound["settings"]?.jsonObject ?: return@runCatching false
         val address = when {
             entry.location.kind == LocationKind.Vless && protocol == "vless" ->
-                settings["vnext"]?.jsonArray?.firstOrNull()?.jsonObject?.get("address")?.jsonPrimitive?.content
+                settings["vnext"]?.jsonArray?.singleOrNull()?.jsonObject?.get("address")?.jsonPrimitive?.content
             entry.location.kind == LocationKind.Hysteria2 && protocol == "hysteria" &&
                 settings["version"]?.jsonPrimitive?.intOrNull == 2 ->
                 settings["address"]?.jsonPrimitive?.content

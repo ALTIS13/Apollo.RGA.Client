@@ -60,6 +60,21 @@ class HostAndSubscriptionPresenterTest {
         assertEquals("Настроенный вход: RU Relay · назначение Netherlands", row.routeLine)
     }
 
+    @Test fun multiServerVlessStaysNeutralRegardlessOfAlternateOwnership() {
+        listOf("direct.example.net", "rw-de-relay.gate-altas.tech").forEach { alternate ->
+            val host = LocationEntry.from("exit-nl", LocationConfig(
+                name = "🇳🇱 Netherlands via RU", kind = LocationKind.Vless,
+                xrayConfig = Json.parseToJsonElement(
+                    """{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"rw-nl-relay.gate-altas.tech","port":443,"users":[{"id":"00000000-0000-0000-0000-000000000000","encryption":"none"}]},{"address":"$alternate","port":443,"users":[{"id":"00000000-0000-0000-0000-000000000000","encryption":"none"}]}]}}]}"""
+                ).jsonObject
+            ))
+
+            val row = HostPresenter.present(host)!!
+            assertNull(row.relay, "multiple configured endpoints cannot substantiate a single ingress: $alternate")
+            assertEquals("Маршрут не подтверждён", row.routeLine)
+        }
+    }
+
     @Test fun hysteriaV2OwnedIngressUsesItsActualXrayProtocolShape() {
         val host = LocationEntry.from("exit-fi", LocationConfig(
             name = "🇫🇮 Finland", kind = LocationKind.Hysteria2,
