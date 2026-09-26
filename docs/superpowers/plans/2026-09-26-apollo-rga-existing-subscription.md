@@ -39,9 +39,9 @@
 
 ### Task 2: Импорт, хранение и атомарное обновление
 
-**Files:** `sharedUI/src/commonMain/kotlin/org/olcbox/app/data/datasource/LocationsDatasource.kt`, `sharedUI/src/commonMain/kotlin/org/olcbox/app/data/model/LocationConfig.kt`, `sharedUI/src/androidMain/kotlin/org/olcbox/app/data/datasource/LocationsDataSourceImpl.kt`, `sharedUI/src/commonTest/kotlin/org/olcbox/app/data/datasource/LocationsRepositoryImplTest.kt` and targeted Android storage tests.
+**Files:** `sharedUI/src/commonMain/kotlin/org/olcbox/app/data/datasource/LocationsDatasource.kt`, `sharedUI/src/commonMain/kotlin/org/olcbox/app/data/model/LocationConfig.kt`, `sharedUI/src/androidMain/kotlin/org/olcbox/app/data/datasource/LocationsDataSourceImpl.kt`, `sharedUI/build.gradle.kts` (`GeneratedAppInfo.NAME`), `sharedUI/src/commonTest/kotlin/org/olcbox/app/data/datasource/LocationsRepositoryImplTest.kt` and targeted Android storage tests.
 
-**Interfaces:** Task 1 codec is consumed by `LocationsRepositoryImpl` as an atomic subscription unit. Persisted location carries its validated original config and stable identity. A rejected Identity request never retries as browser UA to bypass HWID/format, and the literal URL is retained. URI/Base64 behavior remains where independently valid.
+**Interfaces:** Task 1 codec is consumed by `LocationsRepositoryImpl` as an atomic subscription unit. Persisted location carries its validated original config and stable identity. Own User-Agent is `ApolloRGA/<version>` (exact Response Rule later); a rejected Identity request never retries as browser UA to bypass HWID/format, and the literal URL is retained for XRAY_JSON. URI/Base64 behavior remains where independently valid.
 
 - [ ] RED tests: bad entry/format drift/Identity rejection cannot publish a subset or invoke Compatibility UA; valid refresh keeps selected host; known expired/limited profile does not become unlimited after failed refresh.
 - [ ] Integrate codec, serialize exact profile, make Android write crash-safe, preserve last valid version only while entitlement state permits. GREEN and related repository/storage tests.
