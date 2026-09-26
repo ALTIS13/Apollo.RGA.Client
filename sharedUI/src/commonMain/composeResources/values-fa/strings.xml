@@ -186,7 +186,7 @@
     <string name="lowest_tag_caps">خودکار</string>
     <string name="measure_latency">اندازه‌گیری تأخیر</string>
     <string name="mismatch_caption_caps">پیوند %1$s می‌خواهد · %2$s با %3$s کار می‌کند</string>
-    <string name="mismatch_explanation">این پیوند %1$s می‌خواهد، اما Ghostlane اتاق‌های %2$s را روی %3$s اجرا می‌کند. انتقال سرور را روی %4$s بگذارید و سپس وصل شوید.</string>
+    <string name="mismatch_explanation">این پیوند %1$s می‌خواهد، اما Apollo.RGA اتاق‌های %2$s را روی %3$s اجرا می‌کند. انتقال سرور را روی %4$s بگذارید و سپس وصل شوید.</string>
     <string name="mode_full_tunnel">تونل کامل</string>
     <string name="mode_proxy_description">نقطهٔ پایانی محلی SOCKS</string>
     <string name="mode_proxy_summary">پراکسی · SOCKS5 محلی</string>

@@ -186,7 +186,7 @@
     <string name="lowest_tag_caps">АВТО</string>
     <string name="measure_latency">Измерить задержку</string>
     <string name="mismatch_caption_caps">ССЫЛКА ПРОСИТ %1$s · %2$s РАБОТАЕТ ЧЕРЕЗ %3$s</string>
-    <string name="mismatch_explanation">Ссылка просит %1$s, а Ghostlane подключается к комнатам %2$s через %3$s. Переключите транспорт сервера на %4$s и подключитесь снова.</string>
+    <string name="mismatch_explanation">Ссылка просит %1$s, а Apollo.RGA подключается к комнатам %2$s через %3$s. Переключите транспорт сервера на %4$s и подключитесь снова.</string>
     <string name="mode_full_tunnel">Полный туннель</string>
     <string name="mode_proxy_description">Локальный адрес SOCKS</string>
     <string name="mode_proxy_summary">Прокси · локальный SOCKS5</string>

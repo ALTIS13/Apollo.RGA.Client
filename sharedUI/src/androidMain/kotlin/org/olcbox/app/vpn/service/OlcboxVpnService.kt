@@ -1097,7 +1097,7 @@ class OlcboxVpnService : VpnService() {
     private fun establishSystemVpnTunnel(): ParcelFileDescriptor? {
         return try {
             val builder = Builder()
-                .setSession("Olcbox VPN")
+                .setSession("Apollo.RGA VPN")
                 .setMtu(TUN_MTU)
                 .addAddress(TUN_IPV4_ADDRESS, IPV4_PREFIX_LENGTH)
                 .addRoute("0.0.0.0", 0)

@@ -186,7 +186,7 @@
     <string name="lowest_tag_caps">自动</string>
     <string name="measure_latency">测量延迟</string>
     <string name="mismatch_caption_caps">链接要求 %1$s · %2$s 使用 %3$s</string>
-    <string name="mismatch_explanation">此链接要求 %1$s，而 Ghostlane 通过 %3$s 运行 %2$s 房间。请将服务器的传输方式设为 %4$s，然后再连接。</string>
+    <string name="mismatch_explanation">此链接要求 %1$s，而 Apollo.RGA 通过 %3$s 运行 %2$s 房间。请将服务器的传输方式设为 %4$s，然后再连接。</string>
     <string name="mode_full_tunnel">全局隧道</string>
     <string name="mode_proxy_description">本地 SOCKS 端点</string>
     <string name="mode_proxy_summary">代理 · 本地 SOCKS5</string>

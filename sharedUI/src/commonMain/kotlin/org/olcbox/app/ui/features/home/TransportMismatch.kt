@@ -20,7 +20,7 @@ object TransportMismatch {
      * its string resource, which says the same in the user's language.
      */
     const val CAPTION = "LINK ASKS FOR %1\$s · %2\$s RUNS %3\$s"
-    const val EXPLANATION = "This link asks for %1\$s, and Ghostlane runs %2\$s rooms over %3\$s. " +
+    const val EXPLANATION = "This link asks for %1\$s, and Apollo.RGA runs %2\$s rooms over %3\$s. " +
         "Set the server's transport to %4\$s, then connect."
 
     /** One line for the room card, in the board's own voice. */

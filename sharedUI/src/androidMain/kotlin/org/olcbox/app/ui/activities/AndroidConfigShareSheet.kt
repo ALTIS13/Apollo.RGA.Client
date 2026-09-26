@@ -139,7 +139,7 @@ internal fun AndroidConfigShareSheet(
 
 private fun Context.copySharePayload(payload: String) {
     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    clipboard.setPrimaryClip(ClipData.newPlainText("Ghostlane config", payload))
+    clipboard.setPrimaryClip(ClipData.newPlainText("Apollo.RGA config", payload))
 }
 
 private fun Context.sharePayload(payload: String, title: String) {

@@ -186,7 +186,7 @@
     <string name="lowest_tag_caps">AUTO</string>
     <string name="measure_latency">Measure latency</string>
     <string name="mismatch_caption_caps">LINK ASKS FOR %1$s · %2$s RUNS %3$s</string>
-    <string name="mismatch_explanation">This link asks for %1$s, and Ghostlane runs %2$s rooms over %3$s. Set the server's transport to %4$s, then connect.</string>
+    <string name="mismatch_explanation">This link asks for %1$s, and Apollo.RGA runs %2$s rooms over %3$s. Set the server's transport to %4$s, then connect.</string>
     <string name="mode_full_tunnel">Full tunnel</string>
     <string name="mode_proxy_description">Local SOCKS endpoint</string>
     <string name="mode_proxy_summary">Proxy · Local SOCKS5</string>

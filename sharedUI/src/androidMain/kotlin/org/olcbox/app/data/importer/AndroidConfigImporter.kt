@@ -22,7 +22,7 @@ class AndroidConfigImporter(private val context: Context) : ConfigImporter {
     override fun copyToClipboard(text: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         // The sheet that asked says "Copied" in the user's language.
-        clipboard.setPrimaryClip(ClipData.newPlainText("Ghostlane", text))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Apollo.RGA", text))
     }
 
     override suspend fun readTextFromSource(source: Any): String? {
