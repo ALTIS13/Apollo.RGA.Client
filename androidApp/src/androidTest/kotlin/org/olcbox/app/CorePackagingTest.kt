@@ -10,6 +10,7 @@ import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.OutboundSpec
 import org.olcbox.app.net.RuleSets
 import org.olcbox.app.net.SingBoxConfig
+import org.olcbox.app.net.XrayConfig
 import org.olcbox.app.net.XrayGeodata
 import java.io.File
 import java.net.InetSocketAddress
@@ -72,6 +73,39 @@ class CorePackagingTest {
         process.waitFor()
 
         assertTrue("core did not report a version, output was: $output", output.contains("sing-box"))
+    }
+
+    @Test
+    fun xrayIsPackagedAndRunsOnThisDevice() {
+        val bin = coreBinary("libxraycore.so")
+        assertTrue("Xray missing from nativeLibraryDir", bin.exists())
+        assertTrue("Xray is present but not executable", bin.canExecute())
+
+        val process = ProcessBuilder(bin.absolutePath, "version")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val exit = process.waitFor()
+
+        assertTrue("Xray version process failed (exit $exit)", exit == 0)
+        assertTrue("Xray did not report its version", output.contains("Xray"))
+    }
+
+    @Test
+    fun generatedXhttpConfigIsValidForShippedXray() {
+        val spec = LinkParser.parse(SAMPLE_XHTTP_LINK) as? OutboundSpec.Vless
+        assertTrue("sample XHTTP link no longer parses", spec != null)
+        val config = File(context.cacheDir, "instrumented-xray-config.json").apply {
+            writeText(XrayConfig.buildXhttp(spec!!, socksPort = 11811))
+        }
+
+        val process = ProcessBuilder(
+            coreBinary("libxraycore.so").absolutePath, "run", "-test", "-config", config.absolutePath
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val exit = process.waitFor()
+
+        assertTrue("Xray rejected generated XHTTP config (exit $exit): $output", exit == 0)
     }
 
     /**
@@ -163,6 +197,12 @@ class CorePackagingTest {
                 "?type=tcp&security=reality&sni=www.zoom.us&fp=chrome" +
                 "&pbk=kY3iGmtRRYBnOSlhivFT0DwqEQ8b3cqkFxQgJStpsAo&sid=14090023" +
                 "&flow=xtls-rprx-vision#instrumented"
+
+        const val SAMPLE_XHTTP_LINK =
+            "vless://d67b1637-4fee-4e0d-bc96-000000000000@127.0.0.1:443" +
+                "?type=xhttp&security=reality&sni=www.zoom.us&fp=chrome" +
+                "&pbk=kY3iGmtRRYBnOSlhivFT0DwqEQ8b3cqkFxQgJStpsAo&sid=14090023" +
+                "&path=%2Fisolated-test&mode=auto#instrumented-xhttp"
 
         /** Away from the app's own core port so a running app cannot collide with the test. */
         const val TEST_SOCKS_PORT = 11810

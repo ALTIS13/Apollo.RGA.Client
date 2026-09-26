@@ -1119,7 +1119,7 @@ class OlcboxVpnService : VpnService() {
     private fun applySplitTunneling(builder: Builder): Boolean {
         return when (splitTunnelMode) {
             AndroidSplitTunnelMode.AllApps -> {
-                addDisallowedApp(builder, packageName, "Olcbox")
+                if (!excludeOwnAppOrFail(builder)) return false
                 addLog("Split tunneling: all apps use TUN")
                 true
             }
@@ -1149,7 +1149,7 @@ class OlcboxVpnService : VpnService() {
             }
 
             AndroidSplitTunnelMode.BypassSelected -> {
-                addDisallowedApp(builder, packageName, "Olcbox")
+                if (!excludeOwnAppOrFail(builder)) return false
                 val applied = splitTunnelBypassApps
                     .filter { it.isNotBlank() && it != packageName }
                     .distinct()
@@ -1164,6 +1164,15 @@ class OlcboxVpnService : VpnService() {
             }
         }
     }
+
+    private fun excludeOwnAppOrFail(builder: Builder): Boolean = SelfAppExclusionGate.apply(
+        excludeSelf = { addDisallowedApp(builder, packageName, "this app") },
+        onFailure = {
+            addLog("VPN tunnel refused: this app could not be excluded from TUN")
+            setStatus(VpnStatus.Error("VPN app bypass failed"))
+            updateNotification("VPN tunnel error")
+        }
+    )
 
     private fun addAllowedApp(builder: Builder, targetPackage: String): Boolean {
         return runCatching {

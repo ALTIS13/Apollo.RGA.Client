@@ -1,4 +1,10 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.TaskAction
 import java.util.Properties
 import java.io.FileInputStream
 
@@ -164,3 +170,54 @@ dependencies {
     // pin what its liveness check reports when olcRTC was never started.
     androidTestImplementation(project(":sharedUI:olcrtc-bin"))
 }
+
+// The release workflow stages these executables before Gradle runs. Local APK
+// builds must have the same gate: without either file the app installs normally
+// but every non-OLC connection fails only when the user presses Connect.
+abstract class VerifyAndroidCoreBinariesTask : DefaultTask() {
+    @get:Input abstract val abis: ListProperty<String>
+    @get:Internal abstract val jniLibsDirectory: DirectoryProperty
+
+    @TaskAction
+    fun verify() {
+        val elfMachineByAbi = mapOf(
+            "armeabi-v7a" to 40,
+            "arm64-v8a" to 183,
+            "x86_64" to 62,
+        )
+        abis.get().forEach { abi ->
+            val expectedMachine = elfMachineByAbi[abi]
+                ?: error("Unsupported Android ABI in olcbox.android.abiFilters: $abi")
+            listOf("libsingboxcore.so", "libxraycore.so").forEach { name ->
+                val core = jniLibsDirectory.file("$abi/$name").get().asFile
+                check(core.isFile && core.length() >= 20) {
+                    "Missing Android core $abi/$name. Stage both pinned executable cores in " +
+                        "androidApp/jniLibs/$abi before assembling an APK."
+                }
+                val header = core.inputStream().use { it.readNBytes(20) }
+                val isElf = header[0] == 0x7f.toByte() &&
+                    header[1] == 'E'.code.toByte() &&
+                    header[2] == 'L'.code.toByte() &&
+                    header[3] == 'F'.code.toByte() &&
+                    header[5] == 1.toByte()
+                val elfType = (header[16].toInt() and 0xff) or
+                    ((header[17].toInt() and 0xff) shl 8)
+                val elfMachine = (header[18].toInt() and 0xff) or
+                    ((header[19].toInt() and 0xff) shl 8)
+                check(isElf && elfType in 2..3 && elfMachine == expectedMachine) {
+                    "Android core $abi/$name is not an executable ELF for $abi."
+                }
+            }
+        }
+    }
+}
+
+val verifyAndroidCoreBinaries = tasks.register<VerifyAndroidCoreBinariesTask>("verifyAndroidCoreBinaries") {
+    group = "verification"
+    description = "Rejects Android APKs missing the executable sing-box or Xray core"
+    abis.set(androidAbiFilters)
+    jniLibsDirectory.set(layout.projectDirectory.dir("jniLibs"))
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("NativeLibs") }
+    .configureEach { dependsOn(verifyAndroidCoreBinaries) }

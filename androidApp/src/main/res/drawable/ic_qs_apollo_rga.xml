@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome Quick Settings mark derived from the approved Apollo.RGA v2 SVG. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:rotation="-24">
+        <path
+            android:pathData="M460,256 A204,108 0,1 1,52 256 A204,108 0,1 1,460 256"
+            android:fillColor="@android:color/transparent"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="14" />
+    </group>
+    <path
+        android:pathData="M256,126 L151,366 L196,366 L219,311 L293,311 L316,366 L361,366 L256,126 Z M256,219 L276,274 L236,274 L256,219 Z"
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd" />
+    <path
+        android:pathData="M382,145 A11,11 0,1 1,382 167 A11,11 0,1 1,382 145"
+        android:fillColor="#FFFFFFFF" />
+</vector>
