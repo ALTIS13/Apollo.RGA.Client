@@ -54,6 +54,7 @@
 **Interfaces:** Replace Android Xray 25.3.6, which cannot parse Hysteria v2/TLS, with a pinned, reproducible and patched Xray version at least 26.7.11. Preserve XHTTP functionality. Keep iOS/desktop pins unchanged unless their own compatibility requires a separate explicit task.
 
 - [ ] Select the exact upstream tag after reading its official release/security notes; record tag, source commit and artifact hash. 26.7.11 is the minimum for `pinnedPeerCertSha256` security fix ([advisory](https://github.com/XTLS/Xray-core/security/advisories/GHSA-5wf9-h793-w73c)); newer prereleases require focused testing, not an assumption of stability.
+- [ ] Treat config acceptance separately from network usability: [upstream report](https://github.com/XTLS/Xray-core/issues/6717) describes Xray Hy2 on a Russian network authenticating yet carrying no usable traffic while sing-box worked. Only an actual device/network test may close that risk; do not infer success from `xray test`.
 - [ ] First RED: pinned Android 25.3.6 rejects sanitized Hy2/TLS-pin configuration. Build/stage the replacement arm64 binary with existing project pipeline; run `xray test` on that exact build in isolated Android execution and verify XHTTP/Reality too. A Windows x64 binary passing is insufficient.
 - [ ] Update matching CI/release pins, 16 KB ELF alignment check and app packaging tests; run focused build/verification. Do not install on the user's Nothing Phone yet or alter an active VPN. Commit: `build(rga): pin Android Xray with Hy2 support`.
 
