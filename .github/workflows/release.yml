@@ -817,7 +817,7 @@ jobs:
       OLCBOX_VERSION_CODE: ${{ needs.release_version.outputs.version_code }}
       ANDROID_NDK_VERSION: "28.2.13676358"
       # Android Xray is independently pinned in scripts/android-xray-pins.json.
-      # Its Go toolchain is process-local; shared Go/OlcRTC/sing-box stay unchanged.
+      # Its Go toolchain is process-local; shared Go/sing-box stay unchanged.
       SINGBOX_VERSION: "1.13.14"
       ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
       ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
@@ -834,14 +834,6 @@ jobs:
         with:
           path: olcbox
 
-      - name: Checkout olcrtc
-        uses: actions/checkout@v7
-        with:
-          repository: ghostlane-project/olcrtc
-          ref: ${{ needs.release_version.outputs.olcrtc_ref }}
-          path: olcrtc
-          submodules: recursive
-
       - name: Setup JDK
         uses: actions/setup-java@v6
         with:
@@ -852,7 +844,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: olcrtc/go.sum
+          cache: false
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -868,19 +860,6 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
-
-      - name: Install Go mobile tooling
-        run: |
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install github.com/magefile/mage@latest
-
-      - name: Initialize gomobile
-        working-directory: olcrtc
-        run: |
-          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
-          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
-          gomobile init
 
       - name: Configure Android release signing
         working-directory: olcbox
@@ -940,7 +919,7 @@ jobs:
           EOF
           fi
 
-      # Without this the APK ships olcRTC and nothing else. sing-box and Xray run
+      # sing-box and Xray run
       # as child processes on Android, exec'd out of the app's native library
       # directory, so each core has to be packaged as a `lib*.so` per ABI — that
       # is the only place an installed app is allowed to execute from.
@@ -1030,7 +1009,6 @@ jobs:
       - name: Build production APK
         working-directory: olcbox
         run: |
-          export OLCRTC_REPO="${{ github.workspace }}/olcrtc"
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
           ./gradlew -Polcbox.version="${OLCBOX_VERSION}" -Polcbox.versionCode="${OLCBOX_VERSION_CODE}" :sharedUI:jvmTest :androidApp:assembleGithubRelease :androidApp:bundlePlayRelease --stacktrace
@@ -1082,11 +1060,15 @@ jobs:
           # pipeline reports failure for a core that is there.
           listing="$(mktemp)"
           unzip -l "$aab" > "$listing"
-          for core in libsingboxcore.so libxraycore.so libgojni.so; do
+          for core in libsingboxcore.so libxraycore.so; do
             grep -q "base/lib/arm64-v8a/${core}" "$listing" \
               || { echo "MISSING arm64-v8a/${core} in the bundle" >&2; exit 1; }
             echo "ok   arm64-v8a/${core}"
           done
+          if grep -q 'base/lib/.*/libgojni.so' "$listing"; then
+            echo "Unexpected olcRTC native library in ordinary Play bundle" >&2
+            exit 1
+          fi
           ls -la dist/
 
       # Asserted against the finished artifact, not against the staging directory.
@@ -1099,11 +1081,16 @@ jobs:
           set -euo pipefail
           apk="dist/Ghostlane-${OLCBOX_VERSION}-android-release.apk"
           python3 scripts/verify-android-cores.py --abis arm64-v8a armeabi-v7a x86_64 --archive "$apk"
+          listing="$(mktemp)"
+          unzip -l "$apk" > "$listing"
+          if grep -q 'lib/.*/libgojni.so' "$listing"; then
+            echo "Unexpected olcRTC native library in ordinary GitHub APK" >&2
+            exit 1
+          fi
 
       - name: Build armeabi-v7a production APK
         working-directory: olcbox
         run: |
-          export OLCRTC_REPO="${{ github.workspace }}/olcrtc"
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
           ./gradlew -Polcbox.version="${OLCBOX_VERSION}" -Polcbox.versionCode="${OLCBOX_VERSION_CODE}" -Polcbox.android.abiFilters=armeabi-v7a :androidApp:clean :androidApp:assembleGithubRelease --stacktrace

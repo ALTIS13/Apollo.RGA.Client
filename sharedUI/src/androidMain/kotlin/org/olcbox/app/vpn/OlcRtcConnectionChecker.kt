@@ -1,21 +1,21 @@
 package org.olcbox.app.vpn
 
+import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import mobile.Mobile
-import mobile.Runtime as OlcrtcRuntime
 import org.olcbox.app.data.model.LocationConfig
 import java.net.ServerSocket
 
-internal object OlcRtcConnectionChecker {
+internal class OlcRtcConnectionChecker(context: Context) {
     // The checker's own engine, so a probe never touches the service's.
-    private val runtime: OlcrtcRuntime by lazy { Mobile.new_() }
+    private val runtime by lazy { AndroidOlcRtcRuntimeProvider.create(context.applicationContext) }
 
     suspend fun check(locationConfig: LocationConfig, deviceId: String): Long? {
         return withContext(Dispatchers.IO) {
             val config = locationConfig.normalized()
             if (!config.isComplete()) return@withContext null
+            val runtime = runtime ?: return@withContext null
 
             repeat(CONNECTION_CHECK_ATTEMPTS) {
                 val socksPort = allocateLocalPort()
@@ -47,6 +47,7 @@ internal object OlcRtcConnectionChecker {
         return withContext(Dispatchers.IO) {
             val config = locationConfig.normalized()
             if (!config.isComplete()) return@withContext null
+            val runtime = runtime ?: return@withContext null
 
             repeat(HTTP_PING_ATTEMPTS) {
                 val socksPort = allocateLocalPort()
@@ -83,10 +84,12 @@ internal object OlcRtcConnectionChecker {
         return ServerSocket(0).use { it.localPort }
     }
 
-    private const val CONNECTION_CHECK_ATTEMPTS = 2
-    private const val CONNECTION_CHECK_TIMEOUT_MS = 8_000L
+    private companion object {
+        const val CONNECTION_CHECK_ATTEMPTS = 2
+        const val CONNECTION_CHECK_TIMEOUT_MS = 8_000L
 
-    private const val HTTP_PING_ATTEMPTS = 1
-    private const val HTTP_PING_TIMEOUT_MS = 8_000L
-    private const val HTTP_PING_URL = "https://www.google.com/generate_204"
+        const val HTTP_PING_ATTEMPTS = 1
+        const val HTTP_PING_TIMEOUT_MS = 8_000L
+        const val HTTP_PING_URL = "https://www.google.com/generate_204"
+    }
 }

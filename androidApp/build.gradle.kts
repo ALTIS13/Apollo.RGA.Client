@@ -164,6 +164,9 @@ kotlin {
 
 dependencies {
     implementation(project(":sharedUI"))
+    // The gomobile binding is an isolated experimental transport. Ordinary
+    // release variants must neither build nor package it.
+    debugImplementation(project(":sharedUI:olcrtc-bin"))
     implementation(libs.androidx.activityCompose)
     implementation(libs.androidx.datastore.preferences)
 
@@ -171,8 +174,7 @@ dependencies {
     // the app does — extracted into nativeLibraryDir and exec'd on a real Android.
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    // sharedUI keeps the olcRTC binding to itself; the tests need it directly to
-    // pin what its liveness check reports when olcRTC was never started.
+    // Instrumentation runs against debug; pin the optional binding's liveness.
     androidTestImplementation(project(":sharedUI:olcrtc-bin"))
 }
 

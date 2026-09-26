@@ -50,6 +50,7 @@ import java.security.SecureRandom
 
 class AndroidVpnManager(private val context: Context) : VpnManager {
     private val appContext = context.applicationContext
+    private val olcRtcConnectionChecker by lazy { OlcRtcConnectionChecker(appContext) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _connectionMode = MutableStateFlow(AndroidConnectionMode.Tun)
     private val _proxySettings = MutableStateFlow(AndroidSocksProxySettings())
@@ -298,7 +299,7 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
             val (host, port) = serverEndpoint(config) ?: return null
             return withContext(Dispatchers.IO) { PathLatency.measure(host, port) }
         }
-        return OlcRtcConnectionChecker.ping(
+        return olcRtcConnectionChecker.ping(
             locationConfig = locationConfig,
             deviceId = deviceIdentityProvider.hwid()
         )
@@ -337,7 +338,7 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     private val probeSerial = AtomicInteger()
 
     override suspend fun checkConnection(locationConfig: LocationConfig): Long? {
-        return OlcRtcConnectionChecker.check(
+        return olcRtcConnectionChecker.check(
             locationConfig = locationConfig,
             deviceId = deviceIdentityProvider.hwid()
         )

@@ -54,10 +54,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import mobile.LogWriter
-import mobile.Mobile
-import mobile.Runtime as OlcrtcRuntime
-import mobile.SocketProtector
 import org.olcbox.app.data.TUN2SOCKS_CONFIG_FILE_NAME
 import org.olcbox.app.data.datasource.LocationsDataSourceImpl
 import org.olcbox.app.data.datasource.LocationsRepositoryImpl
@@ -91,6 +87,7 @@ import org.olcbox.app.vpn.AndroidSocksProxySettings
 import org.olcbox.app.vpn.AndroidSplitTunnelMode
 import org.olcbox.app.vpn.HevTunnelConfig
 import org.olcbox.app.vpn.OlcRtcUdpRelay
+import org.olcbox.app.vpn.AndroidOlcRtcRuntimeProvider
 import org.olcbox.app.vpn.UpstreamCandidate
 import org.olcbox.app.vpn.UpstreamNetworkSelector
 import org.olcbox.app.vpn.UpstreamTransport
@@ -197,9 +194,9 @@ class OlcboxVpnService : VpnService() {
     private var routingSettings = RoutingSettings()
     private var verboseDebugLogs = false
 
-    // One engine per service. Created by the Go constructor: the generated
-    // no-argument Runtime() allocates an empty struct that cannot start.
-    private val olcrtc: OlcrtcRuntime by lazy { Mobile.new_() }
+    // An ordinary installed app has no olcRTC binding. The optional debug
+    // implementation is loaded only after the installed-app policy opts in.
+    private val olcrtc by lazy { AndroidOlcRtcRuntimeProvider.create(applicationContext) }
 
     private data class StartOptions(
         val connectionMode: AndroidConnectionMode,
@@ -400,22 +397,18 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun installMobileCallbacks() {
-        olcrtc.setProtector(object : SocketProtector {
-            override fun protect(fd: Long): Boolean {
-                if (connectionMode == AndroidConnectionMode.Proxy) return true
-                return this@OlcboxVpnService.protect(fd.toInt())
-            }
-        })
-        Mobile.setLogWriter(object : LogWriter {
-            override fun writeLog(msg: String) {
-                val line = msg.trimEnd()
-                addLog("rtc: $line")
-                // Its own tag, so it needs its own scrub: this one does not go through
-                // addLog, and logcat is captured by bug reports.
-                Log.v("olcrtc", LogScrubber.default.scrub(line))
-                handleRtcLine(line)
-            }
-        })
+        val runtime = olcrtc ?: return
+        runtime.setProtector { fd ->
+            connectionMode == AndroidConnectionMode.Proxy || this@OlcboxVpnService.protect(fd.toInt())
+        }
+        runtime.setLogWriter { msg ->
+            val line = msg.trimEnd()
+            addLog("rtc: $line")
+            // Its own tag, so it needs its own scrub: this one does not go through
+            // addLog, and logcat is captured by bug reports.
+            Log.v("olcrtc", LogScrubber.default.scrub(line))
+            handleRtcLine(line)
+        }
     }
 
     private fun loadStartOptions(intent: Intent): StartOptions {
@@ -1044,6 +1037,7 @@ class OlcboxVpnService : VpnService() {
         val keepProcessBound = shouldKeepProcessBound(upstream)
         val config = location.normalized()
         return try {
+            val olcrtc = olcrtc ?: throw IllegalStateException("Experimental transport unavailable")
             installMobileCallbacks()
             val targetSocksPort = socksListenPort
             val deviceId = deviceIdentityProvider.hwid()
@@ -1106,7 +1100,7 @@ class OlcboxVpnService : VpnService() {
             }
             false
         } finally {
-            if (!keepProcessBound || !olcrtc.isRunning()) {
+            if (!keepProcessBound || olcrtc?.isRunning() != true) {
                 unbindProcessFromNetwork()
             }
         }
@@ -1125,6 +1119,7 @@ class OlcboxVpnService : VpnService() {
 
     private fun configureMobileTransport(location: LocationConfig, upstream: Network?, directRules: String) {
         val config = location.normalized()
+        val olcrtc = olcrtc ?: throw IllegalStateException("Experimental transport unavailable")
         olcrtc.setTransport(config.transport)
         // The upstream network's own resolvers first, the public operator
         // behind them: some mobile networks answer only their own (olcbox#16).
@@ -1518,14 +1513,17 @@ class OlcboxVpnService : VpnService() {
 
     private fun stopMobile() {
         val provider = lastMobileProvider
-        val wasRunning = olcrtc.isRunning()
+        val runtime = olcrtc
+        val wasRunning = runtime?.isRunning() == true
         // Logged rather than swallowed. A stop that misses its deadline is the
         // difference between the next room joining and "olcRTC runtime is
         // already active", and for one whole debugging session this line threw
         // that away: the phone reported a start refused by a runtime nobody
         // could see had failed to stop.
-        runCatching { olcrtc.stop(MOBILE_STOP_TIMEOUT_MS) }
-            .onFailure { addLog("olcRTC stop did not finish in time: ${it.message ?: it}") }
+        if (runtime != null) {
+            runCatching { runtime.stop(MOBILE_STOP_TIMEOUT_MS) }
+                .onFailure { addLog("olcRTC stop did not finish in time: ${it.message ?: it}") }
+        }
         // Also tear down any active sing-box / Xray core (no-op if none running).
         runCatching { stopCoreProcesses() }
         if (wasRunning && provider == LocationConfig.PROVIDER_JITSI) {
@@ -1829,7 +1827,7 @@ class OlcboxVpnService : VpnService() {
         if (activeCorePort != null) {
             singBoxCore.isRunning() || xrayCore.isRunning()
         } else {
-            olcrtc.isRunning()
+            olcrtc?.isRunning() == true
         }
 
     private fun activeTransportLabel(): String =
@@ -1908,8 +1906,9 @@ class OlcboxVpnService : VpnService() {
         }
         // A running olcRTC re-points its lookups at the new network's resolvers
         // at once; the engine applies SetDNS live and refuses a malformed list.
-        if (network != null && olcrtc.isRunning()) {
-            runCatching { olcrtc.setDNS(upstreamDnsList(network)) }
+        val runtime = olcrtc
+        if (network != null && runtime?.isRunning() == true) {
+            runCatching { runtime.setDNS(upstreamDnsList(network)) }
                 .onFailure { addLog("olcRTC resolvers not updated: ${it.message}") }
         }
     }
