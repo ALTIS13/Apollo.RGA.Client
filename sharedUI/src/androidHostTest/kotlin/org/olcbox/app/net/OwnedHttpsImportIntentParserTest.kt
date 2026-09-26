@@ -18,10 +18,20 @@ class OwnedHttpsImportIntentParserTest {
         assertEquals(payload, parse("https://$host$path#$encodedPayload"))
         assertEquals("https://subscription.example.test/sub?token=a+b",
             parse("https://$host$path#https%3A%2F%2Fsubscription.example.test%2Fsub%3Ftoken%3Da%2Bb"))
-        assertEquals("https://subscription.example.test/sub",
-            parse("https://$host$path#https://subscription.example.test/sub"))
         assertEquals("https://subscription.example.test/sub?x=1&y=2",
-            parse("https://$host$path#https://subscription.example.test/sub?x=1&y=2"))
+            parse("https://$host$path#https%3A%2F%2Fsubscription.example.test%2Fsub%3Fx%3D1%26y%3D2"))
+        assertEquals("https://subscription.example.test/sub?token=a%26mode=b",
+            parse("https://$host$path#https%3A%2F%2Fsubscription.example.test%2Fsub%3Ftoken%3Da%2526mode%3Db"))
+        assertEquals("https://subscription.example.test/sub?token=a%23mode",
+            parse("https://$host$path#https%3A%2F%2Fsubscription.example.test%2Fsub%3Ftoken%3Da%2523mode"))
+    }
+
+    @Test fun rejectsRawLiteralTargetWhosePercentEscapeWouldBecomeQuerySeparator() {
+        assertNull(parse("https://$host$path#https://subscription.example.test/sub?token=a%26mode=b"))
+    }
+
+    @Test fun rejectsRawLiteralTargetWhosePercentEscapeWouldBecomeFragmentSeparator() {
+        assertNull(parse("https://$host$path#https://subscription.example.test/sub?token=a%23mode"))
     }
 
     @Test fun rejectsWrongActionOrMissingData() {

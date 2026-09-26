@@ -24,6 +24,8 @@ internal object OwnedHttpsImportIntentParser {
 
         val rawFragment = envelope.rawFragment ?: return null
         if (rawFragment.isEmpty() || rawFragment.length > MAX_FRAGMENT_CHARS || '#' in rawFragment) return null
+        // Require a URI-component-encoded payload so its own percent escapes are not consumed.
+        if (rawFragment.any { it != '%' && !it.isUriComponentUnescaped() }) return null
         val payload = decodeFragmentOnce(rawFragment) ?: return null
         if (payload.isEmpty() || containsControlOrFormat(payload)) return null
 
@@ -41,6 +43,11 @@ internal object OwnedHttpsImportIntentParser {
         }
 
     private fun Char.isAsciiLowerOrDigit(): Boolean = this in 'a'..'z' || this in '0'..'9'
+
+    private fun Char.isUriComponentUnescaped(): Boolean =
+        this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' ||
+            this == '-' || this == '_' || this == '.' || this == '!' || this == '~' ||
+            this == '*' || this == '\'' || this == '(' || this == ')'
 
     private fun validExpectedPath(path: String): Boolean {
         if (!path.startsWith('/')) return false
