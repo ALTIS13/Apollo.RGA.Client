@@ -637,6 +637,40 @@ class SingBoxConfigTest {
         ),
     )
 
+    @Test fun mandatoryProxySuffixesPrecedeCustomAndRuRules() {
+        val routing = Routing.Rules(
+            ruleSetDir = "/data/rules",
+            directDns = DirectDns.Servers(listOf("10.20.30.40")),
+            policy = Routing.Policy.Bypass("ru"),
+            custom = CustomRules.of(direct = listOf("vk.cc"), tunnel = emptyList()),
+            mandatoryTunnelSuffixes = listOf("cc", "at")
+        )
+        val json = SingBoxConfig.buildSocksChain(10808, routing = routing)
+        val dns = obj(json)["dns"]!!.jsonObject
+        val dnsRules = dns["rules"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("cc", "at"), strings(dnsRules[0], "domain_suffix"))
+        assertNull(dnsRules[0]["domain"]) // Also covers future, previously unknown *.cc/*.at names.
+        assertEquals("dns-remote", str(dnsRules[0], "server"))
+        assertEquals(listOf("vk.cc"), strings(dnsRules[1], "domain_suffix"))
+        assertEquals("dns-direct", str(dnsRules[1], "server"))
+        assertEquals(RuleSets.domains.map { it.tag }, strings(dnsRules[2], "rule_set"))
+        assertEquals("dns-direct", str(dnsRules[2], "server"))
+        assertEquals("dns-remote", str(dns, "final"))
+
+        val route = obj(json)["route"]!!.jsonObject
+        val routeRules = routeRules(json)
+        assertEquals("sniff", str(routeRules[0], "action"))
+        assertEquals("hijack-dns", str(routeRules[1], "action"))
+        assertEquals(listOf("cc", "at"), strings(routeRules[2], "domain_suffix"))
+        assertNull(routeRules[2]["domain"])
+        assertEquals("out", str(routeRules[2], "outbound"))
+        assertEquals(listOf("vk.cc"), strings(routeRules[4], "domain_suffix"))
+        assertEquals("direct", str(routeRules[4], "outbound"))
+        assertEquals(RuleSets.all.map { it.tag }, strings(routeRules[5], "rule_set"))
+        assertEquals("direct", str(routeRules[5], "outbound"))
+        assertEquals("out", str(route, "final"))
+    }
+
     @Test fun globalRoutingIsExactlyWhatWasBuiltBeforeRoutingExisted() {
         assertEquals(SingBoxConfig.build(vless()), SingBoxConfig.build(vless(), routing = Routing.Global))
         assertEquals(SingBoxConfig.buildTun(vless()), SingBoxConfig.buildTun(vless(), routing = Routing.Global))

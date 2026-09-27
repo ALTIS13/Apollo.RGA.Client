@@ -2,6 +2,7 @@ package org.olcbox.app.net
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -10,6 +11,7 @@ import org.olcbox.app.data.model.LocationConfig
 import org.olcbox.app.vpn.AndroidConnectionMode
 import org.olcbox.app.vpn.service.OlcboxVpnService
 import org.olcbox.app.vpn.service.OlcboxVpnState
+import org.olcbox.app.vpn.service.coreChainAlive
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import kotlin.coroutines.Continuation
@@ -24,6 +26,14 @@ class ExactXrayServiceTest {
         rawLink = "SECRET_RAW_LINK_MUST_NOT_BE_PARSED",
         xrayConfig = Json.parseToJsonElement(XrayJsonSubscriptionFixtures.vless).jsonObject
     )
+
+    @Test fun chainedCoreIsUnhealthyWhenEitherRequiredProcessExits() {
+        assertTrue(coreChainAlive(true, singBoxAlive = true, xrayAlive = true))
+        assertFalse(coreChainAlive(true, singBoxAlive = true, xrayAlive = false))
+        assertFalse(coreChainAlive(true, singBoxAlive = false, xrayAlive = true))
+        assertTrue(coreChainAlive(false, singBoxAlive = true, xrayAlive = false))
+        assertTrue(coreChainAlive(false, singBoxAlive = false, xrayAlive = true))
+    }
 
     @Test fun realServiceUsesExactConfigBeforeRawLinkAndExplicitlyRejectsProxyMode() = runBlocking {
         val service = service()
@@ -45,6 +55,22 @@ class ExactXrayServiceTest {
         }
     }
 
+    @Test fun ruleBasedServiceRejectsAProviderDirectDomainBeforeStartingCores() = runBlocking {
+        val service = service()
+        setField(service, "socksUsername", "local-user")
+        setField(service, "socksPassword", "local-secret")
+        val unsafe = JsonObject(location.xrayConfig!! + ("routing" to Json.parseToJsonElement("""{"rules":[
+            {"type":"field","domain":["domain:vk.cc"],"outboundTag":"direct"}
+        ]}""")))
+        val regional = Routing.Rules("/data/rules", DirectDns.Servers(listOf("192.0.2.53")), "ru")
+        assertFalse(startCore(service, regional, location.copy(xrayConfig = unsafe)))
+        val log = OlcboxVpnState.logs.value.last()
+        assertTrue(log.contains("incompatible with local policy"))
+        for (secret in listOf("SYNTHETIC_PUBLIC_KEY", "local-secret", "SECRET_RAW_LINK")) {
+            assertFalse(log.contains(secret))
+        }
+    }
+
     @Test fun hevConnectHostMatchesFixedExactXrayLoopbackDespiteProxyPreference() {
         val service = service()
         setField(service, "socksListenHost", "::1")
@@ -59,11 +85,15 @@ class ExactXrayServiceTest {
         OlcboxVpnService::class.java.getDeclaredField(name).apply { isAccessible = true }.set(service, value)
     }
 
-    private suspend fun startCore(service: OlcboxVpnService): Boolean = suspendCoroutineUninterceptedOrReturn { continuation ->
+    private suspend fun startCore(
+        service: OlcboxVpnService,
+        routing: Routing = Routing.Global,
+        active: LocationConfig = location
+    ): Boolean = suspendCoroutineUninterceptedOrReturn { continuation ->
         val method = OlcboxVpnService::class.java.getDeclaredMethod(
             "startCore", LocationConfig::class.java, Boolean::class.javaPrimitiveType,
             Routing::class.java, Boolean::class.javaPrimitiveType, Continuation::class.java
         ).apply { isAccessible = true }
-        method.invoke(service, location, false, Routing.Global, false, continuation)
+        method.invoke(service, active, false, routing, false, continuation)
     }
 }

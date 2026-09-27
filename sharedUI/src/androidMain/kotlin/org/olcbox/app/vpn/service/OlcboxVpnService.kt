@@ -65,6 +65,7 @@ import org.olcbox.app.data.repository.LocationsRepository
 import org.olcbox.app.net.AndroidSingBoxController
 import org.olcbox.app.net.AndroidXrayController
 import org.olcbox.app.net.DirectDns
+import org.olcbox.app.net.ExactXrayChainPlan
 import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.LocationKind
 import org.olcbox.app.net.OlcrtcDirectRules
@@ -187,7 +188,10 @@ class OlcboxVpnService : VpnService() {
     private val singBoxCore by lazy { AndroidSingBoxController(this) }
     private val xrayCore by lazy { AndroidXrayController(this) }
     private var activeCorePort: Int? = null
+    private var activeCoreBackendPort: Int? = null
     private var activeCoreLogin: SocksLogin? = null
+    private var activeCoreChainRequiresBoth = false
+    private val retiredCorePorts = mutableSetOf<Int>()
 
     /** The routing choice read at the last start, so a reconnect in place keeps it. */
     private var routingMode = RoutingMode.Global
@@ -795,10 +799,26 @@ class OlcboxVpnService : VpnService() {
             if (setErrorOnFailure) setStatus(VpnStatus.Error(denial))
             return false
         }
-        // Persisted Xray profiles already own DNS and routing. Never ask the
-        // local routing builder or choose a lossy URI/sing-box fallback here.
+        // Preserve the provider's exact Xray graph. A rule-based device policy
+        // is applied by a separate local front, not by rewriting that graph.
         if (location.xrayConfig != null) {
-            return startCore(location, setErrorOnFailure, Routing.Global, reuseBridge)
+            val routing = try {
+                routingFor(upstream)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Route-set failures must not silently turn a split tunnel into
+                // Global. Keep exception details (potentially file contents or
+                // credentials) out of user-visible logs.
+                val message = "Xray subscription routing unavailable"
+                addLog(message)
+                if (setErrorOnFailure) {
+                    setStatus(VpnStatus.Error(message))
+                    updateNotification("Connection failed")
+                }
+                return false
+            }
+            return startCore(location, setErrorOnFailure, routing, reuseBridge)
         }
         val routing = routingFor(upstream)
         return if (location.kind == LocationKind.Olcrtc) {
@@ -830,7 +850,7 @@ class OlcboxVpnService : VpnService() {
     ): Boolean {
         val tun = connectionMode == AndroidConnectionMode.Tun
         if (location.xrayConfig != null) {
-            return startExactXrayCore(location, setErrorOnFailure, reuseBridge)
+            return startExactXrayCore(location, setErrorOnFailure, routing, reuseBridge)
         }
         return try {
             val port = TunBridgePortPolicy.corePortForStart(
@@ -844,6 +864,7 @@ class OlcboxVpnService : VpnService() {
             val raw = location.rawLink ?: error("core location has no link")
             val spec = LinkParser.parse(raw) ?: error("unparseable core link")
             stopCoreProcesses()
+            check(awaitRetiredCorePorts()) { "Previous core listener still active" }
             waitForSocksPortReleased(port, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
             if (isLocalSocksPortOpen(port)) error("Core SOCKS port $port is still in use")
             val label: String
@@ -862,6 +883,7 @@ class OlcboxVpnService : VpnService() {
                     // behind the front is as reachable from other apps as the
                     // front itself.
                     val xrayPort = freeLoopbackPort()
+                    activeCoreBackendPort = xrayPort
                     xrayCore.start(
                         XrayConfig.buildXhttp(
                             spec,
@@ -909,6 +931,7 @@ class OlcboxVpnService : VpnService() {
             }
             activeCorePort = port
             activeCoreLogin = login
+            activeCoreChainRequiresBoth = fronted && spec is OutboundSpec.Vless && spec.transport is TransportSpec.Xhttp
             if (!waitForSocksPortOpen(port, MOBILE_READY_TIMEOUT_MS) || !alive()) {
                 // The core's own account of what went wrong, which otherwise sits
                 // in a cache file only root can read. Without it this branch says
@@ -941,10 +964,11 @@ class OlcboxVpnService : VpnService() {
     private suspend fun startExactXrayCore(
         location: LocationConfig,
         setErrorOnFailure: Boolean,
+        routing: Routing,
         reuseBridge: Boolean
     ): Boolean {
         return try {
-            val port = TunBridgePortPolicy.corePortForStart(
+            val ingressPort = TunBridgePortPolicy.corePortForStart(
                 tunMode = connectionMode == AndroidConnectionMode.Tun,
                 reuseBridge = reuseBridge,
                 bridgePort = tun2socksBackendPort,
@@ -952,22 +976,50 @@ class OlcboxVpnService : VpnService() {
                 proxyPort = socksListenPort
             ) ?: throw XrayJsonRuntimeConfig.Rejected(XrayJsonRuntimeConfig.Reason.INVALID_PORT)
             val login = SocksLogin.of(socksUsername, socksPassword)
-            val adapted = XrayJsonRuntimeConfig.adapt(
-                location.xrayConfig!!, port, login,
+            val backendPort = if (routing is Routing.Rules) {
+                (1..5).asSequence().map { freeLoopbackPort() }
+                    .firstOrNull { it != ingressPort }
+                    ?: throw XrayJsonRuntimeConfig.Rejected(XrayJsonRuntimeConfig.Reason.INVALID_PORT)
+            } else null
+            // Build and validate both configs before stopping an existing
+            // transport. A missing rule asset never starts either core.
+            val plan = ExactXrayChainPlan.build(
+                config = location.xrayConfig!!,
+                ingressPort = ingressPort,
+                backendPort = backendPort,
+                login = login,
+                routing = routing,
                 tunMode = connectionMode == AndroidConnectionMode.Tun
             )
             stopCoreProcesses()
-            waitForSocksPortReleased(port, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
-            check(!isLocalSocksPortOpen(port))
-            xrayCore.start(adapted.config.toString())
-            activeCorePort = port
-            activeCoreLogin = login
-            if (!waitForSocksPortOpen(port, MOBILE_READY_TIMEOUT_MS) || !xrayCore.isRunning()) {
+            check(awaitRetiredCorePorts()) { "Previous core listener still active" }
+            waitForSocksPortReleased(ingressPort, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
+            check(!isLocalSocksPortOpen(ingressPort))
+            if (backendPort != null) {
+                waitForSocksPortReleased(backendPort, SOCKS_RELEASE_QUICK_TIMEOUT_MS)
+                check(!isLocalSocksPortOpen(backendPort))
+            }
+            activeCoreBackendPort = backendPort
+            xrayCore.start(plan.xrayConfig.toString())
+            if (backendPort != null &&
+                (!waitForSocksPortOpen(backendPort, MOBILE_READY_TIMEOUT_MS) || !xrayCore.isRunning())
+            ) {
                 addLog(xrayCore.redactedDiagnostics())
-                error("Xray core not ready")
+                error("Xray backend not ready")
+            }
+            plan.frontConfig?.let { singBoxCore.start(it) }
+            activeCorePort = ingressPort
+            activeCoreLogin = login
+            activeCoreChainRequiresBoth = plan.frontConfig != null
+            if (!waitForSocksPortOpen(ingressPort, MOBILE_READY_TIMEOUT_MS) ||
+                !xrayCore.isRunning() ||
+                (plan.frontConfig != null && !singBoxCore.isRunning())
+            ) {
+                addLog("Xray subscription chain not ready")
+                error("Xray subscription chain not ready")
             }
             coroutineContext.ensureActive()
-            addLog("Xray subscription profile ready")
+            addLog(if (plan.frontConfig != null) "Xray subscription routing ready" else "Xray subscription profile ready")
             true
         } catch (e: CancellationException) {
             withContext(NonCancellable) { stopCoreProcesses() }
@@ -975,7 +1027,11 @@ class OlcboxVpnService : VpnService() {
         } catch (e: Exception) {
             // Exceptions from process/config/core can contain credentials. Only
             // our closed reason enum is safe; never forward arbitrary messages.
-            val message = if (e is XrayJsonRuntimeConfig.Rejected) e.message!! else "Xray subscription transport failed"
+            val message = when (e) {
+                is XrayJsonRuntimeConfig.Rejected,
+                is ExactXrayChainPlan.UnsupportedProviderRouting -> e.message!!
+                else -> "Xray subscription transport failed"
+            }
             addLog(message)
             stopCoreProcesses()
             if (setErrorOnFailure) {
@@ -987,10 +1043,23 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun stopCoreProcesses() {
+        activeCorePort?.let(retiredCorePorts::add)
+        activeCoreBackendPort?.let(retiredCorePorts::add)
         singBoxCore.stopNow()
         xrayCore.stopNow()
         activeCorePort = null
+        activeCoreBackendPort = null
         activeCoreLogin = null
+        activeCoreChainRequiresBoth = false
+    }
+
+    private suspend fun awaitRetiredCorePorts(): Boolean {
+        for (port in retiredCorePorts.toList()) {
+            waitForSocksPortReleased(port, SOCKS_RELEASE_TIMEOUT_MS)
+            if (isLocalSocksPortOpen(port)) return false
+            retiredCorePorts.remove(port)
+        }
+        return true
     }
 
     /**
@@ -1539,6 +1608,7 @@ class OlcboxVpnService : VpnService() {
     private suspend fun stopMobileAndWait() {
         val socksPort = socksListenPort
         stopMobile()
+        if (!awaitRetiredCorePorts()) addLog("Previous core listener still active")
         waitForSocksPortReleased(socksPort)
     }
 
@@ -1825,7 +1895,7 @@ class OlcboxVpnService : VpnService() {
      */
     private fun isActiveTransportRunning(): Boolean =
         if (activeCorePort != null) {
-            singBoxCore.isRunning() || xrayCore.isRunning()
+            coreChainAlive(activeCoreChainRequiresBoth, singBoxCore.isRunning(), xrayCore.isRunning())
         } else {
             olcrtc?.isRunning() == true
         }
@@ -2337,6 +2407,10 @@ class OlcboxVpnService : VpnService() {
         }
     }
 }
+
+/** A chained transport fails when either required child exits. */
+internal fun coreChainAlive(requiresBoth: Boolean, singBoxAlive: Boolean, xrayAlive: Boolean): Boolean =
+    if (requiresBoth) singBoxAlive && xrayAlive else singBoxAlive || xrayAlive
 
 /** Each English text the notification can show, and the resource that says it. */
 private val NOTIFICATION_TEXTS: Map<String, StringResource> = mapOf(
