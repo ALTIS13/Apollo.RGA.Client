@@ -29,4 +29,25 @@ internal object XrayJsonSubscriptionFixtures {
          "streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"SYNTHETIC_AUTH_NOT_REAL"},"tlsSettings":{"serverName":"cover.invalid","enableSessionResumption":true,"fingerprint":"chrome","alpn":["h3"],"pinnedPeerCertSha256":"SYNTHETIC_PIN_NOT_REAL"}}},
         """)
     val body = "[$vless,$hysteria]"
+
+    // Synthetic shape of the non-runnable VLESS/TCP notice emitted after a
+    // Remnawave entitlement refusal. No real subscription IDs or endpoints.
+    val informationalBody = """[
+      {"remarks":"Subscription unavailable","log":{"loglevel":"warning"},
+       "dns":{"servers":["192.0.2.53"]},"inbounds":[],
+       "outbounds":[
+         {"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"0.0.0.0","port":1,"users":[{"id":"00000000-0000-4000-8000-000000000000","encryption":"none"}]}]},
+          "streamSettings":{"network":"tcp","security":"none"}},
+         {"tag":"direct","protocol":"freedom","settings":{}},
+         {"tag":"block","protocol":"blackhole","settings":{}}
+       ],"routing":{"rules":[]}},
+      {"remarks":"Subscription unavailable 2","log":{"loglevel":"warning"},
+       "dns":{"servers":["192.0.2.53"]},"inbounds":[],
+       "outbounds":[
+         {"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"0.0.0.0","port":1,"users":[{"id":"00000000-0000-4000-8000-000000000000","encryption":"none"}]}]},
+          "streamSettings":{"network":"tcp","security":"none"}},
+         {"tag":"direct","protocol":"freedom","settings":{}},
+         {"tag":"block","protocol":"blackhole","settings":{}}
+       ],"routing":{"rules":[]}}
+    ]"""
 }

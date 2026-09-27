@@ -304,6 +304,7 @@ class HomeScreenModelImportLinkTest {
         val callback = awaitForReal(outcome)
         assertFalse(callback.contains(secretMarker))
         assertEquals("Import failed", callback)
+        assertFalse(repository.isOnboardingSeen())
     }
 
     @Test fun importFailureNeverStoresExceptionUrlInStartBlockedReason() = runTest {
@@ -348,6 +349,7 @@ class HomeScreenModelImportLinkTest {
             )
             assertEquals("Enter a valid HTTPS subscription URL", awaitForReal(outcome))
             assertTrue(repository.getAllLocations().isEmpty())
+            assertFalse(repository.isOnboardingSeen())
         } finally { client.close() }
     }
 
@@ -372,6 +374,10 @@ class HomeScreenModelImportLinkTest {
             assertEquals(synthetic, fetched)
             assertEquals(listOf("DE"), repo.getAllLocations().map { it.name })
             assertEquals(0, vpn.starts)
+            // A successful one-tap import must leave the first-run screen now,
+            // not only after the person presses its separate "Not now" action.
+            assertEquals(true, vm.onboardingSeen.value)
+            assertEquals(true, repo.isOnboardingSeen())
         } finally { client.close() }
     }
 

@@ -753,7 +753,21 @@ class HomeScreenViewModel(
                     return@launch
                 }
                 loadCurrentConfigNow()
+                // An external App Link can complete the first import without
+                // touching the onboarding sheet. Persist before reporting
+                // success so a quick Activity restart cannot replay it.
+                try {
+                    locationsRepository.setOnboardingSeen(nowMillis())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // The subscription has already been imported. A failed
+                    // onboarding note must not misreport that import as failed.
+                }
+                _onboardingSeen.value = true
                 onComplete()
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 val message = getString(Res.string.import_failed)
                 _state.update {

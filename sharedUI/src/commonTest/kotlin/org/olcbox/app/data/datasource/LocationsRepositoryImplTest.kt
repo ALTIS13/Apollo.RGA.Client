@@ -1036,6 +1036,120 @@ class LocationsRepositoryImplTest {
     }
 
     @Test
+    fun informationalLimitReplyKeepsHostsButBlocksTunnelUntilValidRefresh() = runTest {
+        val url = "https://example.test/sub"
+        var body = XrayJsonSubscriptionFixtures.body
+        var userinfo = "upload=1; download=1; total=10; expire=3000"
+        val now = 2_000_000L
+        val source = FakeLocationsDataSource()
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
+            respond(body, headers = if (userinfo.isEmpty()) headersOf()
+                else headersOf("subscription-userinfo", userinfo))
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText(url))
+        val imported = assertNotNull(source.stored)
+        val selectedId = imported.locations.last().storageId
+        val manual = LocationEntry.from("manual", LocationConfig(name = "Manual",
+            kind = org.olcbox.app.net.LocationKind.Vless,
+            xrayConfig = kotlinx.serialization.json.buildJsonObject { }))
+        source.stored = imported.copy(locations = imported.locations + manual)
+        repo.setActiveLocationId(selectedId)
+        val before = assertNotNull(source.stored)
+
+        // Remnawave returns informational, non-runnable entries with a 200 and
+        // current subscription-userinfo after a quota limit is reached.
+        body = XrayJsonSubscriptionFixtures.informationalBody
+        userinfo = ""
+        assertEquals(0, repo.refreshSubscription(url).updatedCount)
+        assertEquals(before, source.stored, "a missing header must not invent a limit")
+
+        userinfo = "upload=6; download=5; total=10; expire=3000"
+        val rejected = repo.refreshSubscription(url)
+        assertEquals(0, rejected.updatedCount)
+        assertTrue(rejected.hasFailures)
+        val limited = assertNotNull(source.stored)
+        assertEquals(before.activeLocationId, limited.activeLocationId)
+        assertEquals(before.locations.map { it.storageId to it.location.xrayConfig },
+            limited.locations.map { it.storageId to it.location.xrayConfig })
+        assertEquals(manual, limited.locations.single { it.storageId == manual.storageId })
+        assertEquals(before.locations.first().metadata?.subscription?.lastRefreshAtEpochMs,
+            limited.locations.first().metadata?.subscription?.lastRefreshAtEpochMs)
+        assertEquals(11L, limited.locations.single { it.storageId == selectedId }.metadata?.subscription?.usedBytes)
+        assertEquals(10L, limited.locations.single { it.storageId == selectedId }.metadata?.subscription?.totalBytes)
+        assertEquals("Subscription traffic limit reached",
+            SubscriptionTunnelAccess.denial(limited, selectedId, now, RuntimeLocationPolicy.ExperimentalDebug))
+        assertNull(repo.getActiveLocation())
+
+        body = XrayJsonSubscriptionFixtures.body
+        userinfo = "upload=1; download=2; total=10; expire=4000"
+        assertEquals(1, repo.refreshSubscription(url).updatedCount)
+        assertNull(SubscriptionTunnelAccess.denial(assertNotNull(source.stored), selectedId, now,
+            RuntimeLocationPolicy.ExperimentalDebug))
+        assertNotNull(repo.getActiveLocation())
+    }
+
+    @Test
+    fun informationalExpiryReplyKeepsHostsButBlocksTunnel() = runTest {
+        val url = "https://example.test/sub"
+        var body = XrayJsonSubscriptionFixtures.body
+        var userinfo = "upload=1; download=1; total=10; expire=3000"
+        val now = 2_000_000L
+        val source = FakeLocationsDataSource()
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
+            respond(body, headers = headersOf("subscription-userinfo", userinfo))
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText(url))
+        val selectedId = assertNotNull(source.stored).locations.last().storageId
+        repo.setActiveLocationId(selectedId)
+        val before = assertNotNull(source.stored)
+
+        body = XrayJsonSubscriptionFixtures.informationalBody
+        userinfo = "upload=1; download=1; total=10; expire=1999"
+        val rejected = repo.refreshSubscription(url)
+        assertEquals(0, rejected.updatedCount)
+        assertTrue(rejected.hasFailures)
+        val expired = assertNotNull(source.stored)
+        assertEquals(before.locations.map { it.storageId to it.location.xrayConfig },
+            expired.locations.map { it.storageId to it.location.xrayConfig })
+        assertEquals(before.locations.first().metadata?.subscription?.lastRefreshAtEpochMs,
+            expired.locations.first().metadata?.subscription?.lastRefreshAtEpochMs)
+        assertEquals(1_999_000L, expired.locations.single { it.storageId == selectedId }
+            .metadata?.subscription?.expiresAtEpochMs)
+        assertEquals("Subscription expired",
+            SubscriptionTunnelAccess.denial(expired, selectedId, now, RuntimeLocationPolicy.ExperimentalDebug))
+        assertNull(repo.getActiveLocation())
+    }
+
+    @Test
+    fun emptySuccessReplyStillAppliesFreshTrafficDenial() = runTest {
+        val url = "https://example.test/sub"
+        var body = XrayJsonSubscriptionFixtures.body
+        var userinfo = "upload=1; download=1; total=10; expire=3000"
+        val now = 2_000_000L
+        val source = FakeLocationsDataSource()
+        val repo = experimentalRepository(source, HttpClient(MockEngine {
+            respond(body, headers = headersOf("subscription-userinfo", userinfo))
+        }), nowEpochMs = { now })
+        assertTrue(repo.importText(url))
+        val before = assertNotNull(source.stored)
+        val selectedId = assertNotNull(before.activeLocationId)
+
+        body = ""
+        userinfo = "upload=6; download=5; total=10; expire=3000"
+        val rejected = repo.refreshSubscription(url)
+        assertEquals(0, rejected.updatedCount)
+        assertEquals(SubscriptionRefreshError.Empty, rejected.failures.single().error)
+        val limited = assertNotNull(source.stored)
+        assertEquals(before.locations.map { it.storageId to it.location.xrayConfig },
+            limited.locations.map { it.storageId to it.location.xrayConfig })
+        assertEquals(before.locations.first().metadata?.subscription?.lastRefreshAtEpochMs,
+            limited.locations.first().metadata?.subscription?.lastRefreshAtEpochMs)
+        assertEquals("Subscription traffic limit reached",
+            SubscriptionTunnelAccess.denial(limited, selectedId, now, RuntimeLocationPolicy.ExperimentalDebug))
+        assertNull(repo.getActiveLocation())
+    }
+
+    @Test
     fun ambiguousSelectedXrayRefreshKeepsProfilesButAppliesFreshExpiryDenial() = runTest {
         val first = XrayJsonSubscriptionFixtures.vless
         val second = first.replace("Synthetic exit A", "Synthetic exit C")

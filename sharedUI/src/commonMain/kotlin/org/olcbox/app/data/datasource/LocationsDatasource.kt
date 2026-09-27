@@ -319,6 +319,7 @@ class LocationsRepositoryImpl(
             val previousOriginLink = previousEntries.firstNotNullOfOrNull { it.subscriptionOriginLink }
             // Keep the last reported reason without changing request identity.
             var lastFailure: SubscriptionRefreshFailure? = null
+            var lastDownloadedProfile: SubscriptionProfile? = null
             val recordFailure: SubscriptionFailureSink = { error, status ->
                 lastFailure = SubscriptionRefreshFailure(url, error, status)
             }
@@ -333,13 +334,15 @@ class LocationsRepositoryImpl(
                 text = url,
                 fallbackSubscriptionInterval = previousInterval,
                 subscriptionProxy = subscriptionProxy,
-                onFailure = recordFailure
+                onFailure = recordFailure,
+                onProfile = { lastDownloadedProfile = it }
             ) ?: fallbackUrl?.takeIf { lastFailure?.error == SubscriptionRefreshError.Unreachable }?.let { spare ->
                 resolveParsedImport(
                     text = spare,
                     fallbackSubscriptionInterval = previousInterval,
                     subscriptionProxy = subscriptionProxy,
-                    onFailure = recordFailure
+                    onFailure = recordFailure,
+                    onProfile = { lastDownloadedProfile = it }
                 )
             } ?: run {
                 // Keep the cached config for display/recovery, but an explicit
@@ -352,7 +355,7 @@ class LocationsRepositoryImpl(
                             subscription = subscription.copy(deviceDenied = true)
                         ))
                     }
-                } else previousEntries
+                } else previousEntries.withStricterProfile(lastDownloadedProfile)
                 metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
                 preservePreviousEntries(retained)
                 // Preserve the typed failure; only a response without a useful
@@ -387,7 +390,9 @@ class LocationsRepositoryImpl(
             val refreshTimestamp = nowEpochMs()
             val refreshed = resolved.parsed.bundle.locations
             if (refreshed.isEmpty() || refreshed.any { !runtimePolicy.permits(it.location.kind) }) {
-                preservePreviousEntries(previousEntries)
+                val retained = previousEntries.withStricterProfile(source.profile)
+                metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
+                preservePreviousEntries(retained)
                 failures += SubscriptionRefreshFailure(url,
                     if (refreshed.isEmpty()) SubscriptionRefreshError.Empty else SubscriptionRefreshError.Rejected)
                 return@forEach
@@ -430,31 +435,7 @@ class LocationsRepositoryImpl(
                 // not swap endpoints or advance the rejected refresh timestamp.
                 // Still keep tighter subscription-wide limits from a valid reply:
                 // a future earlier expiry matters when that future arrives.
-                val fresh = source.profile
-                val freshQuota = fresh?.let { profile ->
-                    val used = profile.usedBytes
-                    val total = profile.totalBytes
-                    if (profile.quotaKnown && used != null && total != null && total > 0) used to total else null
-                }
-                val freshExpiry = fresh?.let { profile ->
-                    profile.expiresAtEpochMs.takeIf { profile.expiryKnown }
-                }
-                val retained = if (freshQuota == null && freshExpiry == null) previousEntries else previousEntries.map { entry ->
-                    val metadata = entry.metadata ?: LocationMetadata()
-                    val previous = metadata.subscription
-                    val stricter = SubscriptionProfile(
-                        usedBytes = freshQuota?.let { maxOf(previous?.usedBytes ?: 0L, it.first) },
-                        totalBytes = freshQuota?.let { quota ->
-                            previous?.totalBytes?.takeIf { it > 0 }?.let { minOf(it, quota.second) } ?: quota.second
-                        },
-                        quotaKnown = freshQuota != null,
-                        expiresAtEpochMs = freshExpiry?.let { minOf(previous?.expiresAtEpochMs ?: it, it) },
-                        expiryKnown = freshExpiry != null
-                    )
-                    entry.copy(metadata = metadata.copy(
-                        subscription = previous.withProfile(stricter)
-                    ))
-                }
+                val retained = previousEntries.withStricterProfile(source.profile)
                 metadataOnlyChanged = metadataOnlyChanged || retained != previousEntries
                 preservePreviousEntries(retained)
                 failures += SubscriptionRefreshFailure(url, SubscriptionRefreshError.Rejected)
@@ -759,7 +740,8 @@ class LocationsRepositoryImpl(
         text: String,
         fallbackSubscriptionInterval: Int? = null,
         subscriptionProxy: SubscriptionFetchProxy? = null,
-        onFailure: SubscriptionFailureSink? = null
+        onFailure: SubscriptionFailureSink? = null,
+        onProfile: ((SubscriptionProfile?) -> Unit)? = null
     ): ResolvedImport? {
         val input = text.normalizedImportText()
         if (input.isBlank()) return null
@@ -798,12 +780,16 @@ class LocationsRepositoryImpl(
         val source = resolveImportSource(
             text = effective,
             subscriptionProxy = subscriptionProxy,
-            onFailure = onFailure
+            onFailure = onFailure,
+            onProfile = onProfile
         ) ?: return null
 
         val parsed = parseImportSource(source, fallbackSubscriptionInterval, originLink)
-
-        return parsed?.let { ResolvedImport(source, it) }
+        if (parsed == null) {
+            onFailure?.invoke(SubscriptionRefreshError.Empty, null)
+            return null
+        }
+        return ResolvedImport(source, parsed)
     }
 
     private fun parseImportSource(
@@ -871,7 +857,8 @@ class LocationsRepositoryImpl(
     private suspend fun resolveImportSource(
         text: String,
         subscriptionProxy: SubscriptionFetchProxy?,
-        onFailure: SubscriptionFailureSink? = null
+        onFailure: SubscriptionFailureSink? = null,
+        onProfile: ((SubscriptionProfile?) -> Unit)? = null
     ): ImportSource? {
         if (text.isBlank()) return null
 
@@ -887,7 +874,8 @@ class LocationsRepositoryImpl(
         val downloaded = downloadTextFromUrl(
             url = text,
             subscriptionProxy = subscriptionProxy,
-            onFailure = onFailure
+            onFailure = onFailure,
+            onProfile = onProfile
         ) ?: return null
         // crypt1: decrypt the body ONLY when the request URL carries ?crypt=1 (and
         // a codec is baked). Never heuristic-guess — a plaintext subscription must
@@ -915,7 +903,8 @@ class LocationsRepositoryImpl(
     private suspend fun downloadTextFromUrl(
         url: String,
         subscriptionProxy: SubscriptionFetchProxy?,
-        onFailure: SubscriptionFailureSink? = null
+        onFailure: SubscriptionFailureSink? = null,
+        onProfile: ((SubscriptionProfile?) -> Unit)? = null
     ): DownloadedSubscription? {
         val hwid = deviceIdentityProvider.hwid()
         val client = if (subscriptionProxy == null) {
@@ -962,6 +951,12 @@ class LocationsRepositoryImpl(
                     return@withProxyAuthentication null
                 }
 
+                // A successful HTTPS response can announce quota/expiry even
+                // when its body is empty or contains non-runnable notice hosts.
+                // HWID denials and non-2xx replies never reach this callback.
+                val profile = response.subscriptionProfile()
+                onProfile?.invoke(profile)
+
                 val content = runCatching {
                     response.bodyAsText()
                 }.onFailure { if (it is CancellationException) throw it }.getOrNull()?.takeIf { it.isNotBlank() }
@@ -973,7 +968,7 @@ class LocationsRepositoryImpl(
                 DownloadedSubscription(
                     content = content,
                     updateIntervalHours = response.profileUpdateIntervalHours(),
-                    profile = response.subscriptionProfile()
+                    profile = profile
                 )
             }
         } finally {
@@ -1842,6 +1837,36 @@ class LocationsRepositoryImpl(
             },
             fallbackUrl = profile.fallbackUrl ?: base.fallbackUrl
         ).normalized()
+    }
+
+    /**
+     * A rejected body never replaces cached endpoints or relaxes entitlement.
+     * Only the numeric limits from its authenticated HTTPS response can become
+     * stricter; a later fully parsed refresh may restore the normal limits.
+     */
+    private fun List<LocationEntry>.withStricterProfile(fresh: SubscriptionProfile?): List<LocationEntry> {
+        val freshQuota = fresh?.let { profile ->
+            val used = profile.usedBytes
+            val total = profile.totalBytes
+            if (profile.quotaKnown && used != null && total != null && total > 0) used to total else null
+        }
+        val freshExpiry = fresh?.expiresAtEpochMs?.takeIf { fresh.expiryKnown }
+        if (freshQuota == null && freshExpiry == null) return this
+
+        return map { entry ->
+            val metadata = entry.metadata ?: LocationMetadata()
+            val previous = metadata.subscription
+            val stricter = SubscriptionProfile(
+                usedBytes = freshQuota?.let { maxOf(previous?.usedBytes ?: 0L, it.first) },
+                totalBytes = freshQuota?.let { quota ->
+                    previous?.totalBytes?.takeIf { it > 0 }?.let { minOf(it, quota.second) } ?: quota.second
+                },
+                quotaKnown = freshQuota != null,
+                expiresAtEpochMs = freshExpiry?.let { minOf(previous?.expiresAtEpochMs ?: it, it) },
+                expiryKnown = freshExpiry != null
+            )
+            entry.copy(metadata = metadata.copy(subscription = previous.withProfile(stricter)))
+        }
     }
 
     private fun LocationMetadata?.withSubscriptionInterval(hours: Int?): LocationMetadata? {

@@ -357,6 +357,7 @@ fun HomeScreen(
         viewModel.refreshSubscriptions { report ->
             locationViewModel.loadLocations {
                 isRefreshingSubscriptions = false
+                subscriptionNow.value = nowMillis()
                 refreshErrors = report.failures.associate { failure ->
                     failure.url.trim() to ManualRefreshFailure(
                         failure.error, lastSuccessfulRefreshAt(failure.url)
@@ -374,6 +375,7 @@ fun HomeScreen(
         viewModel.refreshSubscription(url) { report ->
             locationViewModel.loadLocations {
                 refreshingSubscriptionUrl = null
+                subscriptionNow.value = nowMillis()
                 val failure = report.failures.firstOrNull { it.url == url }?.error
                 refreshErrors = if (failure == null) refreshErrors - url.trim()
                     else refreshErrors + (url.trim() to ManualRefreshFailure(
