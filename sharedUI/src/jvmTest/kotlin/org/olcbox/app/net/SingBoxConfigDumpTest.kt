@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import org.olcbox.app.data.datasource.XrayJsonSubscriptionFixtures
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -25,6 +26,26 @@ import kotlin.test.assertTrue
  */
 class SingBoxConfigDumpTest {
     private val outDir = File("build/singbox-configs")
+
+    /** Catch a schema or local-rule-file regression in the exact XRAY_JSON policy front. */
+    @Test fun dumpExactXrayRegionalFront() = runTest {
+        val rules = File(outDir, "rules").apply { mkdirs() }
+        for (file in RuleSets.all) File(rules, file.name).writeBytes(RuleSets.bytes(file))
+        val profile = Json.parseToJsonElement(XrayJsonSubscriptionFixtures.vless).jsonObject
+        val built = ExactXrayChainPlan.build(
+            config = profile,
+            ingressPort = 32001,
+            backendPort = 32002,
+            login = SocksLogin("local-user", "local-secret"),
+            routing = Routing.Rules(
+                rules.absolutePath,
+                DirectDns.Servers(listOf("192.0.2.53")),
+                "ru",
+            ),
+            tunMode = true,
+        )
+        dump("exact-xray-ru-front", assertNotNull(built.frontConfig))
+    }
 
     private fun dump(name: String, json: String) {
         outDir.mkdirs()
