@@ -4,7 +4,6 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Parcel
-import java.util.IdentityHashMap
 import org.olcbox.app.vpn.UpstreamTransport
 
 /** Translates ordered callback values without re-querying ConnectivityManager. */
@@ -18,7 +17,7 @@ internal class AndroidPhysicalNetworkSnapshots(
         var linkRevision: Long = 0
     )
 
-    private val networks = IdentityHashMap<Network, NetworkEntry>()
+    private val networks = LinkedHashMap<Network, NetworkEntry>()
     private var nextNetworkId = 1L
     private var closed = false
 

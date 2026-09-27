@@ -7,6 +7,7 @@ import java.net.InetAddress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -92,5 +93,20 @@ class AndroidPhysicalNetworkSnapshotsTest {
         assertEquals(listOf("192.0.2.1", "192.0.2.2"), changed.dnsServers)
         assertEquals(first.revision + 1, changed.revision)
         assertFalse(changed.captive)
+    }
+
+    @Test fun equivalentNetworkHandleFromManagerUsesCallbackFacts() {
+        val adapter = AndroidPhysicalNetworkSnapshots(1, PhysicalNetworkSnapshotLedger())
+        val callbackNetwork = ShadowNetwork.newInstance(201)
+        val managerNetwork = ShadowNetwork.newInstance(201)
+        assertEquals(callbackNetwork, managerNetwork)
+        assertNotSame(callbackNetwork, managerNetwork)
+        adapter.onAvailable(callbackNetwork)
+        adapter.onCapabilitiesChanged(callbackNetwork, caps(NetworkCapabilities.TRANSPORT_WIFI))
+        val snapshot = adapter.onLinkPropertiesChanged(callbackNetwork, link("192.0.2.1"))!!
+
+        assertEquals(snapshot, adapter.current(managerNetwork))
+        adapter.onLost(managerNetwork)
+        assertNull(adapter.current(callbackNetwork))
     }
 }
