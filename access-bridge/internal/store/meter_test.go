@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -163,6 +164,265 @@ type meterSnapshot struct {
 	sequence    int64
 	clientBytes int64
 	exitBytes   int64
+}
+
+type cycleMeterSnapshot struct {
+	committed int64
+	held      int64
+	overdrawn bool
+}
+
+func readCycleMeterSnapshot(t *testing.T, db *sql.DB, req ReservationRequest, evidence BudgetEvidence) cycleMeterSnapshot {
+	t.Helper()
+	var got cycleMeterSnapshot
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT committed_olcrtc_bytes, held_bytes, overdrawn FROM bridge_budget_cycles
+		 WHERE panel_instance=$1 AND user_id=$2 AND cycle_id=$3`,
+		req.Subject.PanelInstance, req.Subject.UserID, evidence.CycleID,
+	).Scan(&got.committed, &got.held, &got.overdrawn); err != nil {
+		t.Fatalf("read committed cycle budget: %v", err)
+	}
+	return got
+}
+
+func TestReservedMeterMovesHoldToCommittedOnce(t *testing.T) {
+	s, db, dsn, req, evidence, limits := reservationFixture(t)
+	req.RequestedBytes = 100
+	limits.MaxLeaseBytes = 100
+	evidence.XrayUsedBytes = 0
+	evidence.TotalLimitBytes = 100
+	ctx := context.Background()
+	if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+		t.Fatalf("ReserveLease: %v", err)
+	}
+	first := MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 1, ClientToExitBytes: 25, ExitToClientBytes: 15}
+	if err := s.RecordCumulative(ctx, first); err != nil {
+		t.Fatalf("first reserved report: %v", err)
+	}
+	if got := readCycleMeterSnapshot(t, db, req, evidence); got != (cycleMeterSnapshot{committed: 40, held: 60}) {
+		t.Fatalf("written bytes did not replace the hold exactly once: %+v", got)
+	}
+	if err := s.RecordCumulative(ctx, first); err != nil {
+		t.Fatalf("exact replay: %v", err)
+	}
+	if got := readCycleMeterSnapshot(t, db, req, evidence); got != (cycleMeterSnapshot{committed: 40, held: 60}) {
+		t.Fatalf("replay changed budget: %+v", got)
+	}
+	db2, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+	s2, err := New(db2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.RecordCumulative(ctx, MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 4, ClientToExitBytes: 50, ExitToClientBytes: 20}); err != nil {
+		t.Fatalf("skipped cumulative sequence after reconnect: %v", err)
+	}
+	if got := readCycleMeterSnapshot(t, db2, req, evidence); got != (cycleMeterSnapshot{committed: 70, held: 30}) {
+		t.Fatalf("reconnect lost or duplicated budget movement: %+v", got)
+	}
+	if got := readMeterSnapshot(t, db2, req.SessionID); got != (meterSnapshot{sequence: 4, clientBytes: 50, exitBytes: 20}) {
+		t.Fatalf("high-water did not advance with budget: %+v", got)
+	}
+}
+
+func TestReservedMeterCrashLateAndOverLimit(t *testing.T) {
+	ctx := context.Background()
+	t.Run("expired lease keeps unconfirmed hold after reconnect", func(t *testing.T) {
+		s, db, dsn, req, evidence, limits := reservationFixture(t)
+		evidence.XrayUsedBytes = 0
+		if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+			t.Fatal(err)
+		}
+		first := MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 1, ClientToExitBytes: 10, ExitToClientBytes: 5}
+		if err := s.RecordCumulative(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE bridge_budget_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE jti=$1`, req.JTI); err != nil {
+			t.Fatal(err)
+		}
+		db2, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db2.Close() })
+		s2, err := New(db2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s2.RecordCumulative(ctx, first); err != nil {
+			t.Fatalf("replay after reconnect: %v", err)
+		}
+		if got := readCycleMeterSnapshot(t, db2, req, evidence); got != (cycleMeterSnapshot{committed: 15, held: 25}) {
+			t.Fatalf("expiry or replay refunded unconfirmed bytes: %+v", got)
+		}
+		late := MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 2, ClientToExitBytes: 20, ExitToClientBytes: 10}
+		if err := s2.RecordCumulative(ctx, late); err != nil {
+			t.Fatalf("late final report: %v", err)
+		}
+		if got := readCycleMeterSnapshot(t, db2, req, evidence); got != (cycleMeterSnapshot{committed: 30, held: 10}) {
+			t.Fatalf("late report or unused hold was miscounted: %+v", got)
+		}
+	})
+	t.Run("late report remains in its original cycle", func(t *testing.T) {
+		s, db, _, req, evidence, limits := reservationFixture(t)
+		evidence.XrayUsedBytes = 0
+		evidence.CycleEnd = time.Now().Add(2 * time.Second)
+		evidence.SubscriptionExpiresAt = evidence.CycleEnd.Add(time.Hour)
+		if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Until(evidence.CycleEnd) + 30*time.Millisecond)
+		next := evidence
+		next.CycleID += "-next"
+		next.CycleStart = evidence.CycleEnd
+		next.CycleEnd = evidence.CycleEnd.Add(time.Hour)
+		next.ObservedAt = time.Now().UTC()
+		next.SubscriptionExpiresAt = next.CycleEnd
+		nextReq := nextReservation(req, t)
+		if _, err := s.ReserveLease(ctx, nextReq, next, limits); err != nil {
+			t.Fatalf("new nonoverlapping cycle: %v", err)
+		}
+		if err := s.RecordCumulative(ctx, MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 1, ClientToExitBytes: 10, ExitToClientBytes: 5}); err != nil {
+			t.Fatalf("old-cycle late report: %v", err)
+		}
+		if got := readCycleMeterSnapshot(t, db, req, evidence); got != (cycleMeterSnapshot{committed: 15, held: 25}) {
+			t.Fatalf("old cycle lost late bytes: %+v", got)
+		}
+		if got := readCycleMeterSnapshot(t, db, nextReq, next); got != (cycleMeterSnapshot{committed: 0, held: 40}) {
+			t.Fatalf("late report charged new cycle: %+v", got)
+		}
+	})
+	t.Run("over-lease actual bytes are durable and close budget", func(t *testing.T) {
+		s, db, _, req, evidence, limits := reservationFixture(t)
+		evidence.XrayUsedBytes = 0
+		if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+			t.Fatal(err)
+		}
+		over := MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 1, ClientToExitBytes: 35, ExitToClientBytes: 15}
+		if err := s.RecordCumulative(ctx, over); !errors.Is(err, ErrMeterBudgetExceeded) {
+			t.Fatalf("over-lease report lacked fail-closed signal: %v", err)
+		}
+		if got := readMeterSnapshot(t, db, req.SessionID); got != (meterSnapshot{sequence: 1, clientBytes: 35, exitBytes: 15}) {
+			t.Fatalf("actual over-lease high-water was discarded: %+v", got)
+		}
+		if got := readCycleMeterSnapshot(t, db, req, evidence); got != (cycleMeterSnapshot{committed: 50, held: 0, overdrawn: true}) {
+			t.Fatalf("over-lease did not close shared budget: %+v", got)
+		}
+		if err := s.RecordCumulative(ctx, over); !errors.Is(err, ErrMeterBudgetExceeded) {
+			t.Fatalf("over-lease exact replay became benign: %v", err)
+		}
+		if got := readCycleMeterSnapshot(t, db, req, evidence); got != (cycleMeterSnapshot{committed: 50, held: 0, overdrawn: true}) {
+			t.Fatalf("over-lease replay moved aggregate: %+v", got)
+		}
+		if _, err := s.ReserveLease(ctx, nextReservation(req, t), evidence, limits); !errors.Is(err, ErrReservationDenied) {
+			t.Fatalf("overdrawn cycle admitted another lease: %v", err)
+		}
+	})
+	t.Run("counter sum overflow retains directional high-water and closes budget", func(t *testing.T) {
+		s, db, _, req, evidence, limits := reservationFixture(t)
+		evidence.XrayUsedBytes = 0
+		if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+			t.Fatal(err)
+		}
+		over := MeterReport{Subject: req.Subject, SessionID: req.SessionID, Sequence: 1, ClientToExitBytes: math.MaxInt64, ExitToClientBytes: 1}
+		if err := s.RecordCumulative(ctx, over); !errors.Is(err, ErrMeterBudgetExceeded) {
+			t.Fatalf("overflow report lacked fail-closed signal: %v", err)
+		}
+		if got := readMeterSnapshot(t, db, req.SessionID); got != (meterSnapshot{sequence: 1, clientBytes: math.MaxInt64, exitBytes: 1}) {
+			t.Fatalf("overflow lost actual directional high-water: %+v", got)
+		}
+		if got := readCycleMeterSnapshot(t, db, req, evidence); !got.overdrawn || got.held != 40 {
+			t.Fatalf("overflow released unconfirmed hold or failed to close budget: %+v", got)
+		}
+		if err := s.RecordCumulative(ctx, over); !errors.Is(err, ErrMeterBudgetExceeded) {
+			t.Fatalf("overflow exact replay became benign: %v", err)
+		}
+		if _, err := s.ReserveLease(ctx, nextReservation(req, t), evidence, limits); !errors.Is(err, ErrReservationDenied) {
+			t.Fatalf("overflow reopened cycle: %v", err)
+		}
+	})
+}
+
+func TestReservedMeterConcurrentConflictCannotMoveHoldTwice(t *testing.T) {
+	s, db, _, req, evidence, limits := reservationFixture(t)
+	evidence.XrayUsedBytes = 0
+	if _, err := s.ReserveLease(context.Background(), req, evidence, limits); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	for _, clientBytes := range []int64{10, 20} {
+		workers.Add(1)
+		go func(clientBytes int64) {
+			defer workers.Done()
+			<-start
+			results <- s.RecordCumulative(context.Background(), MeterReport{
+				Subject: req.Subject, SessionID: req.SessionID, Sequence: 1,
+				ClientToExitBytes: clientBytes, ExitToClientBytes: 5,
+			})
+		}(clientBytes)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	var accepted, conflicts int
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, ErrMeterConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent reserved report: %v", err)
+		}
+	}
+	meter := readMeterSnapshot(t, db, req.SessionID)
+	cycle := readCycleMeterSnapshot(t, db, req, evidence)
+	if accepted != 1 || conflicts != 1 || meter.sequence != 1 ||
+		(meter.clientBytes != 10 && meter.clientBytes != 20) || meter.exitBytes != 5 ||
+		cycle.committed != meter.clientBytes+5 || cycle.held != 40-cycle.committed || cycle.overdrawn {
+		t.Fatalf("concurrent report double-counted: accepted=%d conflicts=%d meter=%+v cycle=%+v",
+			accepted, conflicts, meter, cycle)
+	}
+}
+
+func TestReservedMeterAggregateOverflowKeepsHighWaterAndClosesCycle(t *testing.T) {
+	s, db, _, req, evidence, limits := reservationFixture(t)
+	ctx := context.Background()
+	evidence.XrayUsedBytes = 0
+	evidence.TotalLimitBytes = math.MaxInt64
+	limits.MaxLeaseBytes = math.MaxInt64
+	req.RequestedBytes = math.MaxInt64 - 10
+	if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+		t.Fatalf("first synthetic reservation: %v", err)
+	}
+	if err := s.RecordCumulative(ctx, MeterReport{Subject: req.Subject, SessionID: req.SessionID,
+		Sequence: 1, ClientToExitBytes: req.RequestedBytes}); err != nil {
+		t.Fatalf("first synthetic high-water: %v", err)
+	}
+	second := nextReservation(req, t)
+	second.RequestedBytes = 10
+	if _, err := s.ReserveLease(ctx, second, evidence, limits); err != nil {
+		t.Fatalf("second synthetic reservation: %v", err)
+	}
+	if err := s.RecordCumulative(ctx, MeterReport{Subject: second.Subject, SessionID: second.SessionID,
+		Sequence: 1, ClientToExitBytes: 20}); !errors.Is(err, ErrMeterBudgetExceeded) {
+		t.Fatalf("aggregate overflow lacked fail-closed signal: %v", err)
+	}
+	if got := readMeterSnapshot(t, db, second.SessionID); got != (meterSnapshot{sequence: 1, clientBytes: 20}) {
+		t.Fatalf("aggregate overflow discarded actual high-water: %+v", got)
+	}
+	if got := readCycleMeterSnapshot(t, db, req, evidence); !got.overdrawn || got.held != 10 || got.committed != math.MaxInt64-10 {
+		t.Fatalf("aggregate overflow released budget or lost marker: %+v", got)
+	}
+	if err := s.RecordCumulative(ctx, MeterReport{Subject: second.Subject, SessionID: second.SessionID,
+		Sequence: 1, ClientToExitBytes: 20}); !errors.Is(err, ErrMeterBudgetExceeded) {
+		t.Fatalf("aggregate-overflow replay became benign: %v", err)
+	}
 }
 
 func readMeterSnapshot(t *testing.T, db *sql.DB, id string) meterSnapshot {

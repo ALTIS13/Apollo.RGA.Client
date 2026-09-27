@@ -15,6 +15,7 @@ var (
 	ErrMeterStale               = errors.New("store: stale meter report")
 	ErrMeterRegression          = errors.New("store: regressed meter counter")
 	ErrMeterConflict            = errors.New("store: conflicting meter report")
+	ErrMeterBudgetExceeded      = errors.New("store: meter budget exceeded")
 	ErrMeterRegistrationBlocked = errors.New("store: legacy meter registration blocked")
 )
 
@@ -105,9 +106,9 @@ func validMeterSessionID(id string) bool {
 	return true
 }
 
-// RecordCumulative advances only the durable per-session high-water mark.
-// Its acknowledgement must never be used as a separate traffic delta: after
-// an indeterminate COMMIT the same report may be a successful replay.
+// RecordCumulative advances durable per-session high-water. Reserved sessions
+// move confirmed bytes from held to committed in the same transaction. Its
+// acknowledgement is never a second traffic delta after an ambiguous COMMIT.
 func (s *Store) RecordCumulative(ctx context.Context, report MeterReport) error {
 	if err := report.Subject.Validate(); err != nil {
 		return err
@@ -121,6 +122,41 @@ func (s *Store) RecordCumulative(ctx context.Context, report MeterReport) error 
 		return ErrUnavailable
 	}
 	defer tx.Rollback()
+	var cycleID string
+	var byteLimit int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT cycle_id, byte_limit FROM bridge_budget_leases
+		 WHERE session_id=$1 AND panel_instance=$2 AND user_id=$3`,
+		report.SessionID, report.Subject.PanelInstance, report.Subject.UserID,
+	).Scan(&cycleID, &byteLimit)
+	reserved := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ErrUnavailable
+	}
+	var cycleLimit, cycleXray, cycleCommitted, cycleHeld int64
+	var cycleOverdrawn bool
+	if reserved {
+		var exists int
+		err = tx.QueryRowContext(ctx,
+			`SELECT 1 FROM bridge_subjects WHERE panel_instance=$1 AND user_id=$2 FOR UPDATE`,
+			report.Subject.PanelInstance, report.Subject.UserID,
+		).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrMeterSessionUnknown
+		}
+		if err != nil {
+			return ErrUnavailable
+		}
+		err = tx.QueryRowContext(ctx,
+			`SELECT total_limit_bytes, confirmed_xray_bytes, committed_olcrtc_bytes,
+			 held_bytes, overdrawn FROM bridge_budget_cycles
+			 WHERE panel_instance=$1 AND user_id=$2 AND cycle_id=$3 FOR UPDATE`,
+			report.Subject.PanelInstance, report.Subject.UserID, cycleID,
+		).Scan(&cycleLimit, &cycleXray, &cycleCommitted, &cycleHeld, &cycleOverdrawn)
+		if err != nil {
+			return ErrUnavailable
+		}
+	}
 	var sequence, clientBytes, exitBytes int64
 	err = tx.QueryRowContext(ctx,
 		`SELECT last_sequence, client_to_exit_bytes, exit_to_client_bytes
@@ -139,12 +175,56 @@ func (s *Store) RecordCumulative(ctx context.Context, report MeterReport) error 
 	}
 	if report.Sequence == sequence {
 		if report.ClientToExitBytes == clientBytes && report.ExitToClientBytes == exitBytes {
+			if reserved && cycleOverdrawn {
+				return ErrMeterBudgetExceeded
+			}
 			return nil
 		}
 		return ErrMeterConflict
 	}
 	if report.ClientToExitBytes < clientBytes || report.ExitToClientBytes < exitBytes {
 		return ErrMeterRegression
+	}
+	budgetExceeded := false
+	if reserved {
+		previousTotal, previousOK := checkedBudgetSum(clientBytes, exitBytes)
+		nextTotal, nextOK := checkedBudgetSum(report.ClientToExitBytes, report.ExitToClientBytes)
+		delta, deltaOK := checkedBudgetSum(report.ClientToExitBytes-clientBytes, report.ExitToClientBytes-exitBytes)
+		var committed, held int64
+		var canAggregate bool
+		if previousOK && nextOK && deltaOK {
+			remaining := byteLimit - previousTotal
+			if remaining < 0 {
+				remaining = 0
+			}
+			converted := min(delta, remaining)
+			if converted <= cycleHeld {
+				committed, canAggregate = checkedBudgetSum(cycleCommitted, delta)
+				held = cycleHeld - converted
+			}
+		}
+		if canAggregate {
+			combined, combinedOK := checkedBudgetSum(cycleXray, committed, held)
+			budgetExceeded = cycleOverdrawn || nextTotal > byteLimit || !combinedOK || combined > cycleLimit
+			_, err = tx.ExecContext(ctx,
+				`UPDATE bridge_budget_cycles SET committed_olcrtc_bytes=$4, held_bytes=$5, overdrawn=$6
+				 WHERE panel_instance=$1 AND user_id=$2 AND cycle_id=$3`,
+				report.Subject.PanelInstance, report.Subject.UserID, cycleID,
+				committed, held, budgetExceeded,
+			)
+		} else {
+			// Directional high-water remains authoritative even when its sum
+			// cannot fit in the aggregate. Keep the hold and close the cycle.
+			budgetExceeded = true
+			_, err = tx.ExecContext(ctx,
+				`UPDATE bridge_budget_cycles SET overdrawn=TRUE
+				 WHERE panel_instance=$1 AND user_id=$2 AND cycle_id=$3`,
+				report.Subject.PanelInstance, report.Subject.UserID, cycleID,
+			)
+		}
+		if err != nil {
+			return ErrUnavailable
+		}
 	}
 	_, err = tx.ExecContext(ctx,
 		`UPDATE bridge_meter_sessions SET last_sequence=$4,
@@ -158,6 +238,9 @@ func (s *Store) RecordCumulative(ctx context.Context, report MeterReport) error 
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrUnavailable
+	}
+	if budgetExceeded {
+		return ErrMeterBudgetExceeded
 	}
 	return nil
 }
