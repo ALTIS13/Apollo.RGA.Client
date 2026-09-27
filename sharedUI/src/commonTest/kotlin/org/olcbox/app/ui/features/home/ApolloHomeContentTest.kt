@@ -5,6 +5,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
@@ -80,7 +81,7 @@ class ApolloHomeContentTest {
         onAllNodesWithText("Sites and apps").assertCountEquals(3)
         onNodeWithTag("apollo-selected-mode").assertTextEquals("Sites and apps")
         onNodeWithText("Games and calls").assertExists()
-        onAllNodesWithText("🇳🇱 Netherlands").assertCountEquals(2)
+        onAllNodesWithText("🇳🇱 Netherlands").assertCountEquals(1)
         onNodeWithText("One selected connection is used for the whole device.").assertExists()
         onAllNodesWithText("VLESS · XHTTP · Reality").assertCountEquals(2)
         onNodeWithText("Hysteria2").assertExists()
@@ -105,7 +106,7 @@ class ApolloHomeContentTest {
                 )
             }
         }
-        onAllNodesWithText("🇫🇮 Finland").assertCountEquals(2)
+        onAllNodesWithText("🇫🇮 Finland").assertCountEquals(1)
         onNodeWithText("Subscription active").assertExists()
         onNodeWithText("RGA // OFFLINE · CHANNEL INACTIVE").assertExists()
         onNodeWithText("→", useUnmergedTree = true).assertDoesNotExist()
@@ -117,6 +118,96 @@ class ApolloHomeContentTest {
         onNodeWithText("Experimental mode").assertDoesNotExist()
     }
 
+    @Test fun selectedCountryMovesIntoPrimaryActionWithoutAnExtraHeroLine() = runComposeUiTest {
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active, isConnected = false, isConnecting = false,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        // The country group keeps its heading; the hero must not repeat it above the button.
+        onAllNodesWithText("🇫🇮 Finland").assertCountEquals(1)
+        val action = onNodeWithTag("apollo-action").fetchSemanticsNode().boundsInRoot
+        val country = onNodeWithTag("apollo-action-country", useUnmergedTree = true)
+            .assertTextEquals("Finland").fetchSemanticsNode().boundsInRoot
+        assertTrue(country.left >= action.left && country.right <= action.right)
+        assertTrue(country.top >= action.top && country.bottom <= action.bottom)
+    }
+
+    @Test fun connectingFlagRevealsInsideAnAccessibleCancelAction() = runComposeUiTest {
+        var cancels = 0
+        mainClock.autoAdvance = false
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active, isConnected = false, isConnecting = true,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = true,
+                    onAction = { cancels++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        mainClock.advanceTimeByFrame()
+        val fill = onNodeWithTag("apollo-action-flag-fill", useUnmergedTree = true)
+        val before = fill.fetchSemanticsNode().boundsInRoot.width
+        mainClock.advanceTimeBy(600)
+        val after = fill.fetchSemanticsNode().boundsInRoot.width
+        assertTrue(after > before, "the flag should be visibly revealed while connecting")
+        onNodeWithTag("apollo-action").assertContentDescriptionEquals("Cancel connection, Finland")
+        onNodeWithText("Cancel connection").performClick()
+        assertEquals(1, cancels)
+    }
+
+    @Test fun reducedMotionLeavesTheSelectedFlagStaticWhileConnecting() = runComposeUiTest {
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active, isConnected = false, isConnecting = true,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = false,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        onNodeWithTag("apollo-action-flag", useUnmergedTree = true).assertExists()
+        onNodeWithTag("apollo-action-flag-fill", useUnmergedTree = true).assertDoesNotExist()
+        onNodeWithTag("apollo-action").assertContentDescriptionEquals("Cancel connection, Finland")
+    }
+
+    @Test fun flagFillStopsWhenConnectionLeavesTheConnectingState() = runComposeUiTest {
+        val connecting = mutableStateOf(true)
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active, isConnected = false, isConnecting = connecting.value,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    ambientMotionEnabled = true,
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        onNodeWithTag("apollo-action-flag-fill", useUnmergedTree = true).assertExists()
+        connecting.value = false
+        waitForIdle()
+        onNodeWithTag("apollo-action-flag-fill", useUnmergedTree = true).assertDoesNotExist()
+        onNodeWithTag("apollo-action").assertContentDescriptionEquals("Connect, Finland")
+    }
+
     @Test fun selectingALowerCountryKeepsTheConnectActionAvailable() = runComposeUiTest {
         var actions = 0
         val selectedId = mutableStateOf(dutchWeb.storageId)
@@ -125,7 +216,8 @@ class ApolloHomeContentTest {
         val american = finnish.copy(storageId = "synthetic-us", fullName = "🇺🇸 US · New York")
         val italian = finnish.copy(storageId = "synthetic-it", fullName = "🇮🇹 IT · Milan")
         val british = finnish.copy(storageId = "synthetic-gb", fullName = "🇬🇧 GB · London")
-        val lower = finnish.copy(storageId = "synthetic-jp", fullName = "🇯🇵 JP · Tokyo")
+        val lower = finnish.copy(storageId = "synthetic-jp", fullName = "🇯🇵 JP · Tokyo",
+            config = finnish.config!!.copy(name = "🇯🇵 JP · Tokyo"))
         setContent {
             MaterialTheme {
                 ApolloHomeContent(
@@ -144,8 +236,35 @@ class ApolloHomeContentTest {
         onNodeWithTag("apollo-country-choice-synthetic-jp").performScrollTo()
         onNodeWithTag("apollo-country-choice-synthetic-jp").performClick()
         assertEquals(lower.storageId, selectedId.value)
+        waitForIdle()
+        onNodeWithTag("apollo-sticky-action-flag", useUnmergedTree = true).assertExists()
+        onNodeWithTag("apollo-sticky-action").assertContentDescriptionEquals("Connect, Japan")
         onNodeWithTag("apollo-sticky-action").performClick()
         assertEquals(1, actions)
+    }
+
+    @Test fun stickyConnectingActionShowsShortVerbButKeepsFullAccessibleAction() = runComposeUiTest {
+        var cancels = 0
+        val choices = List(10) { index -> finnish.copy(storageId = "synthetic-fi-$index") }
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = choices, selectedLocationId = choices.first().storageId,
+                    subscription = active, isConnected = false, isConnecting = true,
+                    canStartVpn = true, isRefreshing = false, showSettings = false,
+                    onAction = { cancels++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        onNodeWithTag("apollo-country-choice-synthetic-fi-9").performScrollTo()
+        onNodeWithTag("apollo-sticky-action").assertTextEquals("Cancel")
+        onNodeWithTag("apollo-sticky-action")
+            .assertContentDescriptionEquals("Cancel connection, Finland")
+            .performClick()
+        assertEquals(1, cancels)
+        onNodeWithText("Cancel connection", useUnmergedTree = true).assertExists()
     }
 
     @Test fun configuredRelayExplainsEachStageWithoutCallingItMeasuredTraffic() = runComposeUiTest {
@@ -168,7 +287,7 @@ class ApolloHomeContentTest {
         onNodeWithTag("apollo-route").assertExists()
         onNodeWithText("Device").assertExists()
         onNodeWithText("Russia").assertExists()
-        onNodeWithText("Netherlands").assertExists()
+        onAllNodesWithText("Netherlands").assertCountEquals(2)
         onNodeWithText("Configured path: via Russia → Netherlands").assertExists()
     }
 
@@ -256,6 +375,7 @@ class ApolloHomeContentTest {
         onNodeWithText("Страна не указана").assertDoesNotExist()
         onNodeWithText("Хост без названия").assertDoesNotExist()
         onNodeWithText("SECRET_VALUE").assertDoesNotExist()
+        onNodeWithTag("apollo-action-flag", useUnmergedTree = true).assertDoesNotExist()
     }
 
     @Test fun knownExpiryAndQuotaAreShownWithoutInventingUnlimitedQuota() = runComposeUiTest {

@@ -520,6 +520,7 @@
     <string name="apollo_connect">Connect</string>
     <string name="apollo_disconnect">Disconnect</string>
     <string name="apollo_cancel">Cancel connection</string>
+    <string name="apollo_cancel_short">Cancel</string>
     <string name="apollo_connection_failed">Connection failed. Check this destination or try again.</string>
     <string name="apollo_connection_checking">Checking connection…</string>
     <string name="apollo_connection_blocked">This destination cannot start. Choose another destination.</string>

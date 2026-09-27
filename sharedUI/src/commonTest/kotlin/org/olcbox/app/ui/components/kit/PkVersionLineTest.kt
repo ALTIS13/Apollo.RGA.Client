@@ -40,9 +40,9 @@ class PkVersionLineTest {
     @Test
     fun masksTheSubscriptionToken() {
         assertEquals(
-            "https://proofkit.org/sub/c0e79f…17e95",
+            "https://subscription.example.test/sub/bbbbbb…bbbbb",
             pkMaskSubscriptionUrl(
-                "https://proofkit.org/sub/c0e79fc61f942fe0e7b2032fd273967f4d3b807d1ba11dfd8f9a8d17ad817e95"
+                "https://subscription.example.test/sub/" + "b".repeat(64)
             )
         )
     }
@@ -50,15 +50,15 @@ class PkVersionLineTest {
     @Test
     fun maskingKeepsShortPathsReadable() {
         // nothing secret to hide, and truncating would only make it harder to read
-        assertEquals("https://example.com/sub", pkMaskSubscriptionUrl("https://example.com/sub"))
+        assertEquals("https://example.test/sub", pkMaskSubscriptionUrl("https://example.test/sub"))
     }
 
     @Test
     fun maskingHidesQueryParameters() {
         assertEquals(
-            "https://proofkit.org/sub/c0e79f…17e95?…",
+            "https://subscription.example.test/sub/bbbbbb…bbbbb?…",
             pkMaskSubscriptionUrl(
-                "https://proofkit.org/sub/c0e79fc61f942fe0e7b2032fd273967f4d3b807d1ba11dfd8f9a8d17ad817e95?crypt=1"
+                "https://subscription.example.test/sub/" + "b".repeat(64) + "?crypt=1"
             )
         )
     }
@@ -69,9 +69,9 @@ class PkVersionLineTest {
         // the old mask returned the string untouched and the row ellipsised it —
         // which looks like masking and is not.
         assertEquals(
-            "https://proofkit.org/sub/c0e79f…17e95/olcrtc?…",
+            "https://subscription.example.test/sub/bbbbbb…bbbbb/olcrtc?…",
             pkMaskSubscriptionUrl(
-                "https://proofkit.org/sub/c0e79fc61f942fe0e7b2032fd273967f4d3b807d1ba11dfd8f9a8d17ad817e95" +
+                "https://subscription.example.test/sub/" + "b".repeat(64) +
                     "/olcrtc?crypt=1"
             )
         )
@@ -82,8 +82,8 @@ class PkVersionLineTest {
         // A host is longer than 12 characters often enough that masking by length
         // alone would mangle it into something nobody can identify.
         assertEquals(
-            "https://sub.reviewassistant.org/sub/j7k9e/54vnsk…w2y1j?…",
-            pkMaskSubscriptionUrl("https://sub.reviewassistant.org/sub/j7k9e/54vnskyn4srw2y1j?x=1")
+            "https://partner.example.test/sub/j7k9e/cccccc…ccccc?…",
+            pkMaskSubscriptionUrl("https://partner.example.test/sub/j7k9e/" + "c".repeat(16) + "?name=partner")
         )
     }
 }

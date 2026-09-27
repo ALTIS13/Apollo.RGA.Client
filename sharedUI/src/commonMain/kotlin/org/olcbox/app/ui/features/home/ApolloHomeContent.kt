@@ -32,8 +32,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -68,6 +70,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -77,6 +80,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.semantics.semantics
@@ -172,10 +176,14 @@ internal fun ApolloHomeContent(
         isConnecting -> stringResource(Res.string.apollo_cancel)
         else -> stringResource(Res.string.apollo_connect)
     }
+    val compactActionTitle = if (isConnecting && !isConnected)
+        stringResource(Res.string.apollo_cancel_short) else actionTitle
     val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED,
         SubscriptionDisplayState.LIMITED, SubscriptionDisplayState.DEVICE_DENIED)
     val actionEnabled = isConnected || isConnecting || (canStartVpn && !accessBlocked && selectedLocationId != null)
     val unknownCountry = stringResource(Res.string.apollo_country_unknown)
+    val selectedCountry = selected?.let { localizedCountry(it.country, unknownCountry) }
+    val actionDescription = listOfNotNull(actionTitle, selectedCountry).joinToString(", ")
     val route = when {
         selected?.relay != null -> stringResource(Res.string.apollo_route_configured,
             localizedCountry(selected.country, unknownCountry))
@@ -263,9 +271,20 @@ internal fun ApolloHomeContent(
                             }
                         }
                         Button(onClick = onAction, enabled = actionEnabled,
-                            modifier = Modifier.defaultMinSize(minWidth = 132.dp, minHeight = 52.dp)
-                                .semantics { testTag = "apollo-sticky-action" }) {
-                            Text(actionTitle, maxLines = 1)
+                            modifier = Modifier.widthIn(min = 132.dp, max = 180.dp)
+                                .defaultMinSize(minHeight = 52.dp)
+                                .semantics {
+                                    contentDescription = actionDescription
+                                    testTag = "apollo-sticky-action"
+                                }) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (!selected?.flag.isNullOrBlank()) {
+                                    ApolloActionFlag(selected?.flag, isConnecting, ambientMotionEnabled,
+                                        tag = "apollo-sticky-action-flag")
+                                }
+                                Text(compactActionTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                     }
                 }
@@ -308,7 +327,6 @@ internal fun ApolloHomeContent(
                         ApolloStatusSignal(signalColor, isConnected, isConnecting, ambientMotionEnabled)
                     }
                     if (selected != null) {
-                        Text(destination(selected), style = MaterialTheme.typography.titleLarge)
                         Text(hostMode(selected, selectedPair.first.config?.kind),
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.semantics { testTag = "apollo-selected-mode" })
@@ -368,7 +386,10 @@ internal fun ApolloHomeContent(
                                 )), actionShape
                             )
                             .border(BorderStroke(1.dp, Color.White.copy(alpha = if (actionEnabled) 0.32f else 0.10f)), actionShape)
-                            .semantics { testTag = "apollo-action" },
+                            .semantics {
+                                contentDescription = actionDescription
+                                testTag = "apollo-action"
+                            },
                         shape = actionShape,
                         interactionSource = actionInteraction,
                         colors = ButtonDefaults.buttonColors(
@@ -379,12 +400,20 @@ internal fun ApolloHomeContent(
                         )
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Spacer(Modifier.width(32.dp))
-                            Text(actionTitle, style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                textAlign = TextAlign.Center,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f))
+                            ApolloActionFlag(selected?.flag, isConnecting, ambientMotionEnabled,
+                                tag = "apollo-action-flag")
+                            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(actionTitle, style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                selectedCountry?.let { country ->
+                                    Text(country, style = MaterialTheme.typography.labelMedium,
+                                        textAlign = TextAlign.Center, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.semantics { testTag = "apollo-action-country" })
+                                }
+                            }
                             Text(if (isConnected || isConnecting) "×" else "→",
                                 style = MaterialTheme.typography.titleLarge,
                                 color = Color.White.copy(alpha = 0.78f),
@@ -536,6 +565,45 @@ internal fun ApolloHomeContent(
                 }
             }
             Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+/** A looping reveal communicates activity without pretending to measure connection progress. */
+@Composable
+private fun ApolloActionFlag(
+    flag: String?,
+    isConnecting: Boolean,
+    motionEnabled: Boolean,
+    tag: String
+) {
+    if (flag.isNullOrBlank()) {
+        Spacer(Modifier.size(32.dp))
+        return
+    }
+    val reveal = if (isConnecting && motionEnabled) {
+        val transition = rememberInfiniteTransition(label = "destination flag reveal")
+        val fraction by transition.animateFloat(
+            initialValue = 0.01f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing), RepeatMode.Restart),
+            label = "flag reveal"
+        )
+        fraction
+    } else 1f
+    Box(Modifier.size(32.dp).semantics { testTag = tag }, contentAlignment = Alignment.Center) {
+        Text(flag, fontSize = 24.sp, textAlign = TextAlign.Center,
+            modifier = Modifier.requiredWidth(32.dp).graphicsLayer(alpha = if (reveal < 1f) 0.28f else 1f)
+                .clearAndSetSemantics { })
+        if (isConnecting && motionEnabled) {
+            Box(
+                Modifier.align(Alignment.CenterStart).width((32f * reveal).dp).height(32.dp)
+                    .clipToBounds().semantics { testTag = "$tag-fill" },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text(flag, fontSize = 24.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.requiredWidth(32.dp).clearAndSetSemantics { })
+            }
         }
     }
 }

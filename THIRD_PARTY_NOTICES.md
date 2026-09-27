@@ -1,41 +1,54 @@
 # Third-party notices
 
-Ghostlane itself is MIT (`LICENSE`). It ships and links components written by
-other people, each under its own licence. This file lists them, because a
-licence that travels with the binary has to be findable, and because two of
-these carry obligations the MIT licence does not.
+This checkout adapts Ghostlane (itself an olcbox fork) for Apollo.RGA Android.
+The upstream copyright notices remain in the repository's MIT `LICENSE`.
+Third-party components retain their own licences. The table describes the
+multi-platform codebase; the Apollo.RGA Android candidate has a narrower
+packaged set, detailed below. This is an engine-level inventory, not a complete
+list of transitive Gradle or Go dependencies.
 
 ## What ships inside the applications
 
 | Component | Licence | How it is used |
 | --- | --- | --- |
-| [olcRTC](https://github.com/ghostlane-project/olcrtc) | Apache-2.0 | The tunnel engine. Linked into every platform; maintained by this project. |
-| [sing-box](https://github.com/SagerNet/sing-box) | **GPL-3.0-or-later** | Reality, TLS and Hysteria2. A separate binary on desktop; its `libbox` library is linked into the mobile builds. |
-| [Xray-core](https://github.com/XTLS/Xray-core) | **MPL-2.0** | XHTTP, through [libXray](https://github.com/XTLS/libXray) (MIT). A separate binary on desktop; linked into the mobile builds. |
-| [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | MIT | Turns the platform's TUN device into SOCKS5 on Apple platforms. |
-| [Wintun](https://www.wintun.net/) | GPL-2.0 (redistribution permitted per its own terms) | The Windows TUN driver. Shipped as the vendor's signed binary, unmodified. |
-| [Re:filter](https://github.com/1andrevich/Re-filter-lists) | MIT, Copyright (c) 2024 Andrevich | The list of sites blocked in Russia behind "only blocked sites through the tunnel": its sing-box rule-sets, bundled unmodified (`files/rules/refilter-*.srs`, pinned in `scripts/rule-sets.lock`). |
+| [olcRTC](https://github.com/ghostlane-project/olcrtc) | Apache-2.0 | The Ghostlane tunnel engine; absent from the ordinary Apollo.RGA Android release APK. |
+| [sing-box](https://github.com/SagerNet/sing-box) | **GPL-3.0-or-later**, with an additional name/association term in its [pinned licence](https://github.com/SagerNet/sing-box/blob/25a600db24f7680ad9806ce5427bd0ab8afe1114/LICENSE) | Reality, TLS and Hysteria2. Packaged as an executable native core in Apollo.RGA Android. |
+| [Xray-core](https://github.com/XTLS/Xray-core) | **[MPL-2.0](https://github.com/XTLS/Xray-core/blob/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120/LICENSE)** | XHTTP. Packaged as an executable native core in Apollo.RGA Android; other targets also use [libXray](https://github.com/XTLS/libXray) (MIT). |
+| [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | [MIT](androidApp/src/main/jni/hev-socks5-tunnel/LICENSE) | TUN-to-SOCKS5 bridge on Android and Apple platforms. |
+| [Wintun](https://www.wintun.net/) | GPL-2.0 source; separate [prebuilt DLL terms](androidApp/src/main/jni/hev-socks5-tunnel/third-part/wintun/LICENSE.txt) | The Windows-only TUN driver; not in the Android APK. |
+| [Re:filter](https://github.com/1andrevich/Re-filter-lists) | MIT, Copyright (c) 2024 Andrevich | The list of sites blocked in Russia behind "only blocked sites through the tunnel": its sing-box rule-sets, bundled unmodified in `sharedUI/src/commonMain/composeResources/files/rules/` and pinned in `scripts/rule-sets.lock`. |
 
-Their sources are the upstream repositories above, at the versions pinned in
-`scripts/cores-pins.sh` and `scripts/hev-pins.sh`. Nothing in this repository
-modifies sing-box; the one patch carried against Xray-core is in
-`scripts/patches/` and is therefore published, as MPL-2.0 requires.
+## Apollo.RGA Android arm64 candidate source
 
-## What this means in practice
+The [candidate workflow](.github/workflows/apollo-rga-android.yml) builds
+`githubRelease` for arm64 and uploads an APK plus release evidence. It does not
+publish a release or attach this notice to the APK. The core source revisions
+for that workflow are:
 
-**sing-box is GPL-3.0-or-later.** Linking it into an application makes the
-combined work subject to that licence when the combination is distributed. This
-project's own source is public, which satisfies the source-availability side of
-it. The known friction is distribution through app stores, whose terms have been
-argued to conflict with the GPL's condition that no further restrictions be
-imposed on recipients; this is the same question every sing-box-based client on
-those stores faces. We are not lawyers, we state the facts here rather than a
-conclusion, and we will follow whatever SagerNet and the stores settle on.
+| Packaged component | Corresponding source |
+| --- | --- |
+| `libsingboxcore.so` | [sing-box commit `25a600db24f7680ad9806ce5427bd0ab8afe1114`](https://github.com/SagerNet/sing-box/tree/25a600db24f7680ad9806ce5427bd0ab8afe1114), checked by `scripts/apollo-rga-release-pins.json` |
+| `libxraycore.so` | [Xray-core commit `52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120`](https://github.com/XTLS/Xray-core/tree/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120), checked by `scripts/android-xray-pins.json` |
+| Android hev-socks5-tunnel | [Vendored source](androidApp/src/main/jni/hev-socks5-tunnel/) in the exact Apollo.RGA application source commit recorded by the APK's `apollo-rga-release-evidence.json` |
+| lwIP inside the Android hev build | [Vendored BSD-3-Clause licence and source](androidApp/src/main/jni/hev-socks5-tunnel/third-part/lwip/) |
+| hev task system and YAML inside the Android hev build | Vendored MIT [task-system licence](androidApp/src/main/jni/hev-socks5-tunnel/third-part/hev-task-system/LICENSE) and [YAML licence](androidApp/src/main/jni/hev-socks5-tunnel/third-part/yaml/License) |
+| Re:filter rule-sets | [Bundled files](sharedUI/src/commonMain/composeResources/files/rules/) and hashes in `scripts/rule-sets.lock`, at that same application source commit |
 
-**Xray-core is MPL-2.0**, which is file-level copyleft: modified MPL files must
-be published. Ours is, in `scripts/patches/`.
+The Android Xray builder uses the clean upstream commit above. The
+[Xray patch](scripts/patches/xray-core-h2-window.patch) is applied by the iOS
+framework builder, not by the Apollo.RGA Android candidate workflow. Likewise,
+the [hev commit `941c758101385d145c66210ac88991daaf27d4b6`](https://github.com/heiher/hev-socks5-tunnel/tree/941c758101385d145c66210ac88991daaf27d4b6)
+in `scripts/hev-pins.sh` pins the Apple framework; it is not a revision claim
+for the vendored Android source.
 
-**Everything else is permissive** and needs only the attribution given above.
+## Before distributing an Apollo.RGA APK
 
-If you build a product on top of this repository, these obligations travel with
-the components, not with Ghostlane's MIT licence. Read them before you ship.
+The APK evidence names its exact `source_commit`. Make that application source
+revision, this notice, the repository `LICENSE`, and the component licence
+texts available with the distributed APK. Verify that the source revision
+contains the vendored Android hev code and any patches actually used by that
+APK. The candidate workflow alone is not a source publication step.
+
+This inventory identifies components and their stated licences. It is not a
+legal determination about the licence of a combined work or app-store terms;
+those questions need separate review before distribution.

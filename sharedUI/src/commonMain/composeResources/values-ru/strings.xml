@@ -520,6 +520,7 @@
     <string name="apollo_connect">Подключиться</string>
     <string name="apollo_disconnect">Отключиться</string>
     <string name="apollo_cancel">Отменить подключение</string>
+    <string name="apollo_cancel_short">Отмена</string>
     <string name="apollo_connection_failed">Не удалось подключиться. Проверьте выбранную страну или повторите попытку.</string>
     <string name="apollo_connection_checking">Проверяем подключение…</string>
     <string name="apollo_connection_blocked">К этой стране сейчас нельзя подключиться. Выберите другую.</string>
