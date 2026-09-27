@@ -6,6 +6,8 @@
 
 **Architecture:** Patch only a separately materialized copy of the pinned Ghostlane source; the ignored `.deps/olcrtc` stays pristine. A managed-mode guard in the fork rejects a missing hook before transport startup, authentication rejections expose no private hook error, and session-open logs omit client claims. A checked-in patch and offline materializer verify the exact base commit and patch digest. This is still not a grant, quota, status-only path or deploy.
 
+**Local safety refinement:** Managed mode is TCP-only until UDP flows are bound to a revocable session generation and charged while active. The server forces UDP off whenever `RequireAuthHook` is true; ordinary non-managed UDP behavior is unchanged. This does not claim TCP active revocation or common quota readiness.
+
 **Tech Stack:** Go 1.26.5 as pinned in `scripts/cores-pins.sh`, Python 3 standard library for the local patch materializer, Git; existing Go tests in the fork and Python unittest in Apollo.RGA.Client.
 
 **Spec:** `docs/superpowers/specs/2026-09-27-apollo-rga-access-bridge-design.md` (pinned fork requirements in “Обновление подписки при ограниченной сети” and “Безопасное внедрение”).

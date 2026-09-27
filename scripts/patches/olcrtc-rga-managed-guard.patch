@@ -231,7 +231,7 @@ index 203ece2..928af32 100644
  	}
  	return nil, handshakeResult{}, false
 diff --git a/internal/server/server.go b/internal/server/server.go
-index f9e65e8..94c1b23 100644
+index f9e65e8..fde0a74 100644
 --- a/internal/server/server.go
 +++ b/internal/server/server.go
 @@ -37,6 +37,7 @@ var (
@@ -290,7 +290,7 @@ index f9e65e8..94c1b23 100644
  	runCtx, cancel := context.WithCancel(ctx)
  	defer cancel()
  	ring, err := setupRing(cfg)
-@@ -192,7 +198,8 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -192,14 +198,15 @@ func Run(ctx context.Context, cfg Config) error {
  		onTraffic = func(string, string, uint64, uint64) {}
  	}
  	s := &Server{
@@ -300,10 +300,24 @@ index f9e65e8..94c1b23 100644
  		dnsServer: cfg.DNSServer, resolver: tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer),
  		socksProxyAddr: cfg.SOCKSProxyAddr, socksProxyPort: cfg.SOCKSProxyPort,
  		socksProxyUser: cfg.SOCKSProxyUser, socksProxyPass: cfg.SOCKSProxyPass,
-@@ -223,6 +230,18 @@ func Run(ctx context.Context, cfg Config) error {
+ 		liveness: cfg.Liveness, health: runtime.NewHealthTracker(cfg.OnHealth),
+ 		peerSessions: make(map[string]*peerSession), peerStats: make(map[string]peerStat),
+ 		done: make(chan struct{}), meter: newMeter(),
+-		udpDisabled: cfg.UDPDisabled, maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
++		udpDisabled: effectiveUDPDisabled(cfg), maxUDPFlows: normalizeMaxUDPFlows(cfg.UDPMaxFlows),
+ 		// ai-generated: the test hook (egress hardening); a release build
+ 		// has no hook and always keeps the policy.
+ 		unsafeAllowPrivateTargets: cfg.UnsafeAllowPrivateTargets || testhooks.AllowPrivateTargets(),
+@@ -223,6 +230,24 @@ func Run(ctx context.Context, cfg Config) error {
  	return nil
  }
  
++// Managed sessions stay TCP-only until UDP flows are tied to a revocable
++// session generation and accounted while active. A config cannot opt out.
++func effectiveUDPDisabled(cfg Config) bool {
++	return cfg.UDPDisabled || cfg.RequireAuthHook
++}
++
 +func (s *Server) logSessionOpened(sessionID, deviceID, peerID string) {
 +	if s.requireAuthHook {
 +		logger.Infof("managed session opened")
@@ -320,7 +334,7 @@ index f9e65e8..94c1b23 100644
  // agent polls. Best effort: a bind failure logs and leaves the meter in
  // memory only, never blocking the tunnel. The listener closes with ctx.
 diff --git a/internal/server/server_test.go b/internal/server/server_test.go
-index a6fbbaf..d6bb5f9 100644
+index a6fbbaf..cf3f241 100644
 --- a/internal/server/server_test.go
 +++ b/internal/server/server_test.go
 @@ -6,6 +6,7 @@ import (
@@ -331,7 +345,7 @@ index a6fbbaf..d6bb5f9 100644
  	"net"
  	"strings"
  	"sync"
-@@ -118,6 +119,38 @@ func TestDefaultAuthHook(t *testing.T) {
+@@ -118,6 +119,58 @@ func TestDefaultAuthHook(t *testing.T) {
  	}
  }
  
@@ -339,6 +353,26 @@ index a6fbbaf..d6bb5f9 100644
 +	err := Run(context.Background(), Config{RequireAuthHook: true})
 +	if !errors.Is(err, ErrAuthHookRequired) {
 +		t.Fatalf("managed server without auth hook: %v", err)
++	}
++}
++
++func TestManagedServerForcesUDPDisabled(t *testing.T) {
++	tests := []struct {
++		name string
++		cfg  Config
++		want bool
++	}{
++		{name: "managed default", cfg: Config{RequireAuthHook: true}, want: true},
++		{name: "managed explicit", cfg: Config{RequireAuthHook: true, UDPDisabled: true}, want: true},
++		{name: "legacy default", cfg: Config{}, want: false},
++		{name: "legacy explicit", cfg: Config{UDPDisabled: true}, want: true},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := effectiveUDPDisabled(tc.cfg); got != tc.want {
++				t.Fatalf("effectiveUDPDisabled() = %v, want %v", got, tc.want)
++			}
++		})
 +	}
 +}
 +
