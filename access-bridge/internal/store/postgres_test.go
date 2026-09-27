@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -31,12 +32,16 @@ func testDatabase(t *testing.T) (*sql.DB, string) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var name string
-	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&name); err != nil {
+	var name, role, address string
+	var port int
+	if err := db.QueryRowContext(ctx,
+		"SELECT current_database(), current_user, host(inet_server_addr()), inet_server_port()",
+	).Scan(&name, &role, &address, &port); err != nil {
 		t.Fatal("could not verify dedicated test database")
 	}
-	if name != "apollo_rga_bridge_test" {
-		t.Fatal("refusing schema writes outside dedicated test database")
+	serverIP := net.ParseIP(address)
+	if name != "apollo_rga_bridge_test" || role != "bridge_test" || port <= 0 || serverIP == nil || !serverIP.IsLoopback() {
+		t.Fatal("refusing schema writes outside dedicated local test database and role")
 	}
 	return db, dsn
 }

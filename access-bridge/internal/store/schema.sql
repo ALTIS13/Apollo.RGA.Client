@@ -32,3 +32,18 @@ CREATE TABLE IF NOT EXISTS bridge_link_challenges (
 -- migration-step
 CREATE INDEX IF NOT EXISTS bridge_link_challenges_expiry_idx
     ON bridge_link_challenges (expires_at);
+
+-- migration-step
+CREATE TABLE IF NOT EXISTS bridge_meter_sessions (
+    session_id VARCHAR(128) PRIMARY KEY,
+    panel_instance VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+    client_to_exit_bytes BIGINT NOT NULL DEFAULT 0 CHECK (client_to_exit_bytes >= 0),
+    exit_to_client_bytes BIGINT NOT NULL DEFAULT 0 CHECK (exit_to_client_bytes >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (panel_instance, user_id)
+        REFERENCES bridge_subjects (panel_instance, user_id)
+        ON DELETE RESTRICT
+);
