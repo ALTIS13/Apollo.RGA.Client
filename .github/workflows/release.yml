@@ -807,7 +807,10 @@ jobs:
 
   build-android:
     needs: [release_version, plan, gate]
-    if: needs.plan.outputs.android == 'true'
+    # This fork is Apollo.RGA. The legacy Android job can create an ephemeral
+    # certificate and a Ghostlane/Play artifact; it is never a valid RGA build.
+    # Use apollo-rga-android.yml after assigning the owned CI repository.
+    if: ${{ needs.plan.outputs.android == 'true' && github.repository == 'UNASSIGNED_LEGACY_RELEASE_REPOSITORY' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1569,17 +1572,17 @@ jobs:
       - build-linux
       - build-android
       - build-ios
-    # Only a full build publishes. A partial run would otherwise replace the nightly
-    # release with whichever platforms happened to be selected, silently dropping the
-    # rest. Skipped builds must not block this, hence the explicit failure check
-    # instead of relying on `needs` alone.
+    # This fork's legacy Android build is disabled above. Require an actual
+    # successful Android job before any old "all" run can publish a release
+    # whose notes claim Android APK/AAB assets exist. In this fork that keeps
+    # legacy nightly publishing closed; Apollo.RGA candidates use their own lane.
     #
     # And only a gated one. A red gate leaves every build SKIPPED rather than
     # failed, which the failure check alone would let through: this job would
     # publish a v1.0.N holding nothing but the gate's report and then delete and
     # recreate the rolling nightly the same way. Hence the gate's own result. A
     # gate skipped by request (gate: skip) passes, with a report that says so.
-    if: ${{ needs.plan.outputs.publish == 'true' && needs.gate.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ needs.plan.outputs.publish == 'true' && needs.gate.result == 'success' && needs.build-android.result == 'success' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     concurrency:
       group: publish-${{ github.repository }}-${{ needs.release_version.outputs.nightly_tag }}
       cancel-in-progress: false

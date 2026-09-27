@@ -15,15 +15,18 @@ plugins {
 
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
+val externalReleaseSigning = providers.gradleProperty("apollo.rga.externalSigning")
+    .map { it.toBooleanStrict() }
+    .getOrElse(false)
 
-if (keystorePropertiesFile.exists()) {
+if (!externalReleaseSigning && keystorePropertiesFile.exists()) {
     FileInputStream(keystorePropertiesFile).use { input ->
         keystoreProperties.load(input)
     }
 }
 
 val hasReleaseKeystore =
-    keystorePropertiesFile.exists() &&
+    !externalReleaseSigning && keystorePropertiesFile.exists() &&
         listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
             .all { key -> !keystoreProperties.getProperty(key).isNullOrBlank() }
 val olcboxVersion = providers.gradleProperty("olcbox.version").orElse("1.0.0")
