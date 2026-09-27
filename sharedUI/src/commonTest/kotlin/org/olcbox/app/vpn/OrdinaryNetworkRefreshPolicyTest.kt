@@ -14,6 +14,22 @@ class OrdinaryNetworkRefreshPolicyTest {
         ))
     }
 
+    @Test fun repeatedCellularFactsDoNotRestartAnAlreadyConnectedTransport() {
+        assertEquals(NetworkRefreshDecision.Keep, OrdinaryNetworkRefreshPolicy.decide(
+            eventIsSelected = true, sameNetwork = true,
+            previousTransport = UpstreamTransport.Cellular, nextTransport = UpstreamTransport.Cellular,
+            previousDns = oldDns, nextDns = oldDns.toList(), status = VpnStatus.Connected
+        ))
+    }
+
+    @Test fun initialOfflineStartRecoversWhenCompleteNetworkFactsArrive() {
+        assertEquals(NetworkRefreshDecision.Recover, OrdinaryNetworkRefreshPolicy.decide(
+            eventIsSelected = true, sameNetwork = false,
+            previousTransport = null, nextTransport = UpstreamTransport.Cellular,
+            previousDns = null, nextDns = oldDns, status = VpnStatus.Reconnecting
+        ))
+    }
+
     @Test fun changedWifiDnsOrPhysicalNetworkRequiresRecovery() {
         assertEquals(NetworkRefreshDecision.Recover, OrdinaryNetworkRefreshPolicy.decide(
             eventIsSelected = true, sameNetwork = true,

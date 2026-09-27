@@ -177,8 +177,17 @@ class OlcboxVpnService : VpnService() {
     private var physicalNetworkSnapshots: AndroidPhysicalNetworkSnapshots? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastConnectedOrdinaryNetwork: Network? = null
+    private var lastConnectedOrdinaryNetworkId: Long? = null
     private var lastConnectedOrdinaryTransport: UpstreamTransport? = null
     private var lastConnectedOrdinaryDns: List<String>? = null
+    private data class OrdinaryRoutingFacts(
+        val generation: Long,
+        val network: Network,
+        val networkId: Long?,
+        val transport: UpstreamTransport?,
+        val dnsServers: List<String>
+    )
+    private var ordinaryRoutingFacts: OrdinaryRoutingFacts? = null
     private var connectionMode = AndroidConnectionMode.Tun
     private var socksListenHost = AndroidSocksProxySettings.DEFAULT_HOST
     private var socksListenPort = AndroidSocksProxySettings.DEFAULT_PORT
@@ -304,7 +313,8 @@ class OlcboxVpnService : VpnService() {
         }
         val decision = OrdinaryNetworkRefreshPolicy.decide(
             eventIsSelected = true,
-            sameNetwork = upstream == lastConnectedOrdinaryNetwork,
+            sameNetwork = upstream == lastConnectedOrdinaryNetwork &&
+                (lastConnectedOrdinaryNetworkId == null || snapshot.networkId == lastConnectedOrdinaryNetworkId),
             previousTransport = lastConnectedOrdinaryTransport,
             nextTransport = snapshot.transport,
             previousDns = lastConnectedOrdinaryDns,
@@ -606,7 +616,10 @@ class OlcboxVpnService : VpnService() {
                 )
                 return
             }
-            markVerifiedOrdinaryNetwork(upstream, location)
+            if (!markVerifiedOrdinaryNetwork(upstream, location)) {
+                retryAfterVerifiedNetworkChange(requestedGeneration)
+                return
+            }
             setStatus(VpnStatus.Connected)
             resetRecoveryState()
             updateNotification(connectedNotificationText())
@@ -639,9 +652,7 @@ class OlcboxVpnService : VpnService() {
             addLog("No upstream network")
             setStatus(VpnStatus.Reconnecting)
             updateNotification("Waiting for network...")
-            if (isMigration) {
-                scheduleTransportRetry(requestedGeneration, "no upstream network", NETWORK_RETRY_BASE_DELAY_MS)
-            }
+            scheduleTransportRetry(requestedGeneration, "no upstream network", NETWORK_RETRY_BASE_DELAY_MS)
             return
         }
         updateUnderlyingNetwork(upstream)
@@ -670,7 +681,10 @@ class OlcboxVpnService : VpnService() {
                 failUnverifiedTunnel("Proxy mode", isMigration, requestedGeneration)
                 return
             }
-            markVerifiedOrdinaryNetwork(upstream, location)
+            if (!markVerifiedOrdinaryNetwork(upstream, location)) {
+                retryAfterVerifiedNetworkChange(requestedGeneration)
+                return
+            }
             setStatus(VpnStatus.Connected)
             resetRecoveryState()
             updateNotification(connectedNotificationText())
@@ -721,7 +735,10 @@ class OlcboxVpnService : VpnService() {
             return
         }
 
-        markVerifiedOrdinaryNetwork(upstream, location)
+        if (!markVerifiedOrdinaryNetwork(upstream, location)) {
+            retryAfterVerifiedNetworkChange(requestedGeneration)
+            return
+        }
         setStatus(VpnStatus.Connected)
         resetRecoveryState()
         updateNotification(connectedNotificationText())
@@ -800,7 +817,7 @@ class OlcboxVpnService : VpnService() {
         // is applied by a separate local front, not by rewriting that graph.
         if (location.xrayConfig != null) {
             val routing = try {
-                routingFor(upstream)
+                routingFor(upstream, location.kind)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -817,7 +834,7 @@ class OlcboxVpnService : VpnService() {
             }
             return startCore(location, setErrorOnFailure, routing, reuseBridge)
         }
-        val routing = routingFor(upstream)
+        val routing = routingFor(upstream, location.kind)
         return if (location.kind == LocationKind.Olcrtc) {
             activeCorePort = null
             activeCoreLogin = null
@@ -1414,7 +1431,8 @@ class OlcboxVpnService : VpnService() {
                     val decision = snapshot?.let {
                         OrdinaryNetworkRefreshPolicy.decide(
                             eventIsSelected = true,
-                            sameNetwork = upstream == lastConnectedOrdinaryNetwork,
+                            sameNetwork = upstream == lastConnectedOrdinaryNetwork &&
+                                (lastConnectedOrdinaryNetworkId == null || it.networkId == lastConnectedOrdinaryNetworkId),
                             previousTransport = lastConnectedOrdinaryTransport,
                             nextTransport = it.transport,
                             previousDns = lastConnectedOrdinaryDns,
@@ -1501,8 +1519,10 @@ class OlcboxVpnService : VpnService() {
 
         unregisterNetworkMonitor()
         lastConnectedOrdinaryNetwork = null
+        lastConnectedOrdinaryNetworkId = null
         lastConnectedOrdinaryTransport = null
         lastConnectedOrdinaryDns = null
+        ordinaryRoutingFacts = null
         stopAuthenticatedSocksProxy()
         updateUnderlyingNetwork(null)
         unbindProcessFromNetwork()
@@ -1958,13 +1978,44 @@ class OlcboxVpnService : VpnService() {
         networkCallback = null
     }
 
-    private fun markVerifiedOrdinaryNetwork(upstream: Network, location: LocationConfig) {
-        if (location.kind == LocationKind.Olcrtc) return
-        lastConnectedOrdinaryNetwork = upstream
-        lastConnectedOrdinaryTransport = physicalNetworkSnapshots?.current(upstream)?.transport
+    /** Records the exact DNS list passed to the direct-routing front, not a later callback value. */
+    private fun captureOrdinaryRoutingFacts(
+        upstream: Network,
+        networkId: Long?,
+        transport: UpstreamTransport?,
+        directDnsAddresses: List<String>
+    ) {
+        ordinaryRoutingFacts = OrdinaryRoutingFacts(generation, upstream, networkId, transport, directDnsAddresses.toList())
+    }
+
+    private fun markVerifiedOrdinaryNetwork(upstream: Network, location: LocationConfig): Boolean {
+        if (location.kind == LocationKind.Olcrtc) return true
+        val applied = ordinaryRoutingFacts?.takeIf { it.generation == generation && it.network == upstream }
+        ordinaryRoutingFacts = null
+        val latest = physicalNetworkSnapshots?.current(upstream)
+        val transport = applied?.transport
+            ?: latest?.transport
             ?: upstream.transportOrNull()
-        lastConnectedOrdinaryDns = (physicalNetworkSnapshots?.current(upstream)?.dnsServers
+        val dns = applied?.dnsServers
+            ?: (latest?.dnsServers
             ?.takeIf { it.isNotEmpty() } ?: upstreamDnsAddresses(upstream).takeIf { it.isNotEmpty() })?.toList()
+        val latestDns = latest?.dnsServers
+        if (findActiveUpstreamNetwork() != upstream ||
+            (applied?.networkId != null && latest?.networkId != null && applied.networkId != latest.networkId) ||
+            (latest?.transport != null && latest.transport != transport) ||
+            (!latestDns.isNullOrEmpty() && latestDns != dns)
+        ) return false
+        lastConnectedOrdinaryNetwork = upstream
+        lastConnectedOrdinaryNetworkId = applied?.networkId ?: latest?.networkId
+        lastConnectedOrdinaryTransport = transport
+        lastConnectedOrdinaryDns = dns
+        return true
+    }
+
+    private fun retryAfterVerifiedNetworkChange(requestedGeneration: Long) {
+        setStatus(VpnStatus.Reconnecting)
+        updateNotification("Reconnecting...")
+        scheduleTransportRetry(requestedGeneration, "network changed during verification", NETWORK_RETRY_BASE_DELAY_MS)
     }
 
     private fun findActiveUpstreamNetwork(): Network? {
@@ -2032,10 +2083,20 @@ class OlcboxVpnService : VpnService() {
      * network's resolvers for direct names. Files are rewritten on every start —
      * 59 KB, and the alternative is a version check that can be wrong.
      */
-    private suspend fun routingFor(upstream: Network?): Routing {
+    internal suspend fun routingFor(upstream: Network, kind: LocationKind): Routing {
         // Android itself blocks IPv6 at the VpnService boundary.
         // Global with no rules of the user's writes no rule files and hands the
         // engine no rules.
+        val directDnsAddresses = upstreamDnsAddresses(upstream)
+        if (kind != LocationKind.Olcrtc) {
+            val snapshot = physicalNetworkSnapshots?.current(upstream)
+            captureOrdinaryRoutingFacts(
+                upstream,
+                snapshot?.networkId,
+                snapshot?.transport ?: upstream.transportOrNull(),
+                directDnsAddresses
+            )
+        }
         if (!routingSettings.needsRules) return Routing.Global
 
         val dir = File(filesDir, RULE_SETS_DIR).apply { mkdirs() }
@@ -2045,7 +2106,7 @@ class OlcboxVpnService : VpnService() {
             // preserves captive portals, private DNS and carrier-specific RU
             // answers. DirectDns.Servers supplies the public fallback only
             // when Android reports no usable resolver.
-            directDns = DirectDns.Servers(upstreamDnsAddresses(upstream))
+            directDns = DirectDns.Servers(directDnsAddresses)
         )
         for (file in RuleSets.selected(routing)) File(dir, file.name).writeBytes(RuleSets.bytes(file))
         val own = routing.custom.direct.size + routing.custom.tunnel.size

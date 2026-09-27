@@ -17,11 +17,15 @@ internal object OrdinaryNetworkRefreshPolicy {
         if (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) {
             return NetworkRefreshDecision.Ignore
         }
-        if (nextTransport == null || nextDns.isNullOrEmpty() || previousDns.isNullOrEmpty()) {
+        if (nextTransport == null || nextDns.isNullOrEmpty()) {
             return NetworkRefreshDecision.AwaitFacts
         }
+        if (previousDns.isNullOrEmpty()) {
+            return if (status is VpnStatus.Reconnecting) NetworkRefreshDecision.Recover
+            else NetworkRefreshDecision.AwaitFacts
+        }
         if (status is VpnStatus.Connected && sameNetwork &&
-            previousTransport == UpstreamTransport.Wifi && nextTransport == UpstreamTransport.Wifi &&
+            previousTransport == nextTransport &&
             previousDns == nextDns
         ) return NetworkRefreshDecision.Keep
         return NetworkRefreshDecision.Recover
