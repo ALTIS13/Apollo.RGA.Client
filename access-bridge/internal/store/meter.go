@@ -9,12 +9,13 @@ import (
 )
 
 var (
-	ErrMeterInvalid         = errors.New("store: invalid meter input")
-	ErrMeterSessionUnknown  = errors.New("store: meter session unknown")
-	ErrMeterSessionConflict = errors.New("store: meter session conflict")
-	ErrMeterStale           = errors.New("store: stale meter report")
-	ErrMeterRegression      = errors.New("store: regressed meter counter")
-	ErrMeterConflict        = errors.New("store: conflicting meter report")
+	ErrMeterInvalid             = errors.New("store: invalid meter input")
+	ErrMeterSessionUnknown      = errors.New("store: meter session unknown")
+	ErrMeterSessionConflict     = errors.New("store: meter session conflict")
+	ErrMeterStale               = errors.New("store: stale meter report")
+	ErrMeterRegression          = errors.New("store: regressed meter counter")
+	ErrMeterConflict            = errors.New("store: conflicting meter report")
+	ErrMeterRegistrationBlocked = errors.New("store: legacy meter registration blocked")
 )
 
 type MeterReport struct {
@@ -41,13 +42,27 @@ func (s *Store) RegisterMeterSession(ctx context.Context, subject access.Subject
 	defer tx.Rollback()
 	var exists int
 	err = tx.QueryRowContext(ctx,
-		`SELECT 1 FROM bridge_subjects WHERE panel_instance=$1 AND user_id=$2 FOR KEY SHARE`,
+		`SELECT 1 FROM bridge_subjects WHERE panel_instance=$1 AND user_id=$2 FOR UPDATE`,
 		subject.PanelInstance, subject.UserID,
 	).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
+		return ErrUnavailable
+	}
+	// ReserveLease takes the same subject lock before creating a cycle.
+	// Existing un-attributed sessions block that transition; once a cycle
+	// exists, this legacy entry point cannot create another one.
+	var cycleExists int
+	err = tx.QueryRowContext(ctx,
+		`SELECT 1 FROM bridge_budget_cycles WHERE panel_instance=$1 AND user_id=$2 LIMIT 1`,
+		subject.PanelInstance, subject.UserID,
+	).Scan(&cycleExists)
+	if err == nil {
+		return ErrMeterRegistrationBlocked
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return ErrUnavailable
 	}
 	_, err = tx.ExecContext(ctx,

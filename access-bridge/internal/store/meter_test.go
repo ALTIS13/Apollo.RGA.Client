@@ -113,6 +113,22 @@ func TestMeterRegistrationDatabaseOutageIsRedacted(t *testing.T) {
 	}
 }
 
+func TestMeterRegistrationBlockedAfterCycleActivation(t *testing.T) {
+	s, db, _, req, evidence, limits := reservationFixture(t)
+	ctx := context.Background()
+	if _, err := s.ReserveLease(ctx, req, evidence, limits); err != nil {
+		t.Fatalf("ReserveLease: %v", err)
+	}
+	legacyID := testMeterSessionID(t)
+	if err := s.RegisterMeterSession(ctx, req.Subject, legacyID); err == nil {
+		t.Fatal("legacy registration created an unattributed session after cycle activation")
+	}
+	var rows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bridge_meter_sessions WHERE session_id=$1`, legacyID).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("blocked registration left a meter row: %d, %v", rows, err)
+	}
+}
+
 func TestMeterRowConstraintsProtectCommittedBytesAndHistory(t *testing.T) {
 	s, db, _ := migratedStore(t)
 	ctx := context.Background()

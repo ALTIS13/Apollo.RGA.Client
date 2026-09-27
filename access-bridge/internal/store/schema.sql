@@ -47,3 +47,49 @@ CREATE TABLE IF NOT EXISTS bridge_meter_sessions (
         REFERENCES bridge_subjects (panel_instance, user_id)
         ON DELETE RESTRICT
 );
+
+-- migration-step
+CREATE TABLE IF NOT EXISTS bridge_budget_cycles (
+    panel_instance VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    cycle_id VARCHAR(128) NOT NULL CHECK (cycle_id <> ''),
+    cycle_start TIMESTAMPTZ NOT NULL,
+    cycle_end TIMESTAMPTZ NOT NULL,
+    total_limit_bytes BIGINT NOT NULL CHECK (total_limit_bytes > 0),
+    confirmed_xray_bytes BIGINT NOT NULL CHECK (confirmed_xray_bytes >= 0),
+    xray_observed_at TIMESTAMPTZ NOT NULL,
+    committed_olcrtc_bytes BIGINT NOT NULL DEFAULT 0 CHECK (committed_olcrtc_bytes >= 0),
+    held_bytes BIGINT NOT NULL DEFAULT 0 CHECK (held_bytes >= 0),
+    overdrawn BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (panel_instance, user_id, cycle_id),
+    CHECK (cycle_end > cycle_start),
+    FOREIGN KEY (panel_instance, user_id)
+        REFERENCES bridge_subjects (panel_instance, user_id)
+        ON DELETE RESTRICT
+);
+
+-- migration-step
+CREATE TABLE IF NOT EXISTS bridge_budget_leases (
+    jti VARCHAR(128) PRIMARY KEY,
+    session_id VARCHAR(128) NOT NULL UNIQUE,
+    panel_instance VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    cycle_id VARCHAR(128) NOT NULL,
+    installation_id VARCHAR(128) NOT NULL,
+    room_id VARCHAR(128) NOT NULL CHECK (room_id <> ''),
+    country CHAR(2) NOT NULL CHECK (country ~ '^[A-Z]{2}$'),
+    policy_revision BIGINT NOT NULL CHECK (policy_revision > 0),
+    byte_limit BIGINT NOT NULL CHECK (byte_limit > 0),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (panel_instance, user_id, cycle_id)
+        REFERENCES bridge_budget_cycles (panel_instance, user_id, cycle_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (session_id)
+        REFERENCES bridge_meter_sessions (session_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (installation_id)
+        REFERENCES bridge_installations (installation_id)
+        ON DELETE RESTRICT
+);
