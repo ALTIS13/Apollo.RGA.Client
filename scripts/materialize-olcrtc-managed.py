@@ -64,6 +64,18 @@ def load_manifest(script_dir: Path) -> tuple[str, Path]:
     return base_sha, patch_path
 
 
+def check_authoritative_engine_pin(script_dir: Path, base_sha: str) -> None:
+    try:
+        pins = (script_dir / "cores-pins.sh").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise MaterializeError("authoritative engine pin is unavailable") from exc
+    defaults = re.findall(r'^OLCRTC_VERSION="\$\{OLCRTC_VERSION:-(v\d+\.\d+\.\d+-\d{14}-[0-9a-f]{12})\}"$', pins, re.MULTILINE)
+    if len(defaults) != 1:
+        raise MaterializeError("authoritative engine pin is unavailable")
+    if not base_sha.startswith(defaults[0].rsplit("-", 1)[1]):
+        raise MaterializeError("engine pin does not match patch base")
+
+
 def check_source(source: Path, base_sha: str) -> None:
     head = require_git(source, "rev-parse", "--verify", "HEAD").decode("ascii", "replace").strip()
     if head != base_sha:
@@ -98,6 +110,7 @@ def materialize(source_arg: str, output_arg: str, script_dir: Path) -> None:
         raise MaterializeError("output parent is not a directory")
 
     base_sha, patch_path = load_manifest(script_dir)
+    check_authoritative_engine_pin(script_dir, base_sha)
     check_source(source, base_sha)
 
     stage: Path | None = None

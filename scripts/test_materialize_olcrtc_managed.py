@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -80,6 +81,7 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         (scripts / "patches").mkdir(parents=True)
         copied_script = scripts / MATERIALIZER.name
         shutil.copy2(MATERIALIZER, copied_script)
+        shutil.copy2(SCRIPTS / "cores-pins.sh", scripts / "cores-pins.sh")
         manifest = json.loads((SCRIPTS / "olcrtc-managed-patch.json").read_text(encoding="utf-8"))
         (scripts / "olcrtc-managed-patch.json").write_text(json.dumps(manifest), encoding="utf-8")
         patch = SCRIPTS / manifest["patch_path"]
@@ -92,6 +94,51 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("patch digest does not match", result.stderr)
         self.assertFalse(output.exists())
+
+    def test_rejects_authoritative_engine_pin_drift_before_output(self) -> None:
+        scripts = self.root / "scripts-pin-drift"
+        (scripts / "patches").mkdir(parents=True)
+        copied_script = scripts / MATERIALIZER.name
+        shutil.copy2(MATERIALIZER, copied_script)
+        shutil.copy2(SCRIPTS / "olcrtc-managed-patch.json", scripts / "olcrtc-managed-patch.json")
+        manifest = json.loads((scripts / "olcrtc-managed-patch.json").read_text(encoding="utf-8"))
+        shutil.copy2(SCRIPTS / manifest["patch_path"], scripts / manifest["patch_path"])
+        pins = (SCRIPTS / "cores-pins.sh").read_text(encoding="utf-8")
+        self.assertIn(BASE_SHA[:12], pins)
+        (scripts / "cores-pins.sh").write_text(
+            pins.replace(BASE_SHA[:12], "111111111111"), encoding="utf-8"
+        )
+        output = self.root / "pin-drift-output"
+        result = self.materialize(self.source, output, copied_script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("engine pin does not match patch base", result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_digest_pinned_patch_survives_fresh_autocrlf_checkout(self) -> None:
+        repository = self.root / "autocrlf-source"
+        target = repository / "scripts" / "patches"
+        target.mkdir(parents=True)
+        manifest = json.loads((SCRIPTS / "olcrtc-managed-patch.json").read_text(encoding="utf-8"))
+        patch = SCRIPTS / manifest["patch_path"]
+        shutil.copy2(patch, target / patch.name)
+        attributes = REPO / ".gitattributes"
+        if attributes.exists():
+            shutil.copy2(attributes, repository / ".gitattributes")
+        self.assertEqual(run("git", "init", "--quiet", str(repository)).returncode, 0)
+        self.assertEqual(run("git", "-C", str(repository), "add", ".").returncode, 0)
+        committed = run(
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "eol test"
+        )
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        checked_out = self.root / "autocrlf-checkout"
+        cloned = run(
+            "git", "-c", "core.autocrlf=true", "clone", "--quiet", "--local",
+            "--no-hardlinks", str(repository), str(checked_out)
+        )
+        self.assertEqual(cloned.returncode, 0, cloned.stderr)
+        actual = hashlib.sha256((checked_out / "scripts" / "patches" / patch.name).read_bytes()).hexdigest()
+        self.assertEqual(actual, manifest["patch_sha256"])
 
     def test_existing_output_remains_untouched(self) -> None:
         output = self.root / "existing-output"
@@ -113,6 +160,21 @@ class ManagedPatchCarrierTests(unittest.TestCase):
             os.symlink(target, output, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("creating a symlink is not permitted on this host")
+        result = self.materialize(self.source, output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output already exists", result.stderr)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+
+    @unittest.skipUnless(os.name == "nt", "junctions are Windows-only")
+    def test_junction_output_remains_untouched(self) -> None:
+        target = self.root / "junction-target"
+        target.mkdir()
+        marker = target / "keep.txt"
+        marker.write_text("untouched", encoding="utf-8")
+        output = self.root / "output-junction"
+        linked = run("cmd", "/c", "mklink", "/J", str(output), str(target))
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        self.assertTrue(os.path.isjunction(output))
         result = self.materialize(self.source, output)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("output already exists", result.stderr)
