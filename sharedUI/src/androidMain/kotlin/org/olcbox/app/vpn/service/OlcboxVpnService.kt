@@ -30,6 +30,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.LinkProperties
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
@@ -63,8 +64,11 @@ import org.olcbox.app.data.model.RoutingMode
 import org.olcbox.app.net.UpstreamDns
 import org.olcbox.app.data.repository.LocationsRepository
 import org.olcbox.app.net.AndroidSingBoxController
+import org.olcbox.app.net.AndroidPhysicalNetworkSnapshots
 import org.olcbox.app.net.AndroidXrayController
 import org.olcbox.app.net.DirectDns
+import org.olcbox.app.net.PhysicalNetworkSnapshot
+import org.olcbox.app.net.PhysicalNetworkSnapshotLedger
 import org.olcbox.app.net.ExactXrayChainPlan
 import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.LocationKind
@@ -92,6 +96,8 @@ import org.olcbox.app.vpn.AndroidOlcRtcRuntimeProvider
 import org.olcbox.app.vpn.UpstreamCandidate
 import org.olcbox.app.vpn.UpstreamNetworkSelector
 import org.olcbox.app.vpn.UpstreamTransport
+import org.olcbox.app.vpn.NetworkRefreshDecision
+import org.olcbox.app.vpn.OrdinaryNetworkRefreshPolicy
 import org.olcbox.app.vpn.VpnStatus
 import org.olcbox.app.vpn.data.KEY_ANDROID_CONNECTION_MODE
 import org.olcbox.app.vpn.data.KEY_ANDROID_SPLIT_TUNNEL_BYPASS_APPS
@@ -167,8 +173,12 @@ class OlcboxVpnService : VpnService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var connectivityManager: ConnectivityManager
     private var currentNetwork: Network? = null
-    private var currentNetworkTransport: UpstreamTransport? = null
-    private var isCallbackRegistered = false
+    private val physicalNetworkLedger = PhysicalNetworkSnapshotLedger()
+    private var physicalNetworkSnapshots: AndroidPhysicalNetworkSnapshots? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastConnectedOrdinaryNetwork: Network? = null
+    private var lastConnectedOrdinaryTransport: UpstreamTransport? = null
+    private var lastConnectedOrdinaryDns: List<String>? = null
     private var connectionMode = AndroidConnectionMode.Tun
     private var socksListenHost = AndroidSocksProxySettings.DEFAULT_HOST
     private var socksListenPort = AndroidSocksProxySettings.DEFAULT_PORT
@@ -220,112 +230,95 @@ class OlcboxVpnService : VpnService() {
         val rxBytes: Long
     )
 
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+    private fun createNetworkCallback(
+        registrationGeneration: Long,
+        snapshots: AndroidPhysicalNetworkSnapshots
+    ): ConnectivityManager.NetworkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            handleNetworkChange(network, "Available")
-        }
-
-        override fun onLost(network: Network) {
-            addLog("Network lost")
-            if (network != currentNetwork) return
-
-            networkLossJob?.cancel()
-            networkLossJob = scope.launch {
-                delay(NETWORK_LOSS_GRACE_MS)
-                if (network != currentNetwork) return@launch
-
-                val upstream = findActiveUpstreamNetwork()
-                if (upstream != null) {
-                    handleNetworkChange(upstream, "Fallback")
-                    return@launch
-                }
-
-                if (OlcboxVpnState.status.value is VpnStatus.Connected ||
-                    OlcboxVpnState.status.value is VpnStatus.Reconnecting
-                ) {
-                    updateUnderlyingNetwork(null)
-                    unbindProcessFromNetwork()
-                    setStatus(VpnStatus.Reconnecting)
-                    updateNotification("Waiting for network...")
-                    addLog("Waiting for upstream network")
-                }
-            }
+            queueNetworkChange(network, snapshots.onAvailable(network), "Available")
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            if (network == currentNetwork || caps.isUsableUpstream()) {
-                handleNetworkChange(network, "Capabilities")
+            queueNetworkChange(network, snapshots.onCapabilitiesChanged(network, caps), "Capabilities")
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            queueNetworkChange(network, snapshots.onLinkPropertiesChanged(network, linkProperties), "Link properties")
+        }
+
+        override fun onLost(network: Network) {
+            snapshots.onLost(network)
+            scope.launch {
+                tunnelMutex.withLock outer@ {
+                    if (registrationGeneration != generation || network != currentNetwork) return@outer
+                    networkLossJob?.cancel()
+                    networkLossJob = scope.launch {
+                        delay(NETWORK_LOSS_GRACE_MS)
+                        tunnelMutex.withLock inner@ {
+                            if (registrationGeneration != generation || network != currentNetwork) return@inner
+                            val upstream = findActiveUpstreamNetwork()
+                            val fallback = upstream?.let(snapshots::current)
+                            if (upstream != null && fallback != null && snapshots.networkFor(fallback) != null) {
+                                if (denyConnectedSubscriptionIfNeeded()) return@inner
+                                networkLossJob = null
+                                handleAllowedNetworkChange(upstream, fallback, "Fallback")
+                            } else if (OlcboxVpnState.status.value is VpnStatus.Connected ||
+                                OlcboxVpnState.status.value is VpnStatus.Reconnecting
+                            ) {
+                                updateUnderlyingNetwork(null)
+                                unbindProcessFromNetwork()
+                                setStatus(VpnStatus.Reconnecting)
+                                updateNotification("Waiting for network...")
+                                addLog("Waiting for upstream network")
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        private fun handleNetworkChange(network: Network, reason: String) {
+        private fun queueNetworkChange(network: Network, snapshot: PhysicalNetworkSnapshot?, reason: String) {
+            if (snapshot == null) return
             scope.launch {
                 tunnelMutex.withLock {
+                    if (registrationGeneration != generation ||
+                        snapshots.current(network) != snapshot || snapshots.networkFor(snapshot) == null
+                    ) return@withLock
                     if (denyConnectedSubscriptionIfNeeded()) return@withLock
-                    handleAllowedNetworkChange(network, reason)
+                    handleAllowedNetworkChange(network, snapshot, reason)
                 }
             }
         }
+    }
 
-        private fun handleAllowedNetworkChange(network: Network, reason: String) {
-            val caps = connectivityManager.getNetworkCapabilities(network) ?: return
-            if (!caps.isUsableUpstream()) return
-            networkLossJob?.cancel()
-
-            val upstream = findActiveUpstreamNetwork() ?: return
-            if (currentNetwork == upstream) {
-                if (OlcboxVpnState.status.value is VpnStatus.Reconnecting &&
-                    startupJob?.isActive != true
-                ) {
-                    addLog("Network $reason: ${getNetName(upstream)}")
-                    requestTransportRecovery(
-                        reason = "Network available",
-                        fullRestart = false,
-                        delayMs = NETWORK_STABILITY_GRACE_MS
-                    )
-                }
-                return
+    private fun handleAllowedNetworkChange(network: Network, snapshot: PhysicalNetworkSnapshot, reason: String) {
+        val upstream = findActiveUpstreamNetwork() ?: return
+        if (network != upstream || !snapshot.usable) return
+        if (OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc) {
+            if (currentNetwork != upstream && recoveryJob?.isActive != true) {
+                updateUnderlyingNetwork(upstream)
+                requestTransportRecovery("Upstream network changed", fullRestart = false,
+                    delayMs = NETWORK_STABILITY_GRACE_MS)
             }
-
-            val previousTransport = currentNetworkTransport
-            val nextTransport = upstream.transportOrNull()
-            updateUnderlyingNetwork(upstream)
-            addLog("Network $reason: ${getNetName(upstream)}")
-
-            when (OlcboxVpnState.status.value) {
-                is VpnStatus.Connected -> {
-                    if (isBenignWifiRefresh(previousTransport, nextTransport)) {
-                        addLog("Keeping transport on refreshed Wi-Fi network")
-                    } else {
-                        requestTransportRecovery(
-                            reason = "Upstream network changed",
-                            fullRestart = false,
-                            delayMs = NETWORK_STABILITY_GRACE_MS,
-                            setReconnectingImmediately = false
-                        )
-                    }
-                }
-
-                is VpnStatus.Reconnecting -> {
-                    if (isBenignWifiRefresh(previousTransport, nextTransport) &&
-                        isActiveTransportRunning() &&
-                        canReconnectTransportInPlace()
-                    ) {
-                        setStatus(VpnStatus.Connected)
-                        updateNotification(connectedNotificationText())
-                        startWatchdog()
-                    } else {
-                        requestTransportRecovery(
-                            reason = "Upstream network changed",
-                            fullRestart = false,
-                            delayMs = NETWORK_STABILITY_GRACE_MS
-                        )
-                    }
-                }
-
-                else -> Unit
-            }
+            return
         }
+        val decision = OrdinaryNetworkRefreshPolicy.decide(
+            eventIsSelected = true,
+            sameNetwork = upstream == lastConnectedOrdinaryNetwork,
+            previousTransport = lastConnectedOrdinaryTransport,
+            nextTransport = snapshot.transport,
+            previousDns = lastConnectedOrdinaryDns,
+            nextDns = snapshot.dnsServers,
+            status = OlcboxVpnState.status.value
+        )
+        if (decision == NetworkRefreshDecision.AwaitFacts || decision == NetworkRefreshDecision.Ignore) return
+        networkLossJob?.cancel()
+        if (currentNetwork != upstream) updateUnderlyingNetwork(upstream)
+        if (decision == NetworkRefreshDecision.Keep) return
+        if (recoveryJob?.isActive == true || startupJob?.isActive == true) return
+        addLog("Network $reason: recovering selected transport")
+        requestTransportRecovery("Upstream network changed", fullRestart = false,
+            delayMs = NETWORK_STABILITY_GRACE_MS)
     }
 
     override fun onCreate() {
@@ -524,8 +517,9 @@ class OlcboxVpnService : VpnService() {
                     }
                 }
 
+                if (requestedGeneration != generation) return@launch
+                registerNetworkMonitor(requestedGeneration)
                 if (!isMigration) {
-                    registerNetworkMonitor()
                     updateUnderlyingNetwork(findActiveUpstreamNetwork())
                 }
 
@@ -612,6 +606,7 @@ class OlcboxVpnService : VpnService() {
                 )
                 return
             }
+            markVerifiedOrdinaryNetwork(upstream, location)
             setStatus(VpnStatus.Connected)
             resetRecoveryState()
             updateNotification(connectedNotificationText())
@@ -675,6 +670,7 @@ class OlcboxVpnService : VpnService() {
                 failUnverifiedTunnel("Proxy mode", isMigration, requestedGeneration)
                 return
             }
+            markVerifiedOrdinaryNetwork(upstream, location)
             setStatus(VpnStatus.Connected)
             resetRecoveryState()
             updateNotification(connectedNotificationText())
@@ -725,6 +721,7 @@ class OlcboxVpnService : VpnService() {
             return
         }
 
+        markVerifiedOrdinaryNetwork(upstream, location)
         setStatus(VpnStatus.Connected)
         resetRecoveryState()
         updateNotification(connectedNotificationText())
@@ -1408,15 +1405,28 @@ class OlcboxVpnService : VpnService() {
                     return@launch
                 }
 
-                if (currentNetwork != upstream) {
-                    val previousTransport = currentNetworkTransport
-                    val nextTransport = upstream.transportOrNull()
-                    updateUnderlyingNetwork(upstream)
-                    if (isBenignWifiRefresh(previousTransport, nextTransport)) {
-                        addLog("Watchdog: refreshed Wi-Fi upstream")
-                        continue
+                val snapshot = physicalNetworkSnapshots?.current(upstream)
+                val networkChanged = currentNetwork != upstream
+                val dnsChanged = snapshot?.dnsServers?.let { dns ->
+                    lastConnectedOrdinaryDns?.let { it != dns }
+                } == true
+                if (networkChanged || dnsChanged) {
+                    val decision = snapshot?.let {
+                        OrdinaryNetworkRefreshPolicy.decide(
+                            eventIsSelected = true,
+                            sameNetwork = upstream == lastConnectedOrdinaryNetwork,
+                            previousTransport = lastConnectedOrdinaryTransport,
+                            nextTransport = it.transport,
+                            previousDns = lastConnectedOrdinaryDns,
+                            nextDns = it.dnsServers,
+                            status = OlcboxVpnState.status.value
+                        )
                     }
-                    addLog("Watchdog: upstream changed to ${getNetName(upstream)}")
+                    if (networkChanged) updateUnderlyingNetwork(upstream)
+                    if (decision == NetworkRefreshDecision.Keep ||
+                        (decision == NetworkRefreshDecision.AwaitFacts && !networkChanged)
+                    ) continue
+                    addLog("Watchdog: upstream changed")
                     requestTransportRecovery("Upstream network changed", fullRestart = false)
                     return@launch
                 }
@@ -1489,10 +1499,10 @@ class OlcboxVpnService : VpnService() {
         recoveryJob = null
         releaseWakeLock()
 
-        if (isCallbackRegistered) {
-            runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
-            isCallbackRegistered = false
-        }
+        unregisterNetworkMonitor()
+        lastConnectedOrdinaryNetwork = null
+        lastConnectedOrdinaryTransport = null
+        lastConnectedOrdinaryDns = null
         stopAuthenticatedSocksProxy()
         updateUnderlyingNetwork(null)
         unbindProcessFromNetwork()
@@ -1920,19 +1930,41 @@ class OlcboxVpnService : VpnService() {
             isActiveTransportRunning()
     }
 
-    private fun registerNetworkMonitor() {
-        if (isCallbackRegistered) return
+    private fun registerNetworkMonitor(registrationGeneration: Long) {
+        unregisterNetworkMonitor()
+        val snapshots = AndroidPhysicalNetworkSnapshots(registrationGeneration, physicalNetworkLedger)
+        val callback = createNetworkCallback(registrationGeneration, snapshots)
         try {
             val request = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .build()
-            connectivityManager.registerNetworkCallback(request, networkCallback)
-            isCallbackRegistered = true
+            connectivityManager.registerNetworkCallback(request, callback)
+            physicalNetworkSnapshots = snapshots
+            networkCallback = callback
             addLog("Network monitor registered")
         } catch (e: Exception) {
+            snapshots.close()
             Log.e(TAG, "Network monitor failed (${e.javaClass.simpleName})")
         }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        physicalNetworkSnapshots?.close()
+        physicalNetworkSnapshots = null
+        networkCallback?.let { callback ->
+            runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+        }
+        networkCallback = null
+    }
+
+    private fun markVerifiedOrdinaryNetwork(upstream: Network, location: LocationConfig) {
+        if (location.kind == LocationKind.Olcrtc) return
+        lastConnectedOrdinaryNetwork = upstream
+        lastConnectedOrdinaryTransport = physicalNetworkSnapshots?.current(upstream)?.transport
+            ?: upstream.transportOrNull()
+        lastConnectedOrdinaryDns = (physicalNetworkSnapshots?.current(upstream)?.dnsServers
+            ?.takeIf { it.isNotEmpty() } ?: upstreamDnsAddresses(upstream).takeIf { it.isNotEmpty() })?.toList()
     }
 
     private fun findActiveUpstreamNetwork(): Network? {
@@ -1970,7 +2002,6 @@ class OlcboxVpnService : VpnService() {
 
     private fun updateUnderlyingNetwork(network: Network?) {
         currentNetwork = network
-        currentNetworkTransport = network?.transportOrNull()
         if (connectionMode == AndroidConnectionMode.Tun || vpnInterface != null) {
             setUnderlyingNetworks(if (network != null) arrayOf(network) else null)
         }
@@ -2032,14 +2063,6 @@ class OlcboxVpnService : VpnService() {
         val caps = connectivityManager.getNetworkCapabilities(this) ?: return null
         if (!caps.isUsableUpstream()) return null
         return caps.upstreamTransport()
-    }
-
-    private fun isBenignWifiRefresh(
-        previousTransport: UpstreamTransport?,
-        nextTransport: UpstreamTransport?
-    ): Boolean {
-        return previousTransport == UpstreamTransport.Wifi &&
-            nextTransport == UpstreamTransport.Wifi
     }
 
     private fun bindProcessToNetwork(network: Network?, successLog: String? = null) {
