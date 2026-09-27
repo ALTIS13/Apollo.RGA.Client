@@ -32,7 +32,7 @@ class PartnerLinkResolverTest {
 
     @Test
     fun onlyHappLinksAreTreatedAsPartnerLinks() {
-        assertTrue(isPartnerLink("happ://crypt5/fzvdQQSl2kKPyNPhAeRV4WSh12xLFV8"))
+        assertTrue(isPartnerLink("happ://crypt5/fixtureEncryptedLinkPayload1234"))
         assertTrue(isPartnerLink("  happ://crypt4/abc  "))
         // A plain subscription URL and our own crypt1 link must fall through to
         // the paths that already handle them.

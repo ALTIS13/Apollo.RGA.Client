@@ -48,7 +48,7 @@ class LogScrubberTest {
     @Test fun credentialsAndCapabilitiesGo() {
         assertEquals("start room=<redacted>", s.scrub("start room=a3f9c1e2-4b5d-6789-0abc-def012345678"))
         assertEquals("import <link>", s.scrub("import olcrtc://crypt1/AAAAbbbbCCCCdddd"))
-        assertEquals("import <link>", s.scrub("import happ://crypt5/fzvdQQSl2kKPyNPhAeRV4WSh12xLFV8"))
+        assertEquals("import <link>", s.scrub("import happ://crypt5/fixtureEncryptedLinkPayload1234"))
         assertEquals("GET <host>/sub/x", s.scrub("GET sub.proofkit.org/sub/x"))
         assertEquals("GET <host>/api", s.scrub("GET proofkit.org/api"))
     }

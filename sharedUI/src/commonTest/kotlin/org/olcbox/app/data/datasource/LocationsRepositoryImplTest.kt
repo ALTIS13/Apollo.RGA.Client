@@ -2143,7 +2143,7 @@ class LocationsRepositoryImplTest {
         }
     }
 
-    private val happLink = "happ://crypt5/fzvdQQSl2kKPyNPhAeRV4WSh12xLFV8"
+    private val happLink = "happ://crypt5/fixtureEncryptedLinkPayload1234"
 
     @Test
     fun aPastedHappLinkIsResolvedThenImportedLikeAnyOtherLink() = runTest {
