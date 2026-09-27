@@ -169,11 +169,778 @@ index 5f329b4..496f216 100644
  	}
  }
  
+diff --git a/internal/server/egress.go b/internal/server/egress.go
+index b9f765f..29bd23f 100644
+--- a/internal/server/egress.go
++++ b/internal/server/egress.go
+@@ -195,6 +195,9 @@ func (r ConnectRequest) validate() error {
+ }
+ 
+ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request ConnectRequest, sessionID string) {
++	if contextDone(ctx) {
++		return
++	}
+ 	// Where a peer connects is logged at debug only: an exit's log is no
+ 	// record of its users' destinations. A failure says why, not where.
+ 	// ai-generated: the log levels and the failure line (egress hardening).
+@@ -206,10 +209,15 @@ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request Conn
+ 	if err != nil {
+ 		logger.Infof("sid=%d dial failed (%v): %s", stream.ID(), elapsed, dialFailure(err))
+ 		logger.Debugf("sid=%d dial %s failed: %v", stream.ID(), addr, err)
+-		_, _ = stream.Write([]byte{tunnelcore.ConnectAckHostUnreachable})
++		if !contextDone(ctx) {
++			_, _ = stream.Write([]byte{tunnelcore.ConnectAckHostUnreachable})
++		}
+ 		return
+ 	}
+ 	defer func() { _ = conn.Close() }()
++	if contextDone(ctx) {
++		return
++	}
+ 	logger.Debugf("sid=%d connected %s in %v", stream.ID(), addr, elapsed)
+ 	if _, err := stream.Write([]byte{tunnelcore.ConnectAckOK}); err != nil {
+ 		return
+diff --git a/internal/server/lease.go b/internal/server/lease.go
+new file mode 100644
+index 0000000..0cf9d90
+--- /dev/null
++++ b/internal/server/lease.go
+@@ -0,0 +1,223 @@
++package server
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"time"
++)
++
++// ManagedLease is supplied only by a trusted embedding policy. A session ID
++// from the ordinary AuthHook or the local traffic meter is never a lease.
++type ManagedLease struct {
++	SessionID string
++	NotAfter  time.Time
++}
++
++type ManagedLeaseAuthFunc func(context.Context, string, map[string]any) (ManagedLease, error)
++
++var (
++	ErrLeaseHookRequired = errors.New("managed lease requires trusted hook")
++	errLeaseDenied       = errors.New("managed lease denied")
++)
++
++// This is a safety ceiling, not an operational lease lifetime. The latter
++// remains an external policy decision after real-system measurements.
++const maxManagedLeaseDuration = 5 * time.Minute
++const maxManagedLeaseRecords = 4096
++
++type managedLeaseState uint8
++
++const (
++	leasePending managedLeaseState = iota
++	leaseActive
++	leaseRevoked
++	leaseClosed
++)
++
++type managedLeaseEntry struct {
++	lease      ManagedLease
++	generation uint64
++	state      managedLeaseState
++	retainTo   time.Time
++	ctx        context.Context
++	cancel     context.CancelFunc
++}
++
++// leaseRegistry is process-local. A future Bridge adapter must enforce
++// one-time global session IDs across processes and restarts.
++type leaseRegistry struct {
++	mu         sync.Mutex
++	entries    map[string]*managedLeaseEntry
++	generation uint64
++	overflow   bool
++	limit      int // A zero value uses maxManagedLeaseRecords.
++}
++
++func (r *leaseRegistry) prepare(parent context.Context, lease ManagedLease) (*managedLeaseEntry, error) {
++	now := time.Now()
++	if !validLeaseID(lease.SessionID) || lease.NotAfter.IsZero() ||
++		!now.Before(lease.NotAfter) || lease.NotAfter.After(now.Add(maxManagedLeaseDuration)) {
++		return nil, errLeaseDenied
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.prune(now)
++	if r.overflow || r.entries[lease.SessionID] != nil || parent.Err() != nil ||
++		!time.Now().Before(lease.NotAfter) || !r.room() {
++		return nil, errLeaseDenied
++	}
++	r.generation++
++	leaseCtx, cancel := context.WithDeadline(parent, lease.NotAfter)
++	entry := &managedLeaseEntry{
++		lease: lease, generation: r.generation, state: leasePending,
++		retainTo: lease.NotAfter.Add(maxManagedLeaseDuration),
++		ctx:      leaseCtx, cancel: cancel,
++	}
++	r.entries[lease.SessionID] = entry
++	return entry, nil
++}
++
++func (r *leaseRegistry) revoke(id string) bool {
++	if !validLeaseID(id) {
++		return false
++	}
++	now := time.Now()
++	r.mu.Lock()
++	r.prune(now)
++	if entry := r.entries[id]; entry != nil {
++		entry.state = leaseRevoked
++		cancel := entry.cancel
++		r.mu.Unlock()
++		if cancel != nil {
++			cancel()
++		}
++		return true
++	}
++	if r.overflow || !r.room() {
++		r.mu.Unlock()
++		return false
++	}
++	r.generation++
++	r.entries[id] = &managedLeaseEntry{
++		lease: ManagedLease{SessionID: id}, generation: r.generation,
++		state: leaseRevoked, retainTo: now.Add(maxManagedLeaseDuration + 2*handshakeTimeout),
++	}
++	r.mu.Unlock()
++	return true
++}
++
++const handshakeTimeout = 15 * time.Second
++
++func (r *leaseRegistry) abort(entry *managedLeaseEntry) {
++	if entry == nil {
++		return
++	}
++	r.mu.Lock()
++	if r.entries[entry.lease.SessionID] == entry && entry.state == leasePending {
++		entry.state = leaseClosed
++	}
++	r.mu.Unlock()
++	if entry.cancel != nil {
++		entry.cancel()
++	}
++}
++
++// activate is called only after the ID is published under the session lock.
++// It deliberately takes no session lock: a concurrent revoke leaves a
++// tombstone which forces the caller to cut off its just-published generation.
++func (r *leaseRegistry) activate(entry *managedLeaseEntry) bool {
++	if entry == nil {
++		return true // Legacy handshake.
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.entries[entry.lease.SessionID] != entry || entry.state != leasePending ||
++		!time.Now().Before(entry.lease.NotAfter) || entry.ctx.Err() != nil {
++		return false
++	}
++	entry.state = leaseActive
++	return true
++}
++
++func (r *leaseRegistry) finish(entry *managedLeaseEntry) {
++	if entry == nil {
++		return
++	}
++	r.mu.Lock()
++	if r.entries[entry.lease.SessionID] == entry && entry.state != leaseRevoked {
++		entry.state = leaseClosed
++	}
++	r.mu.Unlock()
++	if entry.cancel != nil {
++		entry.cancel()
++	}
++}
++
++func (r *leaseRegistry) expire(entry *managedLeaseEntry) bool {
++	if entry == nil || !errors.Is(entry.ctx.Err(), context.DeadlineExceeded) {
++		return false
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.entries[entry.lease.SessionID] != entry || entry.state != leaseActive {
++		return false
++	}
++	entry.state = leaseClosed
++	return true
++}
++
++func (s *Server) watchLease(entry *managedLeaseEntry) {
++	if entry == nil {
++		return
++	}
++	context.AfterFunc(entry.ctx, func() {
++		if !errors.Is(entry.ctx.Err(), context.DeadlineExceeded) {
++			return
++		}
++		s.goTracked(func() {
++			if s.leases.expire(entry) {
++				s.cutoffLease(entry, "expired")
++			}
++		})
++	})
++}
++
++func (r *leaseRegistry) room() bool {
++	if r.entries == nil {
++		r.entries = make(map[string]*managedLeaseEntry)
++	}
++	limit := r.limit
++	if limit <= 0 {
++		limit = maxManagedLeaseRecords
++	}
++	if len(r.entries) >= limit {
++		// A failed revoke might have been omitted; never resume admissions
++		// after pruning without an external reconciliation of that ID.
++		r.overflow = true
++		return false
++	}
++	return true
++}
++
++func (r *leaseRegistry) prune(now time.Time) {
++	for id, entry := range r.entries {
++		if entry.state != leasePending && entry.state != leaseActive && !now.Before(entry.retainTo) {
++			delete(r.entries, id)
++		}
++	}
++}
++
++func validLeaseID(id string) bool {
++	if len(id) < 16 || len(id) > 128 {
++		return false
++	}
++	for i := 0; i < len(id); i++ {
++		c := id[i]
++		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' {
++			continue
++		}
++		return false
++	}
++	return true
++}
+diff --git a/internal/server/lease_test.go b/internal/server/lease_test.go
+new file mode 100644
+index 0000000..53c620d
+--- /dev/null
++++ b/internal/server/lease_test.go
+@@ -0,0 +1,440 @@
++package server
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtaci/smux"
++
++	"github.com/openlibrecommunity/olcrtc/internal/control"
++	"github.com/openlibrecommunity/olcrtc/internal/handshake"
++	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
++	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
++)
++
++func TestRequireLeaseRejectsMissingTrustedHookBeforeKeySetup(t *testing.T) {
++	err := Run(context.Background(), Config{RequireLease: true})
++	if !errors.Is(err, ErrLeaseHookRequired) {
++		t.Fatalf("RequireLease without trusted hook returned %v, want ErrLeaseHookRequired", err)
++	}
++}
++
++func TestRequireLeaseForcesUDPDisabledWithoutLegacyAuthHook(t *testing.T) {
++	if !effectiveUDPDisabled(Config{RequireLease: true}) {
++		t.Fatal("managed lease mode left UDP available")
++	}
++	if effectiveUDPDisabled(Config{}) {
++		t.Fatal("default non-managed mode changed UDP behavior")
++	}
++}
++
++func TestManagedLeaseInvalidFactsNeverSendWelcome(t *testing.T) {
++	for _, tc := range []struct {
++		name  string
++		lease ManagedLease
++	}{
++		{name: "empty session", lease: ManagedLease{NotAfter: time.Now().Add(time.Minute)}},
++		{name: "zero deadline", lease: ManagedLease{SessionID: "lease-session-zero"}},
++		{name: "past deadline", lease: ManagedLease{SessionID: "lease-session-past", NotAfter: time.Now().Add(-time.Second)}},
++		{name: "overlong deadline", lease: ManagedLease{SessionID: "lease-session-overlong", NotAfter: time.Now().Add(25 * time.Hour)}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			s := newHandshakeServer()
++			s.requireLease = true
++			s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++				return tc.lease, nil
++			}
++			serverSession, clientSession, cleanup := smuxPair(t)
++			defer cleanup()
++			result := make(chan error, 1)
++			go func() {
++				stream, err := clientSession.OpenStream()
++				if err != nil {
++					result <- err
++					return
++				}
++				_, _, err = handshake.Client(stream, "device", nil)
++				result <- err
++			}()
++			stream, _, ok := s.answerHello(context.Background(), serverSession)
++			if ok || stream != nil {
++				t.Fatal("invalid lease produced a successful handshake")
++			}
++			if err := <-result; !errors.Is(err, handshake.ErrRejected) {
++				t.Fatalf("invalid lease reached client as %v, want reject", err)
++			}
++		})
++	}
++}
++
++func TestManagedLeaseRejectsRevokedIDBeforeWelcome(t *testing.T) {
++	s := newHandshakeServer()
++	s.requireLease = true
++	s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++		return ManagedLease{SessionID: "lease-session-reused", NotAfter: time.Now().Add(time.Minute)}, nil
++	}
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not attach controller")
++	}
++	defer controller.detach(s)
++	if !controller.RevokeLease("lease-session-reused") {
++		t.Fatal("trusted pre-publication revoke was not recorded")
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	result := make(chan error, 1)
++	go func() {
++		stream, err := clientSession.OpenStream()
++		if err != nil {
++			result <- err
++			return
++		}
++		_, _, err = handshake.Client(stream, "device", nil)
++		result <- err
++	}()
++	stream, _, ok := s.answerHello(context.Background(), serverSession)
++	if ok || stream != nil {
++		t.Fatal("revoked ID produced a successful handshake")
++	}
++	if err := <-result; !errors.Is(err, handshake.ErrRejected) {
++		t.Fatalf("revoked ID reached client as %v, want reject", err)
++	}
++}
++
++func TestManagedLeaseRejectsReusedIDBeforeWelcome(t *testing.T) {
++	s := newHandshakeServer()
++	s.requireLease = true
++	s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++		return ManagedLease{SessionID: "lease-session-reused", NotAfter: time.Now().Add(time.Minute)}, nil
++	}
++	for attempt := 0; attempt < 2; attempt++ {
++		serverSession, clientSession, cleanup := smuxPair(t)
++		result := make(chan error, 1)
++		go func() {
++			stream, err := clientSession.OpenStream()
++			if err == nil {
++				_, _, err = handshake.Client(stream, "device", nil)
++			}
++			result <- err
++		}()
++		stream, hello, ok := s.answerHello(context.Background(), serverSession)
++		clientErr := <-result
++		if attempt == 0 {
++			if !ok || clientErr != nil {
++				t.Fatalf("first lease failed: ok=%v err=%v", ok, clientErr)
++			}
++			s.leases.abort(hello.lease)
++			_ = stream.Close()
++		} else if ok || !errors.Is(clientErr, handshake.ErrRejected) {
++			t.Fatalf("reused ID passed admission: ok=%v err=%v", ok, clientErr)
++		}
++		cleanup()
++	}
++}
++
++func TestManagedLeaseRegistryOverflowRetainsTombstoneAndFailsClosed(t *testing.T) {
++	r := leaseRegistry{limit: 1}
++	if !r.revoke("tombstone-first-001") {
++		t.Fatal("first tombstone was not recorded")
++	}
++	if r.revoke("tombstone-second-001") {
++		t.Fatal("registry claimed a second tombstone beyond its cap")
++	}
++	if len(r.entries) != 1 || r.entries["tombstone-first-001"] == nil {
++		t.Fatal("overflow evicted the live tombstone")
++	}
++	if _, err := r.prepare(context.Background(), ManagedLease{
++		SessionID: "new-lease-after-overflow", NotAfter: time.Now().Add(time.Minute),
++	}); !errors.Is(err, errLeaseDenied) {
++		t.Fatalf("new admission after lost tombstone = %v, want fail closed", err)
++	}
++}
++
++func TestManagedLeaseRevokeBeforePublicationClosesEveryHandshakePath(t *testing.T) {
++	for _, path := range []string{"singleton", "peer-control", "data-only-peer"} {
++		t.Run(path, func(t *testing.T) {
++			const id = "lease-race-session-001"
++			serverSession, clientSession, gate, cleanup := managedGatedPair(t)
++			defer cleanup()
++			s := newHandshakeServer()
++			s.requireAuthHook = true
++			s.requireLease = true
++			s.meter = newMeter()
++			var opens atomic.Int32
++			s.onOpen = func(string, string, map[string]any) { opens.Add(1) }
++			s.liveness = control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 1}
++			ctx, cancel := context.WithCancel(context.Background())
++			defer func() { cancel(); s.wg.Wait() }()
++			s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++				gate.enabled.Store(true)
++				return ManagedLease{SessionID: id, NotAfter: time.Now().Add(time.Minute)}, nil
++			}
++			controller := &SessionController{}
++			if !controller.attach(s) {
++				t.Fatal("could not attach controller")
++			}
++			defer controller.detach(s)
++			result := make(chan bool, 1)
++			switch path {
++			case "singleton":
++				s.session = serverSession
++				s.group = muxconn.PrePinned(newServerTestKeys(t), "lease-key")
++				go func() { result <- s.acceptSingletonHandshake(ctx, serverSession) }()
++			case "peer-control":
++				dataServer, _, dataCleanup := smuxPair(t)
++				defer dataCleanup()
++				peer := newPeerSession("lease-peer", true, muxconn.PrePinned(newServerTestKeys(t), "lease-key"))
++				peer.session, peer.controlSess = dataServer, serverSession
++				s.peerSessions = map[string]*peerSession{peer.peerID: peer}
++				go func() { s.acceptPeerHandshake(ctx, peer); result <- s.peerSessionActive(peer, id) }()
++			case "data-only-peer":
++				peer := newPeerSession("lease-peer", false, muxconn.PrePinned(newServerTestKeys(t), "lease-key"))
++				peer.session = serverSession
++				s.peerSessions = map[string]*peerSession{peer.peerID: peer}
++				s.baseCtx = ctx
++				go func() { result <- s.establishPeerSession(peer) }()
++			}
++			clientDone := make(chan struct{})
++			go func() {
++				defer close(clientDone)
++				stream, err := clientSession.OpenStream()
++				if err == nil {
++					_, _, _ = handshake.Client(stream, "device", nil)
++				}
++			}()
++			select {
++			case <-gate.blocked:
++			case <-result:
++				t.Fatal("handshake published before managed WELCOME write was released")
++			case <-time.After(2 * time.Second):
++				t.Fatal("managed WELCOME write did not reach gate")
++			}
++			if !controller.RevokeLease(id) {
++				t.Fatal("pending lease revoke was not recorded")
++			}
++			close(gate.release)
++			select {
++			case ready := <-result:
++				if ready {
++					t.Fatal("revoked lease became ready")
++				}
++			case <-time.After(2 * time.Second):
++				t.Fatal("handshake did not finish after gate released")
++			}
++			if !serverSession.IsClosed() {
++				t.Fatal("revoked carrier remained open")
++			}
++			if opens.Load() != 0 {
++				t.Fatal("revoked lease reached OnSessionOpen")
++			}
++			<-clientDone
++		})
++	}
++}
++
++func managedGatedPair(t *testing.T) (*smux.Session, *smux.Session, *gatedWriteConn, func()) {
++	t.Helper()
++	a, b := net.Pipe()
++	gate := &gatedWriteConn{Conn: a, release: make(chan struct{}), blocked: make(chan struct{})}
++	serverSession, err := smux.Server(gate, testSmuxCfg())
++	if err != nil {
++		t.Fatalf("smux.Server() error = %v", err)
++	}
++	clientSession, err := smux.Client(b, testSmuxCfg())
++	if err != nil {
++		t.Fatalf("smux.Client() error = %v", err)
++	}
++	return serverSession, clientSession, gate, func() {
++		select {
++		case <-gate.release:
++		default:
++			close(gate.release)
++		}
++		_ = serverSession.Close()
++		_ = clientSession.Close()
++		_ = a.Close()
++		_ = b.Close()
++	}
++}
++
++func TestManagedLeaseDeadlineCutsFrozenTCPWithoutRefresh(t *testing.T) {
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	ctx, cancel := context.WithCancel(context.Background())
++	s := newHandshakeServer()
++	defer func() { cancel(); s.wg.Wait() }()
++	s.requireAuthHook = true
++	s.requireLease = true
++	s.session = serverSession
++	s.group = muxconn.PrePinned(newServerTestKeys(t), "lease-key")
++	s.meter = newMeter()
++	s.unsafeAllowPrivateTargets = true
++	s.liveness = control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 1}
++	s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++		return ManagedLease{SessionID: "frozen-tcp-lease-001", NotAfter: time.Now().Add(700 * time.Millisecond)}, nil
++	}
++	remote, frozen := net.Pipe()
++	defer func() { _ = frozen.Close(); _ = remote.Close() }()
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) { return remote, nil }
++	clientHandshake := make(chan error, 1)
++	go func() {
++		stream, err := clientSession.OpenStream()
++		if err == nil {
++			_, _, err = handshake.Client(stream, "device", nil)
++		}
++		clientHandshake <- err
++	}()
++	if !s.acceptSingletonHandshake(ctx, serverSession) {
++		t.Fatal("managed handshake failed")
++	}
++	if err := <-clientHandshake; err != nil {
++		t.Fatalf("client handshake failed: %v", err)
++	}
++	handlerDone := make(chan struct{})
++	go func() {
++		defer close(handlerDone)
++		stream, err := serverSession.AcceptStream()
++		if err == nil {
++			s.handleStream(context.Background(), stream, "frozen-tcp-lease-001")
++		}
++	}()
++	stream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatalf("OpenStream() error = %v", err)
++	}
++	req, err := json.Marshal(ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80})
++	if err != nil {
++		t.Fatalf("Marshal() error = %v", err)
++	}
++	if _, err := stream.Write(req); err != nil {
++		t.Fatalf("CONNECT write failed: %v", err)
++	}
++	_ = stream.SetReadDeadline(time.Now().Add(2 * time.Second))
++	ack := make([]byte, 1)
++	if _, err := io.ReadFull(stream, ack); err != nil || ack[0] != tunnelcore.ConnectAckOK {
++		t.Fatalf("frozen TCP was not open before deadline: ack=%v err=%v", ack, err)
++	}
++	if _, err := stream.Read(make([]byte, 1)); err == nil {
++		t.Fatal("frozen TCP still open after deadline")
++	}
++	select {
++	case <-handlerDone:
++	case <-time.After(time.Second):
++		t.Fatal("server egress copy did not stop after deadline")
++	}
++	if !serverSession.IsClosed() {
++		t.Fatal("managed carrier remained open after deadline")
++	}
++}
++
++func TestManagedLeaseRevokeCutsActiveSessionBeforeDeadline(t *testing.T) {
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	ctx, cancel := context.WithCancel(context.Background())
++	s := newHandshakeServer()
++	defer func() { cancel(); s.wg.Wait() }()
++	s.requireAuthHook, s.requireLease = true, true
++	s.session = serverSession
++	s.group = muxconn.PrePinned(newServerTestKeys(t), "lease-key")
++	s.meter = newMeter()
++	s.liveness = control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 1}
++	s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++		return ManagedLease{SessionID: "active-revoke-lease-001", NotAfter: time.Now().Add(time.Minute)}, nil
++	}
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not attach controller")
++	}
++	defer controller.detach(s)
++	clientHandshake := make(chan error, 1)
++	go func() {
++		stream, err := clientSession.OpenStream()
++		if err == nil {
++			_, _, err = handshake.Client(stream, "device", nil)
++		}
++		clientHandshake <- err
++	}()
++	if !s.acceptSingletonHandshake(ctx, serverSession) || <-clientHandshake != nil {
++		t.Fatal("managed handshake did not activate")
++	}
++	if !controller.RevokeLease("active-revoke-lease-001") {
++		t.Fatal("active trusted revoke was not recorded")
++	}
++	if !serverSession.IsClosed() || s.handshakeReady() {
++		t.Fatal("active revoked session still carries data")
++	}
++}
++
++func TestManagedLeaseStaleGenerationCannotCloseReplacementWithSameID(t *testing.T) {
++	serverSession, _, cleanup := smuxPair(t)
++	defer cleanup()
++	old := &managedLeaseEntry{lease: ManagedLease{SessionID: "reused-generation-001"}, generation: 1}
++	replacement := &managedLeaseEntry{lease: old.lease, generation: 2}
++	s := &Server{
++		requireLease: true, requireAuthHook: true,
++		session: serverSession, sessionID: old.lease.SessionID, activeLease: replacement,
++		onClose: func(string, string) {},
++	}
++	if s.cutoffLease(old, "expired") {
++		t.Fatal("stale generation closed replacement")
++	}
++	if serverSession.IsClosed() || s.currentSessionID() != old.lease.SessionID {
++		t.Fatal("replacement changed after stale timer")
++	}
++}
++
++func TestManagedLeaseCancelledDuringUncooperativeDialNeverAcknowledgesConnect(t *testing.T) {
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatalf("OpenStream() error = %v", err)
++	}
++	serverStream, err := serverSession.AcceptStream()
++	if err != nil {
++		t.Fatalf("AcceptStream() error = %v", err)
++	}
++	defer func() { _ = clientStream.Close(); _ = serverStream.Close() }()
++	remote, frozen := net.Pipe()
++	defer func() { _ = remote.Close(); _ = frozen.Close() }()
++	entered, release := make(chan struct{}), make(chan struct{})
++	s := &Server{
++		unsafeAllowPrivateTargets: true,
++		dialTarget: func(context.Context, string, string) (net.Conn, error) {
++			close(entered)
++			<-release // Deliberately ignores ctx, as an embedding dialer could.
++			return remote, nil
++		},
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		s.dispatch(ctx, serverStream, ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, "lease-session")
++	}()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("dialer was not reached")
++	}
++	cancel()
++	close(release)
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("dispatch did not return after canceled dial")
++	}
++	_ = clientStream.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
++	ack := make([]byte, 1)
++	if n, _ := clientStream.Read(ack); n > 0 && ack[0] == tunnelcore.ConnectAckOK {
++		t.Fatal("canceled managed dial sent CONNECT OK")
++	}
++}
 diff --git a/internal/server/link.go b/internal/server/link.go
-index d5ca886..7eb056c 100644
+index d5ca886..79ab9f4 100644
 --- a/internal/server/link.go
 +++ b/internal/server/link.go
-@@ -395,6 +395,86 @@ func (s *Server) closeSession() {
+@@ -227,6 +227,7 @@ type peerRoutingTeardown struct {
+ 	controlStop    context.CancelFunc
+ 	peers          map[string]*peerSession
+ 	sessionID      string
++	activeLease    *managedLeaseEntry
+ }
+ 
+ func (s *Server) reinstallPeerRouting(ctx context.Context) {
+@@ -244,17 +245,18 @@ func (s *Server) detachPeerRouting() peerRoutingTeardown {
+ 		pair: s.pair, conn: s.conn, session: s.session,
+ 		controlConn: s.controlConn, controlSession: s.controlSess,
+ 		controlStream: s.controlStrm, controlStop: s.controlStop,
+-		peers: s.peerSessions, sessionID: s.sessionID,
++		peers: s.peerSessions, sessionID: s.sessionID, activeLease: s.activeLease,
+ 	}
+ 	s.peerSessions = make(map[string]*peerSession)
+ 	s.pair, s.conn, s.session, s.group = nil, nil, nil, nil
+ 	s.controlConn, s.controlSess = nil, nil
+ 	s.controlStrm, s.controlStop = nil, nil
+-	s.sessionID, s.deviceID = "", ""
++	s.sessionID, s.deviceID, s.activeLease = "", "", nil
+ 	return teardown
+ }
+ 
+ func (s *Server) closePeerRouting(teardown peerRoutingTeardown) {
++	s.leases.finish(teardown.activeLease)
+ 	tunnelcore.NotifyControlClose(teardown.controlStream)
+ 	if teardown.controlStop != nil {
+ 		teardown.controlStop()
+@@ -304,12 +306,15 @@ func (s *Server) swapSession(dead *smux.Session, replacement *tunnelcore.Session
+ 	oldControl := s.controlStrm
+ 	oldControlStop := s.controlStop
+ 	oldSessionID := s.sessionID
++	oldLease := s.activeLease
+ 	s.installPairLocked(replacement, group)
+ 	s.controlStrm = nil
+ 	s.controlStop = nil
+ 	s.sessionID = ""
+ 	s.deviceID = ""
++	s.activeLease = nil
+ 	s.sessMu.Unlock()
++	s.leases.finish(oldLease)
+ 	s.state.broadcast()
+ 	if oldControlStop != nil {
+ 		oldControlStop()
+@@ -363,12 +368,14 @@ func (s *Server) closeSession() {
+ 	controlStop := s.controlStop
+ 	peers := s.peerSessions
+ 	oldSessionID := s.sessionID
++	oldLease := s.activeLease
+ 	s.peerSessions = make(map[string]*peerSession)
+ 	s.pair, s.session, s.controlSess = nil, nil, nil
+ 	s.conn, s.controlConn, s.group = nil, nil, nil
+ 	s.controlStrm, s.controlStop = nil, nil
+-	s.sessionID, s.deviceID = "", ""
++	s.sessionID, s.deviceID, s.activeLease = "", "", nil
+ 	s.sessMu.Unlock()
++	s.leases.finish(oldLease)
+ 	s.state.broadcast()
+ 	if controlStop != nil {
+ 		controlStop()
+@@ -395,6 +402,114 @@ func (s *Server) closeSession() {
  	s.closeAllUDPFlows()
  }
  
@@ -203,8 +970,12 @@ index d5ca886..7eb056c 100644
 +}
 +
 +func (s *Server) revokeSingleManagedSession(expectedID string) bool {
++	return s.revokeSingleSession(expectedID, nil, "revoked")
++}
++
++func (s *Server) revokeSingleSession(expectedID string, expectedLease *managedLeaseEntry, reason string) bool {
 +	s.sessMu.Lock()
-+	if s.sessionID != expectedID {
++	if s.sessionID != expectedID || (expectedLease != nil && s.activeLease != expectedLease) {
 +		s.sessMu.Unlock()
 +		return false
 +	}
@@ -216,8 +987,10 @@ index d5ca886..7eb056c 100644
 +	controlStream := s.controlStrm
 +	controlStop := s.controlStop
 +	s.controlStrm, s.controlStop = nil, nil
-+	s.sessionID, s.deviceID = "", ""
++	oldLease := s.activeLease
++	s.sessionID, s.deviceID, s.activeLease = "", "", nil
 +	s.sessMu.Unlock()
++	s.leases.finish(oldLease)
 +	s.state.broadcast()
 +	if controlStop != nil {
 +		controlStop()
@@ -241,8 +1014,8 @@ index d5ca886..7eb056c 100644
 +	if controlStream != nil {
 +		_ = controlStream.Close()
 +	}
-+	s.onClose(expectedID, "revoked")
-+	s.trackPeerClose(expectedID, "revoked")
++	s.onClose(expectedID, reason)
++	s.trackPeerClose(expectedID, reason)
 +	// Keep the closed generation published until the replacement swaps under
 +	// sessMu. A blocked serveSingle can then reinstall it, and an isolated
 +	// control plane also receives an explicit tracked reinstall attempt.
@@ -257,33 +1030,152 @@ index d5ca886..7eb056c 100644
 +	return true
 +}
 +
++// cutoffLease never selects by ID alone: a timer from an old process-local
++// generation cannot close a replacement even if its visible ID is reused.
++func (s *Server) cutoffLease(entry *managedLeaseEntry, reason string) bool {
++	if entry == nil {
++		return false
++	}
++	s.leases.finish(entry)
++	s.sessMu.RLock()
++	peers := make([]*peerSession, 0, len(s.peerSessions))
++	for _, peer := range s.peerSessions {
++		peers = append(peers, peer)
++	}
++	s.sessMu.RUnlock()
++	closed := false
++	for _, peer := range peers {
++		if peer.hasLease(entry) && s.endPeer(peer, reason, false) {
++			closed = true
++		}
++	}
++	return s.revokeSingleSession(entry.lease.SessionID, entry, reason) || closed
++}
++
  func (s *Server) onData(data []byte) {
  	s.sessMu.RLock()
  	conn := s.conn
 diff --git a/internal/server/peer.go b/internal/server/peer.go
-index d683ea8..cda729f 100644
+index d683ea8..d696e79 100644
 --- a/internal/server/peer.go
 +++ b/internal/server/peer.go
-@@ -461,11 +461,15 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
+@@ -64,6 +64,7 @@ type peerSession struct {
+ 	controlStop   context.CancelFunc
+ 	sessionID     string
+ 	deviceID      string
++	lease         *managedLeaseEntry
+ 	closed        bool
+ }
+ 
+@@ -91,6 +92,18 @@ func (ps *peerSession) sid() string {
+ 	return ps.sessionID
+ }
+ 
++func (ps *peerSession) hasLease(entry *managedLeaseEntry) bool {
++	ps.mu.Lock()
++	defer ps.mu.Unlock()
++	return !ps.closed && ps.lease == entry
++}
++
++func (ps *peerSession) streamBinding() (string, *managedLeaseEntry, bool) {
++	ps.mu.Lock()
++	defer ps.mu.Unlock()
++	return ps.sessionID, ps.lease, ps.closed
++}
++
+ func (ps *peerSession) setHandshake(result handshakeResult) bool {
+ 	ps.mu.Lock()
+ 	defer ps.mu.Unlock()
+@@ -99,6 +112,7 @@ func (ps *peerSession) setHandshake(result handshakeResult) bool {
+ 	}
+ 	ps.sessionID = result.sessionID
+ 	ps.deviceID = result.deviceID
++	ps.lease = result.lease
+ 	return true
+ }
+ 
+@@ -161,6 +175,7 @@ type teardown struct {
+ 	controlStrm *smux.Stream
+ 	controlStop context.CancelFunc
+ 	sessionID   string
++	lease       *managedLeaseEntry
+ }
+ 
+ func (ps *peerSession) closeSnapshot() teardown {
+@@ -170,7 +185,7 @@ func (ps *peerSession) closeSnapshot() teardown {
+ 	return teardown{
+ 		conn: ps.conn, session: ps.session, controlConn: ps.controlConn,
+ 		controlSess: ps.controlSess, controlStrm: ps.controlStrm,
+-		controlStop: ps.controlStop, sessionID: ps.sessionID,
++		controlStop: ps.controlStop, sessionID: ps.sessionID, lease: ps.lease,
+ 	}
+ }
+ 
+@@ -444,7 +459,7 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
  			return
  		}
- 		s.meter.bind(sessionID, peer.group.KeyID())
--		peer.signalReady()
- 		s.health.RecordSession(sessionID)
--		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
- 		s.trackPeerOpen(sessionID, hello.DeviceID)
--		logger.Infof("peer session %s opened (peer=%s device=%s)", sessionID, peer.peerID, hello.DeviceID)
-+		s.logSessionOpened(sessionID, hello.DeviceID, peer.peerID)
-+		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
-+		if !s.peerSessionActive(peer, sessionID) {
+ 		_ = stream.SetDeadline(time.Now().Add(handshake.DefaultTimeout))
+-		hello, sessionID, err := handshake.Server(stream, s.authHook, s.localPeerID())
++		_, result, err := s.answerClientHello(ctx, stream)
+ 		_ = stream.SetDeadline(time.Time{})
+ 		if err != nil {
+ 			_ = stream.Close()
+@@ -456,16 +471,27 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
+ 			s.removePeer(peer, "handshake failed")
+ 			return
+ 		}
+-		if !peer.setHandshake(handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID}) {
++		if !peer.setHandshake(result) {
++			s.leases.abort(result.lease)
 +			_ = stream.Close()
 +			return
 +		}
-+		peer.signalReady()
++		if !s.leases.activate(result.lease) {
++			s.cutoffLease(result.lease, "revoked")
++			_ = stream.Close()
++			return
++		}
++		s.watchLease(result.lease)
++		s.meter.bind(result.sessionID, peer.group.KeyID())
++		s.health.RecordSession(result.sessionID)
++		s.trackPeerOpen(result.sessionID, result.deviceID)
++		s.logSessionOpened(result.sessionID, result.deviceID, peer.peerID)
++		s.onOpen(result.sessionID, result.deviceID, result.claims)
++		if !s.peerSessionActive(peer, result.sessionID) {
+ 			_ = stream.Close()
+ 			return
+ 		}
+-		s.meter.bind(sessionID, peer.group.KeyID())
+ 		peer.signalReady()
+-		s.health.RecordSession(sessionID)
+-		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
+-		s.trackPeerOpen(sessionID, hello.DeviceID)
+-		logger.Infof("peer session %s opened (peer=%s device=%s)", sessionID, peer.peerID, hello.DeviceID)
  		s.startPeerControlLoop(ctx, peer, stream)
  		return
  	}
-@@ -565,8 +569,6 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+@@ -519,7 +545,13 @@ func (s *Server) servePeer(peer *peerSession) {
+ 		return
+ 	}
+ 	ctx := s.streamContext()
+-	sessionID := peer.sid()
++	sessionID, lease, closed := peer.streamBinding()
++	if closed || (s.requireLease && lease == nil) {
++		return
++	}
++	if lease != nil {
++		ctx = lease.ctx
++	}
+ 	for {
+ 		if s.stopping() {
+ 			return
+@@ -560,24 +592,50 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+ 		return false
+ 	}
+ 	if !peer.setHandshake(result) {
++		s.leases.abort(result.lease)
+ 		// ai-generated: the close of a session the peer's teardown cannot
+ 		// see (olcrtc#49). The peer was ended while its hello was being
  		// answered - it started its session over - and the session opened
  		// for that hello is on no peer to be closed with it.
  		_ = stream.Close()
@@ -291,8 +1183,14 @@ index d683ea8..cda729f 100644
 -		s.trackPeerClose(result.sessionID, "closed")
  		return false
  	}
++	if !s.leases.activate(result.lease) {
++		s.cutoffLease(result.lease, "revoked")
++		_ = stream.Close()
++		return false
++	}
++	s.watchLease(result.lease)
  	// This is the handshake path of transports that route peers without a
-@@ -574,10 +576,31 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+ 	// per-peer control plane (datachannel over jitsi or livekit): the meter
  	// learns the session's key here, as acceptPeerHandshake does for the
  	// control-plane path.
  	s.meter.bind(result.sessionID, peer.group.KeyID())
@@ -324,7 +1222,16 @@ index d683ea8..cda729f 100644
  // waitPeerHandshake blocks until the peer's control-plane handshake lands.
  // The wait is bounded: an unauthenticated peer that never handshakes would
  // otherwise pin its whole session stack until the server stops, and a peer
-@@ -622,14 +645,14 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
+@@ -590,7 +648,7 @@ func (s *Server) waitPeerHandshake(peer *peerSession) bool {
+ 	defer timer.Stop()
+ 	select {
+ 	case <-peer.sessionReady:
+-		return peer.sid() != ""
++		return s.peerSessionActive(peer, peer.sid())
+ 	case <-timer.C:
+ 		logger.Infof("server: peer %s did not handshake within %s - releasing session",
+ 			peer.peerID, peerHandshakeTimeout)
+@@ -622,14 +680,14 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
  //
  // ai-generated: notify and the retirement a new session takes over
  // (olcrtc#49); the rest is removePeer as it was.
@@ -342,7 +1249,7 @@ index d683ea8..cda729f 100644
  	}
  	delete(s.peerSessions, peer.peerID)
  	if s.retiring == nil {
-@@ -647,6 +670,7 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
+@@ -647,6 +705,7 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
  	if own {
  		s.retirePeer(peer.peerID)
  	}
@@ -350,7 +1257,15 @@ index d683ea8..cda729f 100644
  }
  
  // retireEndedLocked tells the transport that the session ended for peerID
-@@ -767,7 +791,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
+@@ -696,6 +755,7 @@ func (s *Server) closePeerSession(peer *peerSession, reason string) {
+ func (s *Server) endPeerSession(peer *peerSession, reason string, notify bool) {
+ 	peer.closeOnce.Do(func() {
+ 		teardown := peer.closeSnapshot()
++		s.leases.finish(teardown.lease)
+ 		peer.signalReady()
+ 		if notify {
+ 			notifyPeerClose(teardown.controlStrm)
+@@ -767,7 +827,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
  	s.peerStats[sessionID] = peerStat{deviceID: deviceID, openedAt: time.Now()}
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -363,7 +1278,7 @@ index d683ea8..cda729f 100644
  	logger.Infof("%s", line)
  }
  
-@@ -781,12 +809,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
+@@ -781,12 +845,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
  	delete(s.peerStats, sessionID)
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -386,18 +1301,80 @@ index d683ea8..cda729f 100644
  	for _, stat := range s.peerStats {
  		devices = append(devices, stat.deviceID)
 diff --git a/internal/server/serve.go b/internal/server/serve.go
-index 203ece2..d37b40a 100644
+index 203ece2..93d1698 100644
 --- a/internal/server/serve.go
 +++ b/internal/server/serve.go
-@@ -127,6 +127,7 @@ func (s *Server) handshakeReady() bool {
+@@ -86,7 +86,19 @@ func (s *Server) serveSingle(ctx context.Context) {
+ 			}
+ 			continue
+ 		}
+-		s.goTracked(func() { s.handleStream(ctx, stream, s.currentSessionID()) })
++		s.sessMu.RLock()
++		current := s.session == session
++		sessionID, lease := s.sessionID, s.activeLease
++		s.sessMu.RUnlock()
++		if !current || sessionID == "" || (s.requireLease && lease == nil) {
++			_ = stream.Close()
++			continue
++		}
++		streamCtx := ctx
++		if lease != nil {
++			streamCtx = lease.ctx
++		}
++		s.goTracked(func() { s.handleStream(streamCtx, stream, sessionID) })
+ 	}
+ }
+ 
+@@ -127,6 +139,39 @@ func (s *Server) handshakeReady() bool {
  type handshakeResult struct {
  	sessionID string
  	deviceID  string
 +	claims    map[string]any
++	lease     *managedLeaseEntry
++}
++
++// answerClientHello prepares a managed lease before handshake.Server can send
++// SERVER_WELCOME. Legacy AuthHook keeps its original signature and behavior.
++func (s *Server) answerClientHello(ctx context.Context, stream *smux.Stream) (handshake.Hello, handshakeResult, error) {
++	var pending *managedLeaseEntry
++	auth := s.authHook
++	if s.requireLease {
++		auth = func(deviceID string, claims map[string]any) (string, error) {
++			if s.leaseAuthHook == nil {
++				return "", errLeaseDenied
++			}
++			lease, err := s.leaseAuthHook(ctx, deviceID, claims)
++			if err != nil {
++				return "", errLeaseDenied
++			}
++			pending, err = s.leases.prepare(ctx, lease)
++			if err != nil {
++				return "", errLeaseDenied
++			}
++			return lease.SessionID, nil
++		}
++	}
++	hello, sessionID, err := handshake.Server(stream, auth, s.localPeerID())
++	if err != nil {
++		s.leases.abort(pending)
++		return hello, handshakeResult{}, err
++	}
++	return hello, handshakeResult{
++		sessionID: sessionID, deviceID: hello.DeviceID, claims: hello.Claims, lease: pending,
++	}, nil
  }
  
  // acceptHandshake answers the hello on the server's own session, and
-@@ -175,11 +176,7 @@ func (s *Server) answerHello(
+@@ -164,7 +209,7 @@ func (s *Server) answerHello(
+ 			return nil, handshakeResult{}, false
+ 		}
+ 		_ = stream.SetDeadline(time.Now().Add(handshake.DefaultTimeout))
+-		hello, sessionID, err := handshake.Server(stream, s.authHook, s.localPeerID())
++		_, result, err := s.answerClientHello(ctx, stream)
+ 		_ = stream.SetDeadline(time.Time{})
+ 		if err != nil {
+ 			_ = stream.Close()
+@@ -175,11 +220,7 @@ func (s *Server) answerHello(
  			logger.Warnf("handshake failed: %v", err)
  			return nil, handshakeResult{}, false
  		}
@@ -406,23 +1383,32 @@ index 203ece2..d37b40a 100644
 -		s.trackPeerOpen(sessionID, hello.DeviceID)
 -		logger.Infof("session %s opened (device=%s)", sessionID, hello.DeviceID)
 -		return stream, handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID}, true
-+		return stream, handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID, claims: hello.Claims}, true
++		return stream, result, true
  	}
  	return nil, handshakeResult{}, false
  }
-@@ -198,10 +195,26 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
+@@ -198,10 +239,34 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
  		return false
  	}
  	s.sessMu.Lock()
 +	if s.session != session {
 +		s.sessMu.Unlock()
++		s.leases.abort(result.lease)
 +		_ = stream.Close()
 +		return false
 +	}
  	s.deviceID = result.deviceID
  	s.sessionID = result.sessionID
- 	s.meter.bind(result.sessionID, s.group.KeyID())
+-	s.meter.bind(result.sessionID, s.group.KeyID())
++	s.activeLease = result.lease
  	s.sessMu.Unlock()
++	if !s.leases.activate(result.lease) {
++		s.cutoffLease(result.lease, "revoked")
++		_ = stream.Close()
++		return false
++	}
++	s.watchLease(result.lease)
++	s.meter.bind(result.sessionID, s.group.KeyID())
 +	s.health.RecordSession(result.sessionID)
 +	s.trackPeerOpen(result.sessionID, result.deviceID)
 +	s.logSessionOpened(result.sessionID, result.deviceID, "")
@@ -437,11 +1423,31 @@ index 203ece2..d37b40a 100644
  	s.state.broadcast()
  	s.startControlLoop(ctx, session, stream)
  	return true
+@@ -209,6 +274,9 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
+ 
+ func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionID string) {
+ 	defer func() { _ = stream.Close() }()
++	if contextDone(ctx) {
++		return
++	}
+ 	if sessionID == "" {
+ 		sessionID = s.currentSessionID()
+ 	}
+@@ -237,6 +305,9 @@ func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionI
+ 			header = append(header, buffer[:n]...)
+ 			if request, ok := parseConnectRequest(header); ok {
+ 				_ = stream.SetReadDeadline(time.Time{})
++				if contextDone(ctx) {
++					return
++				}
+ 				s.dispatch(ctx, stream, request, sessionID)
+ 				return
+ 			}
 diff --git a/internal/server/server.go b/internal/server/server.go
-index f9e65e8..755a7bd 100644
+index f9e65e8..af355fb 100644
 --- a/internal/server/server.go
 +++ b/internal/server/server.go
-@@ -37,8 +37,50 @@ var (
+@@ -37,8 +37,70 @@ var (
  	ErrSocks5AuthFailed    = errors.New("SOCKS5 auth failed")
  	ErrSocks5ConnectFailed = errors.New("SOCKS5 connect failed")
  	ErrInvalidTarget       = errors.New("invalid connect target")
@@ -489,10 +1495,30 @@ index f9e65e8..755a7bd 100644
 +	return s.revokeManagedSession(sessionID)
 +}
 +
++// RevokeLease records a trusted policy revocation even while the handshake
++// has not published its session ID. Unlike CloseSession, it is not an
++// active-session-only operation.
++func (c *SessionController) RevokeLease(sessionID string) bool {
++	if c == nil {
++		return false
++	}
++	c.mu.RLock()
++	s := c.server
++	c.mu.RUnlock()
++	if s == nil || !s.requireLease {
++		return false
++	}
++	if !s.leases.revoke(sessionID) {
++		return false
++	}
++	s.revokeManagedSession(sessionID)
++	return true
++}
++
  // SessionOpenFunc is called after a successful handshake.
  type SessionOpenFunc func(sessionID, deviceID string, claims map[string]any)
  
-@@ -77,17 +119,18 @@ type Server struct {
+@@ -77,17 +139,22 @@ type Server struct {
  	// sessMu, made on first use. ai-generated: the field (olcrtc#49).
  	retiring map[string]*peerSession
  	// peerLimitWarn rate-limits the peer-cap warning.
@@ -514,39 +1540,49 @@ index f9e65e8..755a7bd 100644
 +	wg              sync.WaitGroup
 +	authHook        handshake.AuthFunc
 +	requireAuthHook bool
++	requireLease    bool
++	leaseAuthHook   ManagedLeaseAuthFunc
++	leases          leaseRegistry
 +	onOpen          SessionOpenFunc
 +	onClose         SessionCloseFunc
 +	onTraffic       TrafficFunc
 +	deviceID        string
 +	sessionID       string
++	activeLease     *managedLeaseEntry
  
  	// meter attributes stream bytes to the pinned key of their session for
  	// the /stats endpoint; link is the carrier state the same endpoint
-@@ -161,6 +204,8 @@ type Config struct {
+@@ -161,6 +228,10 @@ type Config struct {
  	Liveness                  control.Config
  	Traffic                   transport.TrafficConfig
  	AuthHook                  handshake.AuthFunc
 +	RequireAuthHook           bool
++	RequireLease              bool
++	ManagedLeaseAuthHook      ManagedLeaseAuthFunc
 +	SessionController         *SessionController
  	OnSessionOpen             SessionOpenFunc
  	OnSessionClose            SessionCloseFunc
  	OnTraffic                 TrafficFunc
-@@ -169,6 +214,9 @@ type Config struct {
+@@ -169,6 +240,12 @@ type Config struct {
  
  // Run starts the server with the given configuration.
  func Run(ctx context.Context, cfg Config) error {
-+	if cfg.RequireAuthHook && cfg.AuthHook == nil {
++	if cfg.RequireLease && cfg.ManagedLeaseAuthHook == nil {
++		return ErrLeaseHookRequired
++	}
++	if cfg.RequireAuthHook && !cfg.RequireLease && cfg.AuthHook == nil {
 +		return ErrAuthHookRequired
 +	}
  	runCtx, cancel := context.WithCancel(ctx)
  	defer cancel()
  	ring, err := setupRing(cfg)
-@@ -192,22 +240,29 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -192,22 +269,30 @@ func Run(ctx context.Context, cfg Config) error {
  		onTraffic = func(string, string, uint64, uint64) {}
  	}
  	s := &Server{
 -		ring: ring, authHook: hook, onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
-+		ring: ring, authHook: hook, requireAuthHook: cfg.RequireAuthHook,
++		ring: ring, authHook: hook, requireAuthHook: cfg.RequireAuthHook || cfg.RequireLease,
++		requireLease: cfg.RequireLease, leaseAuthHook: cfg.ManagedLeaseAuthHook,
 +		onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
  		dnsServer: cfg.DNSServer, resolver: tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer),
  		socksProxyAddr: cfg.SOCKSProxyAddr, socksProxyPort: cfg.SOCKSProxyPort,
@@ -573,14 +1609,14 @@ index f9e65e8..755a7bd 100644
  	}()
  	if cfg.StatsListen != "" {
  		s.serveStats(runCtx, cfg.StatsListen)
-@@ -223,6 +278,24 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -223,6 +308,24 @@ func Run(ctx context.Context, cfg Config) error {
  	return nil
  }
  
 +// Managed sessions stay TCP-only until UDP flows are tied to a revocable
 +// session generation and accounted while active. A config cannot opt out.
 +func effectiveUDPDisabled(cfg Config) bool {
-+	return cfg.UDPDisabled || cfg.RequireAuthHook
++	return cfg.UDPDisabled || cfg.RequireAuthHook || cfg.RequireLease
 +}
 +
 +func (s *Server) logSessionOpened(sessionID, deviceID, peerID string) {
@@ -1107,18 +2143,77 @@ index a6fbbaf..ac14bcd 100644
  		t.Fatal("attachData() refused a fresh peer")
  	}
 diff --git a/pkg/olcrtc/tunnel/tunnel.go b/pkg/olcrtc/tunnel/tunnel.go
-index 9ed322a..aae9ff0 100644
+index 9ed322a..7763ffa 100644
 --- a/pkg/olcrtc/tunnel/tunnel.go
 +++ b/pkg/olcrtc/tunnel/tunnel.go
-@@ -109,6 +109,7 @@ type Config struct {
- 	Liveness         LivenessConfig
- 	Traffic          TrafficConfig
- 	AuthHook         AuthFunc
-+	RequireAuthHook  bool
- 	OnSessionOpen    SessionOpenFunc
- 	OnSessionClose   SessionCloseFunc
- 	OnTraffic        TrafficFunc
-@@ -119,19 +120,28 @@ type runner func(context.Context, server.Config) error
+@@ -59,6 +59,11 @@ func (SEIOptions) transportOptions() {}
+ // AuthFunc authorizes a client after CLIENT_HELLO.
+ type AuthFunc func(deviceID string, claims map[string]any) (sessionID string, err error)
+ 
++// ManagedLease is supplied by a trusted server-side policy, never by client
++// claims or the legacy AuthHook.
++type ManagedLease = server.ManagedLease
++type ManagedLeaseAuthFunc = server.ManagedLeaseAuthFunc
++
+ // SessionOpenFunc is called after a successful handshake.
+ type SessionOpenFunc func(sessionID, deviceID string, claims map[string]any)
+ 
+@@ -90,48 +95,66 @@ type TrafficConfig struct {
+ 
+ // Config holds all server tunnel capabilities.
+ type Config struct {
+-	Transport        string
+-	Provider         string
+-	RoomURL          string
+-	ChannelID        string
+-	Engine           string
+-	URL              string
+-	Token            string
+-	ProviderToken    string
+-	KeyHex           string
+-	DNSServer        string
+-	Resolver         protect.Lookup
+-	SOCKSProxyAddr   string
+-	SOCKSProxyPort   int
+-	SOCKSProxyUser   string
+-	SOCKSProxyPass   string
+-	TransportOptions TransportOptions
+-	Liveness         LivenessConfig
+-	Traffic          TrafficConfig
+-	AuthHook         AuthFunc
+-	OnSessionOpen    SessionOpenFunc
+-	OnSessionClose   SessionCloseFunc
+-	OnTraffic        TrafficFunc
+-	OnHealth         HealthFunc
++	Transport            string
++	Provider             string
++	RoomURL              string
++	ChannelID            string
++	Engine               string
++	URL                  string
++	Token                string
++	ProviderToken        string
++	KeyHex               string
++	DNSServer            string
++	Resolver             protect.Lookup
++	SOCKSProxyAddr       string
++	SOCKSProxyPort       int
++	SOCKSProxyUser       string
++	SOCKSProxyPass       string
++	TransportOptions     TransportOptions
++	Liveness             LivenessConfig
++	Traffic              TrafficConfig
++	AuthHook             AuthFunc
++	RequireAuthHook      bool
++	RequireLease         bool
++	ManagedLeaseAuthHook ManagedLeaseAuthFunc
++	OnSessionOpen        SessionOpenFunc
++	OnSessionClose       SessionCloseFunc
++	OnTraffic            TrafficFunc
++	OnHealth             HealthFunc
+ }
+ 
+ type runner func(context.Context, server.Config) error
  
  // Server is an embeddable tunnel server.
  type Server struct {
@@ -1140,6 +2235,12 @@ index 9ed322a..aae9ff0 100644
 +// expiry scheduler or quota check; the embedding policy must drive it.
 +func (s *Server) CloseSession(sessionID string) bool {
 +	return s.controller.CloseSession(sessionID)
++}
++
++// RevokeLease records policy revocation even during a managed handshake.
++// It does not create a grant or alter ordinary non-managed sessions.
++func (s *Server) RevokeLease(sessionID string) bool {
++	return s.controller.RevokeLease(sessionID)
  }
  
  // Run starts the server and blocks until ctx is canceled or the provider ends.
@@ -1151,7 +2252,7 @@ index 9ed322a..aae9ff0 100644
  		return fmt.Errorf("tunnel: %w", err)
  	}
  	return nil
-@@ -152,10 +162,11 @@ func toServerConfig(cfg Config) server.Config {
+@@ -152,10 +175,13 @@ func toServerConfig(cfg Config) server.Config {
  			MaxPayloadSize: cfg.Traffic.MaxPayloadSize,
  			MinDelay:       cfg.Traffic.MinDelay, MaxDelay: cfg.Traffic.MaxDelay,
  		},
@@ -1159,16 +2260,18 @@ index 9ed322a..aae9ff0 100644
 -		OnSessionOpen:  server.SessionOpenFunc(cfg.OnSessionOpen),
 -		OnSessionClose: server.SessionCloseFunc(cfg.OnSessionClose),
 -		OnTraffic:      server.TrafficFunc(cfg.OnTraffic), OnHealth: server.HealthFunc(cfg.OnHealth),
-+		AuthHook:        handshake.AuthFunc(cfg.AuthHook),
-+		RequireAuthHook: cfg.RequireAuthHook,
-+		OnSessionOpen:   server.SessionOpenFunc(cfg.OnSessionOpen),
-+		OnSessionClose:  server.SessionCloseFunc(cfg.OnSessionClose),
-+		OnTraffic:       server.TrafficFunc(cfg.OnTraffic), OnHealth: server.HealthFunc(cfg.OnHealth),
++		AuthHook:             handshake.AuthFunc(cfg.AuthHook),
++		RequireAuthHook:      cfg.RequireAuthHook,
++		RequireLease:         cfg.RequireLease,
++		ManagedLeaseAuthHook: cfg.ManagedLeaseAuthHook,
++		OnSessionOpen:        server.SessionOpenFunc(cfg.OnSessionOpen),
++		OnSessionClose:       server.SessionCloseFunc(cfg.OnSessionClose),
++		OnTraffic:            server.TrafficFunc(cfg.OnTraffic), OnHealth: server.HealthFunc(cfg.OnHealth),
  	}
  }
  
 diff --git a/pkg/olcrtc/tunnel/tunnel_test.go b/pkg/olcrtc/tunnel/tunnel_test.go
-index 364603b..0252b9a 100644
+index 364603b..2646e6a 100644
 --- a/pkg/olcrtc/tunnel/tunnel_test.go
 +++ b/pkg/olcrtc/tunnel/tunnel_test.go
 @@ -24,6 +24,7 @@ func TestConfigMapping(t *testing.T) {
@@ -1189,7 +2292,7 @@ index 364603b..0252b9a 100644
  	if id, err := got.AuthHook("device", map[string]any{"key": "-claim"}); err != nil || id != "device-claim" {
  		t.Fatalf("AuthHook() = (%q, %v)", id, err)
  	}
-@@ -84,3 +88,22 @@ func TestRunUsesMappedConfig(t *testing.T) {
+@@ -84,3 +88,48 @@ func TestRunUsesMappedConfig(t *testing.T) {
  		t.Fatalf("runner config = %#v", got)
  	}
  }
@@ -1210,5 +2313,31 @@ index 364603b..0252b9a 100644
 +	}
 +	if err := srv.Run(context.Background()); !errors.Is(err, errRunner) {
 +		t.Fatalf("Run() error = %v, want %v", err, errRunner)
++	}
++}
++
++func TestManagedLeaseConfigKeepsLegacyAuthHookSeparate(t *testing.T) {
++	deadline := time.Now().Add(time.Minute)
++	cfg := Config{
++		RequireLease: true,
++		AuthHook:     func(string, map[string]any) (string, error) { return "legacy-session", nil },
++		ManagedLeaseAuthHook: func(context.Context, string, map[string]any) (ManagedLease, error) {
++			return ManagedLease{SessionID: "trusted-lease-session", NotAfter: deadline}, nil
++		},
++	}
++	got := toServerConfig(cfg)
++	if !got.RequireLease || got.ManagedLeaseAuthHook == nil {
++		t.Fatal("trusted lease requirement was dropped by the embeddable wrapper")
++	}
++	lease, err := got.ManagedLeaseAuthHook(context.Background(), "device", nil)
++	if err != nil || lease.SessionID != "trusted-lease-session" || !lease.NotAfter.Equal(deadline) {
++		t.Fatalf("trusted lease hook mapping = (%+v, %v)", lease, err)
++	}
++	legacyID, err := got.AuthHook("device", nil)
++	if err != nil || legacyID != "legacy-session" {
++		t.Fatalf("legacy AuthHook changed = (%q, %v)", legacyID, err)
++	}
++	if New(cfg).RevokeLease("unknown") {
++		t.Fatal("unstarted server recorded a policy revoke")
 +	}
 +}

@@ -6,20 +6,20 @@
 
 ## Task 1 — trusted lease contract
 
-- [ ] RED: managed lease mode rejects a missing hook, empty/reused session ID, zero/past deadline, overlong deadline and an already-revoked ID before any `SERVER_WELCOME` or data readiness. Legacy `RequireAuthHook` remains a cutoff primitive, not subscription-safe admission.
-- [ ] Add an opt-in `RequireLease` with a separate trusted `ManagedLeaseAuthHook` returning `{SessionID, NotAfter}`. Do not derive a lease from PSK, device ID, client claims or the accounting meter. Keep all new admission default-off.
+- [x] RED: managed lease mode rejects a missing hook, empty/reused session ID, zero/past deadline, overlong deadline and an already-revoked ID before any `SERVER_WELCOME` or data readiness. Legacy `RequireAuthHook` remains a cutoff primitive, not subscription-safe admission.
+- [x] Add an opt-in `RequireLease` with a separate trusted `ManagedLeaseAuthHook` returning `{SessionID, NotAfter}`. Do not derive a lease from PSK, device ID, client claims or the accounting meter. Keep all new admission default-off.
 
 ## Task 2 — close the handshake publication window
 
-- [ ] RED: in singleton, peer-control and data-only peer paths, block after the managed hook returns but before WELCOME, revoke the ID, then release the handshake. No path may activate the ID, signal readiness, accept a CONNECT or leave a peer running.
-- [ ] Maintain bounded pending/active/revoked lease state with a process-local generation. Register pending before WELCOME; a trusted in-process revoke records a tombstone even if the session is not yet published. Publish then activate only after rechecking revoke and deadline, before callbacks/readiness. Abort pending on failed handshakes and teardown. Reject duplicate IDs while remembered. Never evict a live tombstone to accept new access; overflow fails closed.
-- [ ] Preserve the existing `CloseSession(activeID)` contract and add a distinct authoritative lease-revoke method for the Bridge integration; a stale timer must target the exact generation and not close a replacement.
+- [x] RED: in singleton, peer-control and data-only peer paths, block after the managed hook returns but before WELCOME, revoke the ID, then release the handshake. No path may activate the ID, signal readiness, accept a CONNECT or leave a peer running.
+- [x] Maintain bounded pending/active/revoked lease state with a process-local generation. Register pending before WELCOME; a trusted in-process revoke records a tombstone even if the session is not yet published. Publish then activate only after rechecking revoke and deadline, before callbacks/readiness. Abort pending on failed handshakes and teardown. Reject duplicate IDs while remembered. Never evict a live tombstone to accept new access; overflow fails closed.
+- [x] Preserve the existing `CloseSession(activeID)` contract and add a distinct authoritative lease-revoke method for the Bridge integration; a stale timer targets the exact generation and cannot close a replacement.
 
 ## Task 3 — finite server-side lifetime
 
-- [ ] RED: a frozen client with an open TCP stream is cut off by the node at `NotAfter` without a client refresh or Bridge push. Revoke before deadline also cuts off. A failed or absent renewal cannot extend the local deadline.
-- [ ] The node owns the deadline timer/context and closes the exact active managed generation. Ordinary non-managed sessions retain their current behavior. No UDP grant in managed mode.
+- [x] RED: a frozen client with an open TCP stream is cut off by the node at `NotAfter` without a client refresh or Bridge push. Revoke before deadline also cuts off. A failed or absent renewal cannot extend the local deadline.
+- [x] The node owns the deadline timer/context and closes the exact active managed generation. Ordinary non-managed sessions retain their current behavior. No UDP grant in managed mode.
 
 ## Task 4 — independent validation and carrier
 
-- [ ] Repeat focused concurrency/handshake tests, affected Go packages and vet. Review the diff for deadlocks, stale-generation closure and secret-bearing logs. Run exact-base `git apply --check`, offline carrier tests, materialize a new clean copy and rerun affected package tests. Update patch digest only with reviewed bytes. Do not call this production-ready or a common quota: stream-time meter, Bridge admission, Xray-side proof, status-only restricted carrier and physical A063 checks remain separate gates.
+- [x] Repeat focused concurrency/handshake tests, affected Go packages and vet. Independent read-only review found no new P0/P1. Exact-base `git apply --check`, ten offline carrier tests and a new clean materialization pass the four affected Go packages plus vet. The full fork suite is not green: `salutejazz` timed out in ICE/network tests, and two `internal/gate` tests failed; both gate tests also failed on the pre-lease source in a focused comparison. `-race` is unavailable on this Windows host (`CGO_ENABLED=0`, no GCC). Do not call this production-ready or a common quota: stream-time meter, Bridge admission, Xray-side proof, status-only restricted carrier and physical A063 checks remain separate gates.
