@@ -33,7 +33,22 @@ func writeResolve(w http.ResponseWriter) {
 
 func writeUser(w http.ResponseWriter, status, traffic string) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, fmt.Sprintf(`{"response":{"id":42,"status":%q,"expireAt":"2026-10-01T00:00:00Z","trafficLimitBytes":1000,"trafficLimitStrategy":"MONTH","hwidDeviceLimit":2,%s}}`, status, traffic))
+	_, _ = io.WriteString(w, fmt.Sprintf(`{"response":{"id":42,"shortUuid":"short-uuid-secret","status":%q,"expireAt":"2026-10-01T00:00:00Z","trafficLimitBytes":1000,"trafficLimitStrategy":"MONTH","hwidDeviceLimit":2,%s}}`, status, traffic))
+}
+
+func TestLookupRejectsRotatedShortUUIDBetweenResolveAndUser(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/users/resolve" {
+			writeResolve(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"response":{"id":42,"shortUuid":"rotated-short-uuid","status":"ACTIVE","expireAt":"2026-10-01T00:00:00Z","trafficLimitBytes":1000,"trafficLimitStrategy":"MONTH","userTraffic":{"usedTrafficBytes":250}}}`)
+	})
+	_, err := client.Lookup(context.Background(), testShortUUID)
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("rotated subscription bearer should not link, got %v", err)
+	}
 }
 
 func TestLookupResolvesThenReadsUserWithoutBearerInPath(t *testing.T) {
@@ -129,6 +144,29 @@ func TestLookupRejectsNonSuccessWithoutLeakingResponse(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), testToken) || strings.Contains(err.Error(), testShortUUID) {
 				t.Fatalf("error leaked credentials: %v", err)
+			}
+		})
+	}
+}
+
+func TestLookupDistinguishesMissingUserAndPanelAuthenticationFromOutage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{name: "missing user", status: http.StatusNotFound, want: ErrNotFound},
+		{name: "invalid admin token", status: http.StatusUnauthorized, want: ErrPanelAuthentication},
+		{name: "admin access forbidden", status: http.StatusForbidden, want: ErrPanelAuthentication},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, testToken+" "+testShortUUID)
+			})
+			_, err := client.Lookup(context.Background(), testShortUUID)
+			if !errors.Is(err, tc.want) || strings.Contains(err.Error(), testToken) || strings.Contains(err.Error(), testShortUUID) {
+				t.Fatalf("wrong redacted error for status %d: %v", tc.status, err)
 			}
 		})
 	}

@@ -22,9 +22,11 @@ const (
 )
 
 var (
-	ErrInvalidConfig   = errors.New("remnawave: invalid configuration")
-	ErrInvalidResponse = errors.New("remnawave: invalid response")
-	ErrUnavailable     = errors.New("remnawave: unavailable")
+	ErrInvalidConfig       = errors.New("remnawave: invalid configuration")
+	ErrInvalidResponse     = errors.New("remnawave: invalid response")
+	ErrUnavailable         = errors.New("remnawave: unavailable")
+	ErrNotFound            = errors.New("remnawave: user not found")
+	ErrPanelAuthentication = errors.New("remnawave: panel authentication failed")
 )
 
 type Status string
@@ -125,6 +127,7 @@ func (c *Client) Lookup(ctx context.Context, shortUUID string) (UserSnapshot, er
 	var user struct {
 		Response struct {
 			ID                   int64           `json:"id"`
+			ShortUUID            string          `json:"shortUuid"`
 			Status               Status          `json:"status"`
 			ExpiresAt            string          `json:"expireAt"`
 			TrafficLimitBytes    *int64          `json:"trafficLimitBytes"`
@@ -140,7 +143,7 @@ func (c *Client) Lookup(ctx context.Context, shortUUID string) (UserSnapshot, er
 	}
 	u := user.Response
 	expiresAt, err := time.Parse(time.RFC3339Nano, u.ExpiresAt)
-	if err != nil || u.ID != resolved.Response.ID || !knownStatus(u.Status) || !knownStrategy(u.TrafficLimitStrategy) || u.TrafficLimitBytes == nil || *u.TrafficLimitBytes < 0 || u.UserTraffic == nil || u.UserTraffic.UsedTrafficBytes == nil || *u.UserTraffic.UsedTrafficBytes < 0 {
+	if err != nil || u.ID != resolved.Response.ID || u.ShortUUID != shortUUID || !knownStatus(u.Status) || !knownStrategy(u.TrafficLimitStrategy) || u.TrafficLimitBytes == nil || *u.TrafficLimitBytes < 0 || u.UserTraffic == nil || u.UserTraffic.UsedTrafficBytes == nil || *u.UserTraffic.UsedTrafficBytes < 0 {
 		return UserSnapshot{}, ErrInvalidResponse
 	}
 	return UserSnapshot{
@@ -189,7 +192,13 @@ func (c *Client) request(ctx context.Context, method, path string, body []byte) 
 		return nil, ErrUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, ErrNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, ErrPanelAuthentication
+	default:
 		return nil, ErrUnavailable
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
