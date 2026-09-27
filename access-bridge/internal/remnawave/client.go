@@ -78,7 +78,7 @@ func NewClient(origin, adminToken string, httpClient *http.Client) (*Client, err
 		httpClient = http.DefaultClient
 	}
 	copyClient := *httpClient
-	if copyClient.Timeout == 0 || copyClient.Timeout > requestTimeout {
+	if copyClient.Timeout <= 0 || copyClient.Timeout > requestTimeout {
 		copyClient.Timeout = requestTimeout
 	}
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -120,7 +120,23 @@ func (c *Client) Lookup(ctx context.Context, shortUUID string) (UserSnapshot, er
 	if json.Unmarshal(resolveBody, &resolved) != nil || resolved.Response.ID <= 0 || resolved.Response.ShortUUID != shortUUID {
 		return UserSnapshot{}, ErrInvalidResponse
 	}
-	userBody, err := c.request(ctx, http.MethodGet, "/api/users/"+strconv.FormatInt(resolved.Response.ID, 10), nil)
+	return c.lookupUser(ctx, resolved.Response.ID, shortUUID)
+}
+
+// LookupByID refreshes a linked user by canonical numeric ID without the
+// subscription bearer. The caller must bind this client to the right panel.
+func (c *Client) LookupByID(ctx context.Context, id int64) (UserSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return UserSnapshot{}, err
+	}
+	if id <= 0 {
+		return UserSnapshot{}, ErrInvalidConfig
+	}
+	return c.lookupUser(ctx, id, "")
+}
+
+func (c *Client) lookupUser(ctx context.Context, id int64, shortUUID string) (UserSnapshot, error) {
+	userBody, err := c.request(ctx, http.MethodGet, "/api/users/"+strconv.FormatInt(id, 10), nil)
 	if err != nil {
 		return UserSnapshot{}, err
 	}
@@ -143,7 +159,7 @@ func (c *Client) Lookup(ctx context.Context, shortUUID string) (UserSnapshot, er
 	}
 	u := user.Response
 	expiresAt, err := time.Parse(time.RFC3339Nano, u.ExpiresAt)
-	if err != nil || u.ID != resolved.Response.ID || u.ShortUUID != shortUUID || !knownStatus(u.Status) || !knownStrategy(u.TrafficLimitStrategy) || u.TrafficLimitBytes == nil || *u.TrafficLimitBytes < 0 || u.UserTraffic == nil || u.UserTraffic.UsedTrafficBytes == nil || *u.UserTraffic.UsedTrafficBytes < 0 {
+	if err != nil || u.ID != id || (shortUUID != "" && u.ShortUUID != shortUUID) || !knownStatus(u.Status) || !knownStrategy(u.TrafficLimitStrategy) || u.TrafficLimitBytes == nil || *u.TrafficLimitBytes < 0 || u.UserTraffic == nil || u.UserTraffic.UsedTrafficBytes == nil || *u.UserTraffic.UsedTrafficBytes < 0 {
 		return UserSnapshot{}, ErrInvalidResponse
 	}
 	return UserSnapshot{
