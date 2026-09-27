@@ -87,7 +87,8 @@ jobs:
             --tests org.olcbox.app.ui.features.home.HomeScreenModelImportLinkTest \
             --tests org.olcbox.app.ui.HostAndSubscriptionPresenterTest \
             --tests org.olcbox.app.net.ExactXrayChainPlanTest \
-            --tests org.olcbox.app.net.SingBoxConfigTest
+            --tests org.olcbox.app.net.SingBoxConfigTest \
+            --tests org.olcbox.app.net.SingBoxConfigDumpTest.dumpExactXrayRegionalFront
 
       - name: Build commit-pinned sing-box for arm64
         shell: bash
@@ -108,6 +109,23 @@ jobs:
           go build -trimpath -o "${out}/libsingboxcore.so" -tags "$tags" \
             -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${version}' ${ldflags} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
             ./cmd/sing-box
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          go build -trimpath -o "$RUNNER_TEMP/sing-box-host" -tags "$tags" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${version}' ${ldflags} -s -w -buildid=" \
+            ./cmd/sing-box
+
+      - name: Validate the generated exact Xray policy front
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/sing-box-host"
+          expected="$(python3 -c 'import json; print(json.load(open("scripts/apollo-rga-release-pins.json"))["singbox_commit"])')"
+          [[ "$("$bin" version | awk '$1 == "Revision:" { print $2 }')" == "$expected" ]] || {
+            echo 'Host sing-box revision does not match the pinned Android core.' >&2
+            exit 1
+          }
+          SINGBOX_BIN="$bin" scripts/check-singbox-configs.sh
 
       - name: Build exact pinned Xray for arm64
         run: |
