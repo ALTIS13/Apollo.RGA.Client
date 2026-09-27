@@ -169,20 +169,188 @@ index 5f329b4..496f216 100644
  	}
  }
  
+diff --git a/internal/server/link.go b/internal/server/link.go
+index d5ca886..7eb056c 100644
+--- a/internal/server/link.go
++++ b/internal/server/link.go
+@@ -395,6 +395,86 @@ func (s *Server) closeSession() {
+ 	s.closeAllUDPFlows()
+ }
+ 
++// revokeManagedSession cuts off only the named managed session. A stale caller
++// cannot close a replacement peer because endPeer checks pointer identity.
++// The managed path skips the graceful close notice so data transport closes
++// before this method returns.
++func (s *Server) revokeManagedSession(sessionID string) bool {
++	if !s.requireAuthHook || sessionID == "" {
++		return false
++	}
++	s.sessMu.RLock()
++	peers := make([]*peerSession, 0, 1)
++	for _, peer := range s.peerSessions {
++		if peer.sid() == sessionID {
++			peers = append(peers, peer)
++		}
++	}
++	s.sessMu.RUnlock()
++	closed := false
++	for _, peer := range peers {
++		if s.endPeer(peer, "revoked", false) {
++			closed = true
++		}
++	}
++	return s.revokeSingleManagedSession(sessionID) || closed
++}
++
++func (s *Server) revokeSingleManagedSession(expectedID string) bool {
++	s.sessMu.Lock()
++	if s.sessionID != expectedID {
++		s.sessMu.Unlock()
++		return false
++	}
++	pair := s.pair
++	session := s.session
++	controlSession := s.controlSess
++	conn := s.conn
++	controlConn := s.controlConn
++	controlStream := s.controlStrm
++	controlStop := s.controlStop
++	s.controlStrm, s.controlStop = nil, nil
++	s.sessionID, s.deviceID = "", ""
++	s.sessMu.Unlock()
++	s.state.broadcast()
++	if controlStop != nil {
++		controlStop()
++	}
++	// A smux stream Close can wait for its FIN to drain. Shut down the data
++	// carrier first, so a stalled control plane cannot delay revocation.
++	if conn != nil {
++		_ = conn.Close()
++	}
++	if session != nil {
++		_ = session.Close()
++	}
++	if controlConn != nil {
++		_ = controlConn.Close()
++	}
++	if pair != nil {
++		_ = pair.Close()
++	} else {
++		closeServerPair(nil, nil, controlSession)
++	}
++	if controlStream != nil {
++		_ = controlStream.Close()
++	}
++	s.onClose(expectedID, "revoked")
++	s.trackPeerClose(expectedID, "revoked")
++	// Keep the closed generation published until the replacement swaps under
++	// sessMu. A blocked serveSingle can then reinstall it, and an isolated
++	// control plane also receives an explicit tracked reinstall attempt.
++	if s.ln != nil && s.ring != nil && !s.stopping() {
++		ctx := s.streamContext()
++		s.goTracked(func() {
++			if !contextDone(ctx) {
++				s.reinstallSession(ctx, session)
++			}
++		})
++	}
++	return true
++}
++
+ func (s *Server) onData(data []byte) {
+ 	s.sessMu.RLock()
+ 	conn := s.conn
 diff --git a/internal/server/peer.go b/internal/server/peer.go
-index d683ea8..2d5b558 100644
+index d683ea8..cda729f 100644
 --- a/internal/server/peer.go
 +++ b/internal/server/peer.go
-@@ -465,7 +465,7 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
+@@ -461,11 +461,15 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
+ 			return
+ 		}
+ 		s.meter.bind(sessionID, peer.group.KeyID())
+-		peer.signalReady()
  		s.health.RecordSession(sessionID)
- 		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
+-		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
  		s.trackPeerOpen(sessionID, hello.DeviceID)
 -		logger.Infof("peer session %s opened (peer=%s device=%s)", sessionID, peer.peerID, hello.DeviceID)
 +		s.logSessionOpened(sessionID, hello.DeviceID, peer.peerID)
++		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
++		if !s.peerSessionActive(peer, sessionID) {
++			_ = stream.Close()
++			return
++		}
++		peer.signalReady()
  		s.startPeerControlLoop(ctx, peer, stream)
  		return
  	}
-@@ -767,7 +767,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
+@@ -565,8 +569,6 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+ 		// answered - it started its session over - and the session opened
+ 		// for that hello is on no peer to be closed with it.
+ 		_ = stream.Close()
+-		s.onClose(result.sessionID, "closed")
+-		s.trackPeerClose(result.sessionID, "closed")
+ 		return false
+ 	}
+ 	// This is the handshake path of transports that route peers without a
+@@ -574,10 +576,31 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+ 	// learns the session's key here, as acceptPeerHandshake does for the
+ 	// control-plane path.
+ 	s.meter.bind(result.sessionID, peer.group.KeyID())
++	s.health.RecordSession(result.sessionID)
++	s.trackPeerOpen(result.sessionID, result.deviceID)
++	s.logSessionOpened(result.sessionID, result.deviceID, peer.peerID)
++	s.onOpen(result.sessionID, result.deviceID, result.claims)
++	if !s.peerSessionActive(peer, result.sessionID) {
++		_ = stream.Close()
++		return false
++	}
+ 	s.startPeerControlLoop(ctx, peer, stream)
+ 	return true
+ }
+ 
++func (s *Server) peerSessionActive(peer *peerSession, sessionID string) bool {
++	s.sessMu.RLock()
++	current := s.peerSessions[peer.peerID] == peer
++	s.sessMu.RUnlock()
++	if !current {
++		return false
++	}
++	peer.mu.Lock()
++	active := !peer.closed && peer.sessionID == sessionID
++	peer.mu.Unlock()
++	return active
++}
++
+ // waitPeerHandshake blocks until the peer's control-plane handshake lands.
+ // The wait is bounded: an unauthenticated peer that never handshakes would
+ // otherwise pin its whole session stack until the server stops, and a peer
+@@ -622,14 +645,14 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
+ //
+ // ai-generated: notify and the retirement a new session takes over
+ // (olcrtc#49); the rest is removePeer as it was.
+-func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
++func (s *Server) endPeer(peer *peerSession, reason string, notify bool) bool {
+ 	if peer == nil {
+-		return
++		return false
+ 	}
+ 	s.sessMu.Lock()
+ 	if s.peerSessions[peer.peerID] != peer {
+ 		s.sessMu.Unlock()
+-		return
++		return false
+ 	}
+ 	delete(s.peerSessions, peer.peerID)
+ 	if s.retiring == nil {
+@@ -647,6 +670,7 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
+ 	if own {
+ 		s.retirePeer(peer.peerID)
+ 	}
++	return true
+ }
+ 
+ // retireEndedLocked tells the transport that the session ended for peerID
+@@ -767,7 +791,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
  	s.peerStats[sessionID] = peerStat{deviceID: deviceID, openedAt: time.Now()}
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -195,7 +363,7 @@ index d683ea8..2d5b558 100644
  	logger.Infof("%s", line)
  }
  
-@@ -781,12 +785,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
+@@ -781,12 +809,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
  	delete(s.peerStats, sessionID)
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -218,31 +386,113 @@ index d683ea8..2d5b558 100644
  	for _, stat := range s.peerStats {
  		devices = append(devices, stat.deviceID)
 diff --git a/internal/server/serve.go b/internal/server/serve.go
-index 203ece2..928af32 100644
+index 203ece2..d37b40a 100644
 --- a/internal/server/serve.go
 +++ b/internal/server/serve.go
-@@ -178,7 +178,7 @@ func (s *Server) answerHello(
- 		s.health.RecordSession(sessionID)
- 		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
- 		s.trackPeerOpen(sessionID, hello.DeviceID)
+@@ -127,6 +127,7 @@ func (s *Server) handshakeReady() bool {
+ type handshakeResult struct {
+ 	sessionID string
+ 	deviceID  string
++	claims    map[string]any
+ }
+ 
+ // acceptHandshake answers the hello on the server's own session, and
+@@ -175,11 +176,7 @@ func (s *Server) answerHello(
+ 			logger.Warnf("handshake failed: %v", err)
+ 			return nil, handshakeResult{}, false
+ 		}
+-		s.health.RecordSession(sessionID)
+-		s.onOpen(sessionID, hello.DeviceID, hello.Claims)
+-		s.trackPeerOpen(sessionID, hello.DeviceID)
 -		logger.Infof("session %s opened (device=%s)", sessionID, hello.DeviceID)
-+		s.logSessionOpened(sessionID, hello.DeviceID, "")
- 		return stream, handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID}, true
+-		return stream, handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID}, true
++		return stream, handshakeResult{sessionID: sessionID, deviceID: hello.DeviceID, claims: hello.Claims}, true
  	}
  	return nil, handshakeResult{}, false
+ }
+@@ -198,10 +195,26 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
+ 		return false
+ 	}
+ 	s.sessMu.Lock()
++	if s.session != session {
++		s.sessMu.Unlock()
++		_ = stream.Close()
++		return false
++	}
+ 	s.deviceID = result.deviceID
+ 	s.sessionID = result.sessionID
+ 	s.meter.bind(result.sessionID, s.group.KeyID())
+ 	s.sessMu.Unlock()
++	s.health.RecordSession(result.sessionID)
++	s.trackPeerOpen(result.sessionID, result.deviceID)
++	s.logSessionOpened(result.sessionID, result.deviceID, "")
++	s.onOpen(result.sessionID, result.deviceID, result.claims)
++	s.sessMu.RLock()
++	active := s.session == session && s.sessionID == result.sessionID
++	s.sessMu.RUnlock()
++	if !active {
++		_ = stream.Close()
++		return false
++	}
+ 	s.state.broadcast()
+ 	s.startControlLoop(ctx, session, stream)
+ 	return true
 diff --git a/internal/server/server.go b/internal/server/server.go
-index f9e65e8..fde0a74 100644
+index f9e65e8..755a7bd 100644
 --- a/internal/server/server.go
 +++ b/internal/server/server.go
-@@ -37,6 +37,7 @@ var (
+@@ -37,8 +37,50 @@ var (
  	ErrSocks5AuthFailed    = errors.New("SOCKS5 auth failed")
  	ErrSocks5ConnectFailed = errors.New("SOCKS5 connect failed")
  	ErrInvalidTarget       = errors.New("invalid connect target")
 +	ErrAuthHookRequired    = errors.New("managed server requires auth hook")
++	ErrControllerInUse     = errors.New("session controller is already bound")
  )
  
++// SessionController exposes only managed-session cutoff, never admission.
++// It is attached to exactly one running server at a time.
++type SessionController struct {
++	mu     sync.RWMutex
++	server *Server
++}
++
++func (c *SessionController) attach(s *Server) bool {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.server != nil {
++		return false
++	}
++	c.server = s
++	return true
++}
++
++func (c *SessionController) detach(s *Server) {
++	c.mu.Lock()
++	if c.server == s {
++		c.server = nil
++	}
++	c.mu.Unlock()
++}
++
++// CloseSession returns whether an active managed session with the exact ID
++// was cut off. It does nothing before Run, after Run or in legacy mode.
++func (c *SessionController) CloseSession(sessionID string) bool {
++	if c == nil {
++		return false
++	}
++	c.mu.RLock()
++	s := c.server
++	c.mu.RUnlock()
++	if s == nil {
++		return false
++	}
++	return s.revokeManagedSession(sessionID)
++}
++
  // SessionOpenFunc is called after a successful handshake.
-@@ -77,17 +78,18 @@ type Server struct {
+ type SessionOpenFunc func(sessionID, deviceID string, claims map[string]any)
+ 
+@@ -77,17 +119,18 @@ type Server struct {
  	// sessMu, made on first use. ai-generated: the field (olcrtc#49).
  	retiring map[string]*peerSession
  	// peerLimitWarn rate-limits the peer-cap warning.
@@ -272,15 +522,16 @@ index f9e65e8..fde0a74 100644
  
  	// meter attributes stream bytes to the pinned key of their session for
  	// the /stats endpoint; link is the carrier state the same endpoint
-@@ -161,6 +163,7 @@ type Config struct {
+@@ -161,6 +204,8 @@ type Config struct {
  	Liveness                  control.Config
  	Traffic                   transport.TrafficConfig
  	AuthHook                  handshake.AuthFunc
 +	RequireAuthHook           bool
++	SessionController         *SessionController
  	OnSessionOpen             SessionOpenFunc
  	OnSessionClose            SessionCloseFunc
  	OnTraffic                 TrafficFunc
-@@ -169,6 +172,9 @@ type Config struct {
+@@ -169,6 +214,9 @@ type Config struct {
  
  // Run starts the server with the given configuration.
  func Run(ctx context.Context, cfg Config) error {
@@ -290,7 +541,7 @@ index f9e65e8..fde0a74 100644
  	runCtx, cancel := context.WithCancel(ctx)
  	defer cancel()
  	ring, err := setupRing(cfg)
-@@ -192,14 +198,15 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -192,22 +240,29 @@ func Run(ctx context.Context, cfg Config) error {
  		onTraffic = func(string, string, uint64, uint64) {}
  	}
  	s := &Server{
@@ -308,7 +559,21 @@ index f9e65e8..fde0a74 100644
  		// ai-generated: the test hook (egress hardening); a release build
  		// has no hook and always keeps the policy.
  		unsafeAllowPrivateTargets: cfg.UnsafeAllowPrivateTargets || testhooks.AllowPrivateTargets(),
-@@ -223,6 +230,24 @@ func Run(ctx context.Context, cfg Config) error {
+ 		udpFlows:                  make(map[serverUDPKey]*serverUDPFlow),
+ 	}
++	if cfg.SessionController != nil && !cfg.SessionController.attach(s) {
++		return ErrControllerInUse
++	}
+ 	defer func() {
+ 		s.shutdown()
+ 		s.wg.Wait()
++		if cfg.SessionController != nil {
++			cfg.SessionController.detach(s)
++		}
+ 	}()
+ 	if cfg.StatsListen != "" {
+ 		s.serveStats(runCtx, cfg.StatsListen)
+@@ -223,6 +278,24 @@ func Run(ctx context.Context, cfg Config) error {
  	return nil
  }
  
@@ -334,10 +599,10 @@ index f9e65e8..fde0a74 100644
  // agent polls. Best effort: a bind failure logs and leaves the meter in
  // memory only, never blocking the tunnel. The listener closes with ctx.
 diff --git a/internal/server/server_test.go b/internal/server/server_test.go
-index a6fbbaf..cf3f241 100644
+index a6fbbaf..ac14bcd 100644
 --- a/internal/server/server_test.go
 +++ b/internal/server/server_test.go
-@@ -6,6 +6,7 @@ import (
+@@ -6,9 +6,11 @@ import (
  	"encoding/json"
  	"errors"
  	"io"
@@ -345,7 +610,11 @@ index a6fbbaf..cf3f241 100644
  	"net"
  	"strings"
  	"sync"
-@@ -118,6 +119,58 @@ func TestDefaultAuthHook(t *testing.T) {
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
+@@ -118,6 +120,475 @@ func TestDefaultAuthHook(t *testing.T) {
  	}
  }
  
@@ -373,6 +642,423 @@ index a6fbbaf..cf3f241 100644
 +				t.Fatalf("effectiveUDPDisabled() = %v, want %v", got, tc.want)
 +			}
 +		})
++	}
++}
++
++func TestManagedSessionRevocationClosesOnlyMatchingPeer(t *testing.T) {
++	firstSession, _, firstCleanup := smuxPair(t)
++	defer firstCleanup()
++	secondSession, _, secondCleanup := smuxPair(t)
++	defer secondCleanup()
++	first := &peerSession{peerID: "peer-first", sessionID: "sid-first", session: firstSession}
++	second := &peerSession{peerID: "peer-second", sessionID: "sid-second", session: secondSession}
++	s := &Server{
++		requireAuthHook: true,
++		peerSessions:    map[string]*peerSession{first.peerID: first, second.peerID: second},
++		onClose:         func(string, string) {},
++	}
++	if s.revokeManagedSession("") || s.revokeManagedSession("unknown") {
++		t.Fatal("empty or unknown session unexpectedly revoked a peer")
++	}
++	if !s.revokeManagedSession("sid-first") {
++		t.Fatal("matching session was not revoked")
++	}
++	if !firstSession.IsClosed() {
++		t.Fatal("revoked peer data session stayed open")
++	}
++	if secondSession.IsClosed() || s.peerSessions[second.peerID] != second {
++		t.Fatal("revoking first peer closed unrelated peer")
++	}
++	if s.revokeManagedSession("sid-first") {
++		t.Fatal("repeated revoke claimed to close the old session again")
++	}
++}
++
++func TestManagedSessionRevocationPreservesReplacementPeer(t *testing.T) {
++	old := &peerSession{peerID: "same-peer", sessionID: "sid-old"}
++	liveSession, _, cleanup := smuxPair(t)
++	defer cleanup()
++	live := &peerSession{peerID: old.peerID, sessionID: "sid-new", session: liveSession}
++	s := &Server{requireAuthHook: true, peerSessions: map[string]*peerSession{live.peerID: live}}
++	if s.revokeManagedSession(old.sessionID) {
++		t.Fatal("stale session revoked replacement")
++	}
++	if liveSession.IsClosed() || s.peerSessions[live.peerID] != live {
++		t.Fatal("replacement peer was altered by stale revoke")
++	}
++}
++
++func TestManagedSessionRevocationChecksSingleLinkWithoutClosingPeers(t *testing.T) {
++	globalSession, _, globalCleanup := smuxPair(t)
++	defer globalCleanup()
++	otherSession, _, peerCleanup := smuxPair(t)
++	defer peerCleanup()
++	peer := &peerSession{peerID: "other-peer", sessionID: "sid-peer", session: otherSession}
++	s := &Server{
++		requireAuthHook: true, sessionID: "sid-global", session: globalSession,
++		peerSessions: map[string]*peerSession{peer.peerID: peer},
++		onClose:      func(string, string) {},
++	}
++	if s.revokeManagedSession("sid-stale") || globalSession.IsClosed() {
++		t.Fatal("stale single-link revoke closed current session")
++	}
++	if !s.revokeManagedSession("sid-global") || !globalSession.IsClosed() {
++		t.Fatal("matching single-link session was not closed")
++	}
++	if otherSession.IsClosed() || s.peerSessions[peer.peerID] != peer {
++		t.Fatal("single-link revoke closed unrelated peer")
++	}
++}
++
++func TestSessionControllerOnlyTargetsBoundManagedRun(t *testing.T) {
++	controller := &SessionController{}
++	if controller.CloseSession("sid") {
++		t.Fatal("unbound controller revoked a session")
++	}
++	dataSession, _, cleanup := smuxPair(t)
++	defer cleanup()
++	managed := &Server{
++		requireAuthHook: true, sessionID: "sid", session: dataSession,
++		onClose: func(string, string) {},
++	}
++	if !controller.attach(managed) || controller.attach(&Server{}) {
++		t.Fatal("controller accepted no run or a concurrent second run")
++	}
++	if !controller.CloseSession("sid") || !dataSession.IsClosed() {
++		t.Fatal("bound managed session was not revoked")
++	}
++	controller.detach(&Server{})
++	if controller.attach(&Server{}) {
++		t.Fatal("stale detach removed the active run")
++	}
++	controller.detach(managed)
++	if controller.CloseSession("sid") {
++		t.Fatal("controller retained a stopped run")
++	}
++	legacySession, _, legacyCleanup := smuxPair(t)
++	defer legacyCleanup()
++	legacy := &Server{sessionID: "legacy", session: legacySession}
++	if !controller.attach(legacy) {
++		t.Fatal("controller did not bind a later run")
++	}
++	if controller.CloseSession("legacy") || legacySession.IsClosed() {
++		t.Fatal("controller revoked a non-managed session")
++	}
++	controller.detach(legacy)
++}
++
++func TestManagedSessionConcurrentRevokeClosesOnce(t *testing.T) {
++	dataSession, _, cleanup := smuxPair(t)
++	defer cleanup()
++	peer := &peerSession{peerID: "one-peer", sessionID: "one-session", session: dataSession}
++	var closes, successes atomic.Int32
++	s := &Server{
++		requireAuthHook: true,
++		peerSessions:    map[string]*peerSession{peer.peerID: peer},
++		onClose:         func(string, string) { closes.Add(1) },
++	}
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not bind controller")
++	}
++	defer controller.detach(s)
++	var wg sync.WaitGroup
++	for range 32 {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			if controller.CloseSession("one-session") {
++				successes.Add(1)
++			}
++		}()
++	}
++	wg.Wait()
++	if successes.Load() != 1 || closes.Load() != 1 || !dataSession.IsClosed() {
++		t.Fatalf("revoke successes=%d closes=%d dataClosed=%v, want 1/1/true",
++			successes.Load(), closes.Load(), dataSession.IsClosed())
++	}
++}
++
++func TestManagedRunRejectsControllerAlreadyInUse(t *testing.T) {
++	controller := &SessionController{}
++	owner := &Server{}
++	if !controller.attach(owner) {
++		t.Fatal("could not bind controller")
++	}
++	defer controller.detach(owner)
++	err := Run(context.Background(), Config{
++		RequireAuthHook:   true,
++		AuthHook:          func(string, map[string]any) (string, error) { return "sid", nil },
++		KeyHex:            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
++		SessionController: controller,
++	})
++	if !errors.Is(err, ErrControllerInUse) {
++		t.Fatalf("Run() error = %v, want ErrControllerInUse", err)
++	}
++}
++
++func TestManagedOnSessionOpenCanRevokeSingletonBeforeData(t *testing.T) {
++	serverSess, clientSess, cleanup := smuxPair(t)
++	defer cleanup()
++	s := newHandshakeServer()
++	s.requireAuthHook = true
++	s.session = serverSess
++	s.group = muxconn.PrePinned(newServerTestKeys(t), "managed-single")
++	s.meter = newMeter()
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not bind controller")
++	}
++	defer controller.detach(s)
++	var revoked bool
++	s.onOpen = func(id, _ string, _ map[string]any) {
++		revoked = controller.CloseSession(id)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer func() { cancel(); s.wg.Wait() }()
++	go func() {
++		stream, err := clientSess.OpenStream()
++		if err == nil {
++			_, _, _ = handshake.Client(stream, "device", nil)
++		}
++	}()
++	if s.acceptSingletonHandshake(ctx, serverSess) {
++		t.Fatal("revoked singleton handshake became data-ready")
++	}
++	if !revoked || !serverSess.IsClosed() || s.handshakeReady() {
++		t.Fatalf("revoked=%v closed=%v ready=%v, want true/true/false",
++			revoked, serverSess.IsClosed(), s.handshakeReady())
++	}
++}
++
++func TestManagedStaleSingletonHandshakeCannotAuthorizeReplacement(t *testing.T) {
++	oldServer, oldClient, oldCleanup := smuxPair(t)
++	defer oldCleanup()
++	newServer, _, newCleanup := smuxPair(t)
++	defer newCleanup()
++	s := newHandshakeServer()
++	s.requireAuthHook = true
++	s.session = oldServer
++	s.group = muxconn.PrePinned(newServerTestKeys(t), "managed-single")
++	s.meter = newMeter()
++	authEntered := make(chan struct{})
++	releaseAuth := make(chan struct{})
++	s.authHook = func(string, map[string]any) (string, error) {
++		close(authEntered)
++		<-releaseAuth
++		return "old-session-id", nil
++	}
++	clientDone := make(chan struct{})
++	go func() {
++		defer close(clientDone)
++		stream, err := oldClient.OpenStream()
++		if err == nil {
++			_, _, _ = handshake.Client(stream, "device", nil)
++		}
++	}()
++	result := make(chan bool, 1)
++	go func() { result <- s.acceptSingletonHandshake(context.Background(), oldServer) }()
++	<-authEntered
++	s.sessMu.Lock()
++	s.session = newServer
++	s.sessMu.Unlock()
++	close(releaseAuth)
++	if <-result {
++		t.Fatal("stale handshake was accepted after carrier replacement")
++	}
++	if s.handshakeReady() || meteredKey(s.meter, "old-session-id") != "" {
++		t.Fatal("stale handshake authorized the replacement carrier")
++	}
++	<-clientDone
++}
++
++func TestManagedOnSessionOpenCanRevokePeerBeforeData(t *testing.T) {
++	serverSess, clientSess, cleanup := smuxPair(t)
++	defer cleanup()
++	s := newHandshakeServer()
++	s.requireAuthHook = true
++	s.meter = newMeter()
++	s.peerSessions = make(map[string]*peerSession)
++	link := &peerRoutingStub{}
++	s.ln = link
++	peer := newPeerSession("managed-peer", false, muxconn.PrePinned(newServerTestKeys(t), "managed-peer-key"))
++	if !peer.attachData(muxconn.NewGrouped(link, peer.group), serverSess) {
++		t.Fatal("could not attach peer data")
++	}
++	s.peerSessions[peer.peerID] = peer
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not bind controller")
++	}
++	defer controller.detach(s)
++	var revoked bool
++	s.onOpen = func(id, _ string, _ map[string]any) {
++		revoked = controller.CloseSession(id)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	s.baseCtx = ctx
++	defer func() { cancel(); s.wg.Wait() }()
++	go func() {
++		stream, err := clientSess.OpenStream()
++		if err == nil {
++			_, _, _ = handshake.Client(stream, "device", nil)
++		}
++	}()
++	if s.establishPeerSession(peer) {
++		t.Fatal("revoked peer handshake became data-ready")
++	}
++	if !revoked || !serverSess.IsClosed() || s.peerSessions[peer.peerID] != nil {
++		t.Fatalf("revoked=%v closed=%v peerPresent=%v, want true/true/false",
++			revoked, serverSess.IsClosed(), s.peerSessions[peer.peerID] != nil)
++	}
++}
++
++func TestManagedOnSessionOpenCanRevokeControlPlanePeerBeforeData(t *testing.T) {
++	dataServer, _, dataCleanup := smuxPair(t)
++	defer dataCleanup()
++	controlServer, controlClient, controlCleanup := smuxPair(t)
++	defer controlCleanup()
++	s := newHandshakeServer()
++	s.requireAuthHook = true
++	s.meter = newMeter()
++	s.ln = &serverLinkStub{}
++	peer := newPeerSession("managed-control-peer", true, muxconn.PrePinned(newServerTestKeys(t), "key"))
++	peer.session = dataServer
++	peer.controlSess = controlServer
++	s.peerSessions = map[string]*peerSession{peer.peerID: peer}
++	controller := &SessionController{}
++	if !controller.attach(s) {
++		t.Fatal("could not bind controller")
++	}
++	defer controller.detach(s)
++	var revoked bool
++	s.onOpen = func(id, _ string, _ map[string]any) {
++		revoked = controller.CloseSession(id)
++	}
++	go func() {
++		stream, err := controlClient.OpenStream()
++		if err == nil {
++			_, _, _ = handshake.Client(stream, "device", nil)
++		}
++	}()
++	s.acceptPeerHandshake(context.Background(), peer)
++	if !revoked || !dataServer.IsClosed() || s.peerSessions[peer.peerID] != nil {
++		t.Fatalf("revoked=%v closed=%v peerPresent=%v, want true/true/false",
++			revoked, dataServer.IsClosed(), s.peerSessions[peer.peerID] != nil)
++	}
++}
++
++func TestManagedSingletonRevokeKeepsOldGenerationForReinstall(t *testing.T) {
++	serverSess, _, cleanup := smuxPair(t)
++	defer cleanup()
++	s := &Server{
++		requireAuthHook: true, sessionID: "old", session: serverSess,
++		onClose: func(string, string) {},
++	}
++	if !s.revokeManagedSession("old") {
++		t.Fatal("old session was not revoked")
++	}
++	if !serverSess.IsClosed() || s.handshakeReady() {
++		t.Fatal("revoked session still carries data or remains ready")
++	}
++	if s.session != serverSess || s.staleReinstall(serverSess) {
++		t.Fatal("reinstall would reject the revoked generation as stale")
++	}
++}
++
++func TestManagedSingletonRevokeCutsDataBeforeBlockedControlFIN(t *testing.T) {
++	dataServer, _, dataCleanup := smuxPair(t)
++	defer dataCleanup()
++	a, b := net.Pipe()
++	gate := &gatedWriteConn{Conn: a, release: make(chan struct{}), blocked: make(chan struct{})}
++	defer close(gate.release)
++	controlServer, err := smux.Server(gate, testSmuxCfg())
++	if err != nil {
++		t.Fatalf("control smux.Server() error = %v", err)
++	}
++	controlClient, err := smux.Client(b, testSmuxCfg())
++	if err != nil {
++		t.Fatalf("control smux.Client() error = %v", err)
++	}
++	defer func() {
++		_ = controlServer.Close()
++		_ = controlClient.Close()
++		_ = a.Close()
++		_ = b.Close()
++	}()
++	clientStream, err := controlClient.OpenStream()
++	if err != nil {
++		t.Fatalf("control OpenStream() error = %v", err)
++	}
++	defer func() { _ = clientStream.Close() }()
++	serverStream, err := controlServer.AcceptStream()
++	if err != nil {
++		t.Fatalf("control AcceptStream() error = %v", err)
++	}
++	gate.enabled.Store(true)
++	s := &Server{
++		requireAuthHook: true, sessionID: "sid", session: dataServer,
++		controlSess: controlServer, controlStrm: serverStream,
++		onClose: func(string, string) {},
++	}
++	done := make(chan bool, 1)
++	go func() { done <- s.revokeManagedSession("sid") }()
++	select {
++	case <-done:
++	case <-gate.blocked:
++	case <-time.After(time.Second):
++		t.Fatal("revocation did not reach the control stream")
++	}
++	if !dataServer.IsClosed() {
++		t.Fatal("data stayed open while a control FIN could not be written")
++	}
++}
++
++type gatedWriteConn struct {
++	net.Conn
++	enabled atomic.Bool
++	release chan struct{}
++	blocked chan struct{}
++	once    sync.Once
++}
++
++func (c *gatedWriteConn) Write(p []byte) (int, error) {
++	if c.enabled.Load() {
++		c.once.Do(func() { close(c.blocked) })
++		<-c.release
++	}
++	return c.Conn.Write(p)
++}
++
++func TestManagedSingletonRevokeInstallsFreshCarrierSession(t *testing.T) {
++	keys := newServerTestKeys(t)
++	link := &serverLinkStub{}
++	conn := muxconn.New(link, keys)
++	oldSession, err := smux.Server(conn, testSmuxCfg())
++	if err != nil {
++		t.Fatalf("smux.Server() error = %v", err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	s := &Server{
++		baseCtx: ctx, ln: link, ring: cryptopkg.SingleEntry(keys, ""),
++		conn: conn, session: oldSession, sessionID: "old", requireAuthHook: true,
++		onClose: func(string, string) {}, peerSessions: make(map[string]*peerSession),
++		done: make(chan struct{}),
++	}
++	defer func() {
++		cancel()
++		s.shutdown()
++		s.wg.Wait()
++	}()
++	if !s.revokeManagedSession("old") {
++		t.Fatal("old session was not revoked")
++	}
++	s.wg.Wait()
++	s.sessMu.RLock()
++	replacement := s.session
++	s.sessMu.RUnlock()
++	if replacement == nil || replacement == oldSession || replacement.IsClosed() {
++		t.Fatal("revocation left the carrier without a usable replacement session")
 +	}
 +}
 +
@@ -404,8 +1090,24 @@ index a6fbbaf..cf3f241 100644
  func TestSocks5ConnectSuccess(t *testing.T) {
  	s := &Server{}
  	server, client := net.Pipe()
+@@ -836,6 +1307,7 @@ func TestAcceptSingletonHandshakeStoresServerFields(t *testing.T) {
+ 	defer cleanup()
+ 
+ 	s := newHandshakeServer()
++	s.session = serverSess
+ 	s.liveness = control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 1}
+ 	s.meter = newMeter()
+ 	s.group = muxconn.PrePinned(newServerTestKeys(t), "key-single")
+@@ -896,6 +1368,7 @@ func TestEstablishPeerSessionBindsTheMeterToThePinnedKey(t *testing.T) {
+ 	}()
+ 	keys := newServerTestKeys(t)
+ 	peer := newPeerSession("peer-x", false, muxconn.PrePinned(keys, "key-x"))
++	s.peerSessions = map[string]*peerSession{peer.peerID: peer}
+ 	if !peer.attachData(muxconn.NewGrouped(&peerRoutingStub{}, peer.group), serverSess) {
+ 		t.Fatal("attachData() refused a fresh peer")
+ 	}
 diff --git a/pkg/olcrtc/tunnel/tunnel.go b/pkg/olcrtc/tunnel/tunnel.go
-index 9ed322a..1922f7b 100644
+index 9ed322a..aae9ff0 100644
 --- a/pkg/olcrtc/tunnel/tunnel.go
 +++ b/pkg/olcrtc/tunnel/tunnel.go
 @@ -109,6 +109,7 @@ type Config struct {
@@ -416,7 +1118,40 @@ index 9ed322a..1922f7b 100644
  	OnSessionOpen    SessionOpenFunc
  	OnSessionClose   SessionCloseFunc
  	OnTraffic        TrafficFunc
-@@ -152,10 +153,11 @@ func toServerConfig(cfg Config) server.Config {
+@@ -119,19 +120,28 @@ type runner func(context.Context, server.Config) error
+ 
+ // Server is an embeddable tunnel server.
+ type Server struct {
+-	cfg Config
+-	run runner
++	cfg        Config
++	run        runner
++	controller *server.SessionController
+ }
+ 
+ // New returns a server configured by cfg.
+ func New(cfg Config) *Server {
+ 	RegisterDefaults()
+-	return &Server{cfg: cfg, run: server.Run}
++	return &Server{cfg: cfg, run: server.Run, controller: &server.SessionController{}}
++}
++
++// CloseSession cuts off an exact active managed session. It is not a grant,
++// expiry scheduler or quota check; the embedding policy must drive it.
++func (s *Server) CloseSession(sessionID string) bool {
++	return s.controller.CloseSession(sessionID)
+ }
+ 
+ // Run starts the server and blocks until ctx is canceled or the provider ends.
+ func (s *Server) Run(ctx context.Context) error {
+-	if err := s.run(ctx, toServerConfig(s.cfg)); err != nil {
++	cfg := toServerConfig(s.cfg)
++	cfg.SessionController = s.controller
++	if err := s.run(ctx, cfg); err != nil {
+ 		return fmt.Errorf("tunnel: %w", err)
+ 	}
+ 	return nil
+@@ -152,10 +162,11 @@ func toServerConfig(cfg Config) server.Config {
  			MaxPayloadSize: cfg.Traffic.MaxPayloadSize,
  			MinDelay:       cfg.Traffic.MinDelay, MaxDelay: cfg.Traffic.MaxDelay,
  		},
@@ -433,7 +1168,7 @@ index 9ed322a..1922f7b 100644
  }
  
 diff --git a/pkg/olcrtc/tunnel/tunnel_test.go b/pkg/olcrtc/tunnel/tunnel_test.go
-index 364603b..88c661e 100644
+index 364603b..0252b9a 100644
 --- a/pkg/olcrtc/tunnel/tunnel_test.go
 +++ b/pkg/olcrtc/tunnel/tunnel_test.go
 @@ -24,6 +24,7 @@ func TestConfigMapping(t *testing.T) {
@@ -454,3 +1189,26 @@ index 364603b..88c661e 100644
  	if id, err := got.AuthHook("device", map[string]any{"key": "-claim"}); err != nil || id != "device-claim" {
  		t.Fatalf("AuthHook() = (%q, %v)", id, err)
  	}
+@@ -84,3 +88,22 @@ func TestRunUsesMappedConfig(t *testing.T) {
+ 		t.Fatalf("runner config = %#v", got)
+ 	}
+ }
++
++func TestNewPassesSessionControllerWithoutGrantingAccess(t *testing.T) {
++	srv := New(Config{RequireAuthHook: true})
++	if srv.CloseSession("unknown") {
++		t.Fatal("unstarted server closed a session")
++	}
++	srv.run = func(_ context.Context, cfg server.Config) error {
++		if cfg.SessionController == nil {
++			t.Fatal("Run dropped the session controller")
++		}
++		if cfg.SessionController.CloseSession("unknown") {
++			t.Fatal("unbound controller accepted a revoke")
++		}
++		return errRunner
++	}
++	if err := srv.Run(context.Background()); !errors.Is(err, errRunner) {
++		t.Fatalf("Run() error = %v, want %v", err, errRunner)
++	}
++}
