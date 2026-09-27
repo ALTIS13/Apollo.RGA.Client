@@ -26,7 +26,7 @@ type LinkResolver interface {
 type ChallengeStore interface {
 	CreateChallenge(context.Context, LinkChallenge) (LinkChallenge, error)
 	LoadChallenge(context.Context, string) (LinkChallenge, error)
-	ConsumeChallengeAndBind(context.Context, string, Subject, InstallationBinding) error
+	ConsumeChallengeAndBind(context.Context, string, Subject, InstallationBinding, time.Time) error
 }
 
 // DeviceEligibility has no permissive default. Installed-panel HWID semantics
@@ -117,7 +117,7 @@ func (s *LinkService) CompleteLink(ctx context.Context, shortUUID, challengeID s
 	if err := s.checkEligibility(ctx, user, binding); err != nil {
 		return err
 	}
-	if err := s.challenges.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, binding); err != nil {
+	if err := s.challenges.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, binding, user.ExpiresAt); err != nil {
 		return ErrLinkUnavailable
 	}
 	return nil
@@ -133,6 +133,10 @@ func (s *LinkService) checkEligibility(ctx context.Context, user remnawave.UserS
 		return ErrLinkUnavailable
 	}
 	if !allowed {
+		return ErrLinkDenied
+	}
+	// Device eligibility may involve I/O; expiry can pass while it runs.
+	if !policy.Evaluate(s.now(), user, policy.ProtocolFlag{}).OrdinaryAllowed {
 		return ErrLinkDenied
 	}
 	return nil

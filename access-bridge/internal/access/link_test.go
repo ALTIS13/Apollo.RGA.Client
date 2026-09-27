@@ -41,6 +41,7 @@ type testLinkStore struct {
 	createError  error
 	loadError    error
 	consumeError error
+	validUntil   time.Time
 }
 
 func (s *testLinkStore) CreateChallenge(_ context.Context, challenge LinkChallenge) (LinkChallenge, error) {
@@ -63,8 +64,9 @@ func (s *testLinkStore) LoadChallenge(_ context.Context, id string) (LinkChallen
 	return s.challenge, nil
 }
 
-func (s *testLinkStore) ConsumeChallengeAndBind(_ context.Context, id string, subject Subject, binding InstallationBinding) error {
+func (s *testLinkStore) ConsumeChallengeAndBind(_ context.Context, id string, subject Subject, binding InstallationBinding, validUntil time.Time) error {
 	s.consumeCalls++
+	s.validUntil = validUntil
 	if s.consumeError != nil {
 		return s.consumeError
 	}
@@ -76,13 +78,17 @@ func (s *testLinkStore) ConsumeChallengeAndBind(_ context.Context, id string, su
 }
 
 type testDeviceEligibility struct {
-	allowed bool
-	err     error
-	calls   int
+	allowed   bool
+	err       error
+	calls     int
+	onAllowed func()
 }
 
 func (g *testDeviceEligibility) Allowed(_ context.Context, _ remnawave.UserSnapshot, _ InstallationBinding) (bool, error) {
 	g.calls++
+	if g.onAllowed != nil {
+		g.onAllowed()
+	}
 	return g.allowed, g.err
 }
 
@@ -186,6 +192,9 @@ func TestCompleteLinkVerifiesProofBeforeLookupAndRejectsAnotherValidAccount(t *t
 	if !store.used || store.consumeCalls != 1 {
 		t.Fatal("valid completion did not use the one-time store consume")
 	}
+	if !store.validUntil.Equal(resolver.users["first"].ExpiresAt) {
+		t.Fatal("final database binding did not receive authoritative subscription expiry")
+	}
 	if err := service.CompleteLink(context.Background(), "first", challenge.ID, der, signature); err == nil {
 		t.Fatal("replayed completion accepted")
 	}
@@ -251,6 +260,31 @@ func TestCompletionRechecksExpiryAndDeviceEligibility(t *testing.T) {
 	}
 	if store.consumeCalls != 0 {
 		t.Fatal("revoked account or device reached consume")
+	}
+}
+
+func TestExpiryDuringDeviceEligibilityCannotCompleteLink(t *testing.T) {
+	now := time.Date(2026, 9, 27, 20, 0, 0, 0, time.UTC)
+	serverNow := now
+	resolver := &testLinkResolver{users: map[string]remnawave.UserSnapshot{"bearer": activeLinkUser(now, 42)}}
+	store := &testLinkStore{}
+	gate := &testDeviceEligibility{allowed: true}
+	service, err := NewLinkService("rga-main", resolver, store, gate, func() time.Time { return serverNow })
+	if err != nil {
+		t.Fatalf("NewLinkService: %v", err)
+	}
+	key, der := testLinkKey(t)
+	challenge, err := service.BeginLink(context.Background(), "bearer", "installation_opaque_1234", der)
+	if err != nil {
+		t.Fatalf("BeginLink: %v", err)
+	}
+	gate.onAllowed = func() { serverNow = now.Add(time.Hour) }
+	signature := signLinkChallenge(t, key, challenge)
+	if err := service.CompleteLink(context.Background(), "bearer", challenge.ID, der, signature); !errors.Is(err, ErrLinkDenied) {
+		t.Fatalf("link completed after expiry during device check: %v", err)
+	}
+	if store.consumeCalls != 0 {
+		t.Fatal("expired subscription reached challenge consumption")
 	}
 }
 

@@ -323,7 +323,7 @@ func TestChallengeExpiryDeniesLoadAndConsumeWithoutCreatingSubject(t *testing.T)
 	if _, err := s.LoadChallenge(ctx, challenge.ID); !errors.Is(err, ErrChallengeInvalid) {
 		t.Fatalf("expired challenge loaded: %v", err)
 	}
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour)); !errors.Is(err, ErrChallengeInvalid) {
 		t.Fatalf("expired challenge consumed: %v", err)
 	}
 	if _, err := s.Load(ctx, challenge.Subject); !errors.Is(err, ErrNotFound) {
@@ -338,10 +338,10 @@ func TestChallengeConsumeIsSingleUseAndLeavesSubjectDefaultOff(t *testing.T) {
 	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
 		t.Fatalf("CreateChallenge: %v", err)
 	}
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); err != nil {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour)); !errors.Is(err, ErrChallengeInvalid) {
 		t.Fatalf("replay accepted: %v", err)
 	}
 	if _, err := s.LoadChallenge(ctx, challenge.ID); !errors.Is(err, ErrChallengeInvalid) {
@@ -361,18 +361,18 @@ func TestChallengeContextMismatchDoesNotConsumeOrCreateAnotherSubject(t *testing
 		t.Fatalf("CreateChallenge: %v", err)
 	}
 	wrongSubject := testSubject(t)
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, wrongSubject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, wrongSubject, challenge.Installation, time.Now().Add(time.Hour)); !errors.Is(err, ErrChallengeInvalid) {
 		t.Fatalf("other subject consumed challenge: %v", err)
 	}
 	wrongKey := challenge.Installation
 	wrongKey.PublicKeySHA256[0] ^= 1
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, wrongKey); !errors.Is(err, ErrChallengeInvalid) {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, wrongKey, time.Now().Add(time.Hour)); !errors.Is(err, ErrChallengeInvalid) {
 		t.Fatalf("other key consumed challenge: %v", err)
 	}
 	if _, err := s.Load(ctx, wrongSubject); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("mismatch created another subject: %v", err)
 	}
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); err != nil {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("correct context was burned by mismatch: %v", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestConcurrentChallengeCompletionAllowsExactlyOne(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			results <- s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation)
+			results <- s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour))
 		}()
 	}
 	close(start)
@@ -428,7 +428,7 @@ func TestBindingConflictRollsBackNewSubjectAndChallengeConsumption(t *testing.T)
 	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
 		t.Fatalf("CreateChallenge: %v", err)
 	}
-	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrInstallationConflict) {
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour)); !errors.Is(err, ErrInstallationConflict) {
 		t.Fatalf("conflicting installation reassigned: %v", err)
 	}
 	if _, err := s.Load(ctx, challenge.Subject); !errors.Is(err, ErrNotFound) {
@@ -455,12 +455,49 @@ func TestChallengeDatabaseOutageIsRedacted(t *testing.T) {
 		func() error { _, err := s.CreateChallenge(ctx, challenge); return err },
 		func() error { _, err := s.LoadChallenge(ctx, challenge.ID); return err },
 		func() error {
-			return s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation)
+			return s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, time.Now().Add(time.Hour))
 		},
 	} {
 		err := operation()
 		if !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), challenge.ID) {
 			t.Fatalf("challenge outage leaked details: %v", err)
 		}
+	}
+}
+
+func TestSubscriptionExpiryDuringChallengeLockRollsBackBinding(t *testing.T) {
+	s, db, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	lock, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal("could not open dedicated test lock")
+	}
+	defer lock.Rollback()
+	var held int
+	if err := lock.QueryRowContext(ctx,
+		`SELECT 1 FROM bridge_link_challenges WHERE challenge_id=$1 FOR UPDATE`, challenge.ID).Scan(&held); err != nil {
+		t.Fatal("could not lock dedicated test challenge")
+	}
+	subscriptionExpiry := time.Now().Add(500 * time.Millisecond)
+	results := make(chan error, 1)
+	go func() {
+		results <- s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation, subscriptionExpiry)
+	}()
+	time.Sleep(750 * time.Millisecond)
+	if err := lock.Commit(); err != nil {
+		t.Fatal("could not release dedicated test lock")
+	}
+	if err := <-results; !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("subscription expired while locked but binding succeeded: %v", err)
+	}
+	if _, err := s.Load(ctx, challenge.Subject); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired binding left a subject: %v", err)
+	}
+	if _, err := s.LoadChallenge(ctx, challenge.ID); err != nil {
+		t.Fatalf("failed binding consumed a still-valid challenge: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/ALTIS13/Apollo.RGA.Client/access-bridge/internal/access"
 )
@@ -258,8 +259,8 @@ func readChallenge(ctx context.Context, q rowQuerier, query, id string) (access.
 
 // ConsumeChallengeAndBind is the sole mutation after external proof and
 // eligibility checks. A failure rolls back subject, binding and consumption.
-func (s *Store) ConsumeChallengeAndBind(ctx context.Context, id string, subject access.Subject, binding access.InstallationBinding) error {
-	if !validChallengeID(id) || subject.Validate() != nil || binding.Validate() != nil {
+func (s *Store) ConsumeChallengeAndBind(ctx context.Context, id string, subject access.Subject, binding access.InstallationBinding, subscriptionExpiresAt time.Time) error {
+	if !validChallengeID(id) || subject.Validate() != nil || binding.Validate() != nil || subscriptionExpiresAt.IsZero() {
 		return ErrChallengeInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -304,7 +305,8 @@ func (s *Store) ConsumeChallengeAndBind(ctx context.Context, id string, subject 
 	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE bridge_link_challenges SET consumed_at=clock_timestamp()
-		 WHERE challenge_id=$1 AND consumed_at IS NULL AND expires_at > clock_timestamp()`, id)
+		 WHERE challenge_id=$1 AND consumed_at IS NULL AND expires_at > clock_timestamp()
+		 AND clock_timestamp() < $2`, id, subscriptionExpiresAt)
 	if err != nil {
 		return ErrUnavailable
 	}
