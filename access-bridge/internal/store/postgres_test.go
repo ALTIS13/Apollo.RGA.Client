@@ -274,3 +274,193 @@ func TestInvalidInputsPrecedeDatabaseAccessAndOutageIsRedacted(t *testing.T) {
 		}
 	}
 }
+
+func testChallenge(t *testing.T) access.LinkChallenge {
+	t.Helper()
+	challenge, err := access.NewLinkChallenge(testSubject(t), testBinding(t, 1))
+	if err != nil {
+		t.Fatalf("NewLinkChallenge: %v", err)
+	}
+	return challenge
+}
+
+func TestChallengeMigrationCreateAndReadUsesDatabaseExpiry(t *testing.T) {
+	s, _, _ := migratedStore(t)
+	ctx := context.Background()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("second migration: %v", err)
+	}
+	challenge := testChallenge(t)
+	before := time.Now()
+	created, err := s.CreateChallenge(ctx, challenge)
+	if err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	if !created.ExpiresAt.After(before.Add(4*time.Minute)) || created.ExpiresAt.After(time.Now().Add(6*time.Minute)) {
+		t.Fatal("challenge expiry was not set from a bounded database lease")
+	}
+	loaded, err := s.LoadChallenge(ctx, challenge.ID)
+	if err != nil || loaded != created {
+		t.Fatalf("loaded challenge differs: %+v, %v", loaded, err)
+	}
+	if _, err := s.CreateChallenge(ctx, challenge); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("duplicate challenge ID accepted: %v", err)
+	}
+}
+
+func TestChallengeExpiryDeniesLoadAndConsumeWithoutCreatingSubject(t *testing.T) {
+	s, db, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE bridge_link_challenges SET expires_at=clock_timestamp()-interval '1 second' WHERE challenge_id=$1`,
+		challenge.ID); err != nil {
+		t.Fatal("could not expire dedicated test challenge")
+	}
+	if _, err := s.LoadChallenge(ctx, challenge.ID); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("expired challenge loaded: %v", err)
+	}
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("expired challenge consumed: %v", err)
+	}
+	if _, err := s.Load(ctx, challenge.Subject); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired challenge created subject: %v", err)
+	}
+}
+
+func TestChallengeConsumeIsSingleUseAndLeavesSubjectDefaultOff(t *testing.T) {
+	s, _, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); err != nil {
+		t.Fatalf("first consume: %v", err)
+	}
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("replay accepted: %v", err)
+	}
+	if _, err := s.LoadChallenge(ctx, challenge.ID); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("consumed challenge loaded: %v", err)
+	}
+	state, err := s.Load(ctx, challenge.Subject)
+	if err != nil || state.OlcRTCEnabled || state.Revision != 1 {
+		t.Fatalf("binding enabled OlcRTC or changed revision: %+v, %v", state, err)
+	}
+}
+
+func TestChallengeContextMismatchDoesNotConsumeOrCreateAnotherSubject(t *testing.T) {
+	s, _, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	wrongSubject := testSubject(t)
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, wrongSubject, challenge.Installation); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("other subject consumed challenge: %v", err)
+	}
+	wrongKey := challenge.Installation
+	wrongKey.PublicKeySHA256[0] ^= 1
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, wrongKey); !errors.Is(err, ErrChallengeInvalid) {
+		t.Fatalf("other key consumed challenge: %v", err)
+	}
+	if _, err := s.Load(ctx, wrongSubject); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatch created another subject: %v", err)
+	}
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); err != nil {
+		t.Fatalf("correct context was burned by mismatch: %v", err)
+	}
+}
+
+func TestConcurrentChallengeCompletionAllowsExactlyOne(t *testing.T) {
+	s, _, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	var successes, rejected int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrChallengeInvalid):
+			rejected++
+		default:
+			t.Fatalf("unexpected completion result: %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("replay race: success=%d rejected=%d", successes, rejected)
+	}
+}
+
+func TestBindingConflictRollsBackNewSubjectAndChallengeConsumption(t *testing.T) {
+	s, _, _ := migratedStore(t)
+	ctx := context.Background()
+	challenge := testChallenge(t)
+	previous := testSubject(t)
+	if _, err := s.EnsureSubject(ctx, previous); err != nil {
+		t.Fatalf("EnsureSubject: %v", err)
+	}
+	if err := s.BindInstallation(ctx, previous, challenge.Installation); err != nil {
+		t.Fatalf("prior bind: %v", err)
+	}
+	if _, err := s.CreateChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateChallenge: %v", err)
+	}
+	if err := s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation); !errors.Is(err, ErrInstallationConflict) {
+		t.Fatalf("conflicting installation reassigned: %v", err)
+	}
+	if _, err := s.Load(ctx, challenge.Subject); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed consume left a subject: %v", err)
+	}
+	loaded, err := s.LoadChallenge(ctx, challenge.ID)
+	if err != nil || loaded.Subject != challenge.Subject || loaded.Installation != challenge.Installation {
+		t.Fatalf("failed consume corrupted challenge: %+v, %v", loaded, err)
+	}
+}
+
+func TestChallengeDatabaseOutageIsRedacted(t *testing.T) {
+	db, _ := testDatabase(t)
+	s, err := New(db)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	challenge := testChallenge(t)
+	if err := db.Close(); err != nil {
+		t.Fatal("could not close dedicated test connection")
+	}
+	ctx := context.Background()
+	for _, operation := range []func() error{
+		func() error { _, err := s.CreateChallenge(ctx, challenge); return err },
+		func() error { _, err := s.LoadChallenge(ctx, challenge.ID); return err },
+		func() error {
+			return s.ConsumeChallengeAndBind(ctx, challenge.ID, challenge.Subject, challenge.Installation)
+		},
+	} {
+		err := operation()
+		if !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), challenge.ID) {
+			t.Fatalf("challenge outage leaked details: %v", err)
+		}
+	}
+}

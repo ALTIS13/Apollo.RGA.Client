@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/base64"
 	"errors"
 	"strings"
 
@@ -16,6 +17,7 @@ var (
 	ErrUnavailable          = errors.New("store: unavailable")
 	ErrNotFound             = errors.New("store: subject not found")
 	ErrInstallationConflict = errors.New("store: installation conflict")
+	ErrChallengeInvalid     = errors.New("store: invalid link challenge")
 )
 
 //go:embed schema.sql
@@ -181,4 +183,140 @@ func (s *Store) SetProtocolEnabled(ctx context.Context, subject access.Subject, 
 		return access.SubjectState{}, ErrUnavailable
 	}
 	return state, nil
+}
+
+// CreateChallenge stores no subscription bearer or full public key. Its expiry
+// is set by the database clock so all consumers agree on one deadline.
+func (s *Store) CreateChallenge(ctx context.Context, challenge access.LinkChallenge) (access.LinkChallenge, error) {
+	if challenge.Validate() != nil || !validChallengeID(challenge.ID) || !challenge.ExpiresAt.IsZero() {
+		return access.LinkChallenge{}, ErrChallengeInvalid
+	}
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO bridge_link_challenges
+		 (challenge_id, panel_instance, user_id, installation_id, public_key_sha256, nonce, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp()+interval '5 minutes')
+		 ON CONFLICT (challenge_id) DO NOTHING RETURNING expires_at`,
+		challenge.ID, challenge.Subject.PanelInstance, challenge.Subject.UserID,
+		challenge.Installation.ID, challenge.Installation.PublicKeySHA256[:], challenge.Nonce[:],
+	).Scan(&challenge.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return access.LinkChallenge{}, ErrChallengeInvalid
+	}
+	if err != nil {
+		return access.LinkChallenge{}, ErrUnavailable
+	}
+	return challenge, nil
+}
+
+func (s *Store) LoadChallenge(ctx context.Context, id string) (access.LinkChallenge, error) {
+	if !validChallengeID(id) {
+		return access.LinkChallenge{}, ErrChallengeInvalid
+	}
+	return readChallenge(ctx, s.db,
+		`SELECT panel_instance, user_id, installation_id, public_key_sha256, nonce,
+		 expires_at, consumed_at IS NULL, expires_at > clock_timestamp()
+		 FROM bridge_link_challenges WHERE challenge_id=$1`, id)
+}
+
+func validChallengeID(id string) bool {
+	if len(id) != 43 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(id)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == id
+}
+
+func readChallenge(ctx context.Context, q rowQuerier, query, id string) (access.LinkChallenge, error) {
+	var challenge access.LinkChallenge
+	challenge.ID = id
+	var fingerprint, nonce []byte
+	var unused, unexpired bool
+	err := q.QueryRowContext(ctx, query, id).Scan(
+		&challenge.Subject.PanelInstance, &challenge.Subject.UserID,
+		&challenge.Installation.ID, &fingerprint, &nonce,
+		&challenge.ExpiresAt, &unused, &unexpired,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return access.LinkChallenge{}, ErrChallengeInvalid
+	}
+	if err != nil {
+		return access.LinkChallenge{}, ErrUnavailable
+	}
+	if len(fingerprint) != 32 || len(nonce) != 32 {
+		return access.LinkChallenge{}, ErrUnavailable
+	}
+	copy(challenge.Installation.PublicKeySHA256[:], fingerprint)
+	copy(challenge.Nonce[:], nonce)
+	if challenge.Validate() != nil {
+		return access.LinkChallenge{}, ErrUnavailable
+	}
+	if !unused || !unexpired {
+		return access.LinkChallenge{}, ErrChallengeInvalid
+	}
+	return challenge, nil
+}
+
+// ConsumeChallengeAndBind is the sole mutation after external proof and
+// eligibility checks. A failure rolls back subject, binding and consumption.
+func (s *Store) ConsumeChallengeAndBind(ctx context.Context, id string, subject access.Subject, binding access.InstallationBinding) error {
+	if !validChallengeID(id) || subject.Validate() != nil || binding.Validate() != nil {
+		return ErrChallengeInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer tx.Rollback()
+	challenge, err := readChallenge(ctx, tx,
+		`SELECT panel_instance, user_id, installation_id, public_key_sha256, nonce,
+		 expires_at, consumed_at IS NULL, expires_at > clock_timestamp()
+		 FROM bridge_link_challenges WHERE challenge_id=$1 FOR UPDATE`, id)
+	if err != nil {
+		return err
+	}
+	if challenge.Subject != subject || challenge.Installation != binding {
+		return ErrChallengeInvalid
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO bridge_subjects (panel_instance, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		subject.PanelInstance, subject.UserID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO bridge_installations (installation_id, panel_instance, user_id, public_key_sha256)
+		 VALUES ($1, $2, $3, $4) ON CONFLICT (installation_id) DO NOTHING`,
+		binding.ID, subject.PanelInstance, subject.UserID, binding.PublicKeySHA256[:])
+	if err != nil {
+		return ErrUnavailable
+	}
+	var panel string
+	var userID int64
+	var fingerprint []byte
+	err = tx.QueryRowContext(ctx,
+		`SELECT panel_instance, user_id, public_key_sha256
+		 FROM bridge_installations WHERE installation_id=$1 FOR UPDATE`, binding.ID).Scan(&panel, &userID, &fingerprint)
+	if err != nil {
+		return ErrUnavailable
+	}
+	if panel != subject.PanelInstance || userID != subject.UserID || !bytes.Equal(fingerprint, binding.PublicKeySHA256[:]) {
+		return ErrInstallationConflict
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE bridge_link_challenges SET consumed_at=clock_timestamp()
+		 WHERE challenge_id=$1 AND consumed_at IS NULL AND expires_at > clock_timestamp()`, id)
+	if err != nil {
+		return ErrUnavailable
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ErrUnavailable
+	}
+	if affected != 1 {
+		return ErrChallengeInvalid
+	}
+	if err := tx.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	return nil
 }
