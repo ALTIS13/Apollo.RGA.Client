@@ -170,25 +170,42 @@ index 5f329b4..496f216 100644
  }
  
 diff --git a/internal/server/egress.go b/internal/server/egress.go
-index b9f765f..29bd23f 100644
+index b9f765f..e526e68 100644
 --- a/internal/server/egress.go
 +++ b/internal/server/egress.go
-@@ -195,6 +195,9 @@ func (r ConnectRequest) validate() error {
+@@ -195,6 +195,26 @@ func (r ConnectRequest) validate() error {
  }
  
  func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request ConnectRequest, sessionID string) {
++	s.dispatchWithLease(ctx, stream, request, sessionID, nil)
++}
++
++func (s *Server) dispatchWithLease(ctx context.Context, stream *smux.Stream, request ConnectRequest, sessionID string, lease *managedLeaseEntry) {
 +	if contextDone(ctx) {
 +		return
++	}
++	var permit *sessionByteMeter
++	var connectHold *meterConnectHold
++	if s.requireMeter {
++		if !s.leases.isActive(lease) || lease.byteMeter == nil || s.meterReporter == nil {
++			return // No trusted byte lease: no dial and no CONNECT acknowledgement.
++		}
++		permit = lease.byteMeter
++		connectHold = permit.holdConnect()
++		if connectHold == nil {
++			return // No remaining unreserved capacity: do not open a target socket.
++		}
++		defer connectHold.release()
 +	}
  	// Where a peer connects is logged at debug only: an exit's log is no
  	// record of its users' destinations. A failure says why, not where.
  	// ai-generated: the log levels and the failure line (egress hardening).
-@@ -206,10 +209,15 @@ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request Conn
+@@ -206,20 +226,45 @@ func (s *Server) dispatch(ctx context.Context, stream *smux.Stream, request Conn
  	if err != nil {
  		logger.Infof("sid=%d dial failed (%v): %s", stream.ID(), elapsed, dialFailure(err))
  		logger.Debugf("sid=%d dial %s failed: %v", stream.ID(), addr, err)
 -		_, _ = stream.Write([]byte{tunnelcore.ConnectAckHostUnreachable})
-+		if !contextDone(ctx) {
++		if !contextDone(ctx) && (permit == nil || (s.leases.isActive(lease) && connectHold.live())) {
 +			_, _ = stream.Write([]byte{tunnelcore.ConnectAckHostUnreachable})
 +		}
  		return
@@ -197,15 +214,47 @@ index b9f765f..29bd23f 100644
 +	if contextDone(ctx) {
 +		return
 +	}
++	if permit != nil {
++		if !s.leases.isActive(lease) || !permit.beginCopyWithHold(connectHold) {
++			return
++		}
++		defer permit.endCopy()
++		if !s.leases.isActive(lease) {
++			return
++		}
++	}
  	logger.Debugf("sid=%d connected %s in %v", stream.ID(), addr, elapsed)
  	if _, err := stream.Write([]byte{tunnelcore.ConnectAckOK}); err != nil {
  		return
+ 	}
+-	counts, copyErr := tunnelcore.CopyBidirectional(ctx, stream, conn)
++	if connectHold != nil {
++		connectHold.release() // Payload Reserve can now claim the admission byte.
++	}
++	var counts tunnelcore.CopyCounts
++	var copyErr error
++	if permit != nil {
++		counts, copyErr = tunnelcore.CopyBidirectionalWithPermit(ctx, stream, conn, permit)
++	} else {
++		counts, copyErr = tunnelcore.CopyBidirectional(ctx, stream, conn)
++	}
+ 	if errors.Is(copyErr, tunnelcore.ErrHalfOpenIdle) {
+ 		logger.Debugf("sid=%d %s closed: half-open and silent for %s", stream.ID(), addr, tunnelcore.HalfOpenGrace)
+ 	}
+ 	s.meter.add(sessionID, counts.LeftToRight, counts.RightToLeft)
+-	if s.onTraffic != nil {
++	// Managed cumulative reports are emitted from successful writes. Calling
++	// this legacy EOF callback too would let an adapter double-add the bytes.
++	if !s.requireMeter && s.onTraffic != nil {
+ 		s.onTraffic(sessionID, addr, counts.LeftToRight, counts.RightToLeft)
+ 	}
+ }
 diff --git a/internal/server/lease.go b/internal/server/lease.go
 new file mode 100644
-index 0000000..0cf9d90
+index 0000000..7d94740
 --- /dev/null
 +++ b/internal/server/lease.go
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,260 @@
 +package server
 +
 +import (
@@ -220,6 +269,7 @@ index 0000000..0cf9d90
 +type ManagedLease struct {
 +	SessionID string
 +	NotAfter  time.Time
++	ByteLimit int64
 +}
 +
 +type ManagedLeaseAuthFunc func(context.Context, string, map[string]any) (ManagedLease, error)
@@ -250,6 +300,7 @@ index 0000000..0cf9d90
 +	retainTo   time.Time
 +	ctx        context.Context
 +	cancel     context.CancelFunc
++	byteMeter  *sessionByteMeter
 +}
 +
 +// leaseRegistry is process-local. A future Bridge adapter must enforce
@@ -296,7 +347,11 @@ index 0000000..0cf9d90
 +	if entry := r.entries[id]; entry != nil {
 +		entry.state = leaseRevoked
 +		cancel := entry.cancel
++		meter := entry.byteMeter
 +		r.mu.Unlock()
++		if meter != nil {
++			meter.close()
++		}
 +		if cancel != nil {
 +			cancel()
 +		}
@@ -315,6 +370,19 @@ index 0000000..0cf9d90
 +	return true
 +}
 +
++func (r *leaseRegistry) attachMeter(entry *managedLeaseEntry, meter *sessionByteMeter) bool {
++	if entry == nil || meter == nil {
++		return false
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.entries[entry.lease.SessionID] != entry || entry.state != leasePending || entry.byteMeter != nil {
++		return false
++	}
++	entry.byteMeter = meter
++	return true
++}
++
 +const handshakeTimeout = 15 * time.Second
 +
 +func (r *leaseRegistry) abort(entry *managedLeaseEntry) {
@@ -325,7 +393,11 @@ index 0000000..0cf9d90
 +	if r.entries[entry.lease.SessionID] == entry && entry.state == leasePending {
 +		entry.state = leaseClosed
 +	}
++	meter := entry.byteMeter
 +	r.mu.Unlock()
++	if meter != nil {
++		meter.close()
++	}
 +	if entry.cancel != nil {
 +		entry.cancel()
 +	}
@@ -356,10 +428,24 @@ index 0000000..0cf9d90
 +	if r.entries[entry.lease.SessionID] == entry && entry.state != leaseRevoked {
 +		entry.state = leaseClosed
 +	}
++	meter := entry.byteMeter
 +	r.mu.Unlock()
++	if meter != nil {
++		meter.close()
++	}
 +	if entry.cancel != nil {
 +		entry.cancel()
 +	}
++}
++
++func (r *leaseRegistry) isActive(entry *managedLeaseEntry) bool {
++	if entry == nil {
++		return false
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	return r.entries[entry.lease.SessionID] == entry && entry.state == leaseActive &&
++		entry.ctx.Err() == nil && time.Now().Before(entry.lease.NotAfter)
 +}
 +
 +func (r *leaseRegistry) expire(entry *managedLeaseEntry) bool {
@@ -1056,7 +1142,7 @@ index d5ca886..79ab9f4 100644
  	s.sessMu.RLock()
  	conn := s.conn
 diff --git a/internal/server/peer.go b/internal/server/peer.go
-index d683ea8..d696e79 100644
+index d683ea8..d596e1a 100644
 --- a/internal/server/peer.go
 +++ b/internal/server/peer.go
 @@ -64,6 +64,7 @@ type peerSession struct {
@@ -1120,7 +1206,7 @@ index d683ea8..d696e79 100644
  		_ = stream.SetDeadline(time.Time{})
  		if err != nil {
  			_ = stream.Close()
-@@ -456,16 +471,27 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
+@@ -456,16 +471,28 @@ func (s *Server) acceptPeerHandshake(ctx context.Context, peer *peerSession) {
  			s.removePeer(peer, "handshake failed")
  			return
  		}
@@ -1136,6 +1222,7 @@ index d683ea8..d696e79 100644
 +			return
 +		}
 +		s.watchLease(result.lease)
++		s.startMeterReporter(result.lease)
 +		s.meter.bind(result.sessionID, peer.group.KeyID())
 +		s.health.RecordSession(result.sessionID)
 +		s.trackPeerOpen(result.sessionID, result.deviceID)
@@ -1154,7 +1241,7 @@ index d683ea8..d696e79 100644
  		s.startPeerControlLoop(ctx, peer, stream)
  		return
  	}
-@@ -519,7 +545,13 @@ func (s *Server) servePeer(peer *peerSession) {
+@@ -519,7 +546,13 @@ func (s *Server) servePeer(peer *peerSession) {
  		return
  	}
  	ctx := s.streamContext()
@@ -1169,7 +1256,16 @@ index d683ea8..d696e79 100644
  	for {
  		if s.stopping() {
  			return
-@@ -560,24 +592,50 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
+@@ -532,7 +565,7 @@ func (s *Server) servePeer(peer *peerSession) {
+ 			}
+ 			return
+ 		}
+-		s.goTracked(func() { s.handleStream(ctx, stream, sessionID) })
++		s.goTracked(func() { s.handleStreamWithLease(ctx, stream, sessionID, lease) })
+ 	}
+ }
+ 
+@@ -560,24 +593,51 @@ func (s *Server) establishPeerSession(peer *peerSession) bool {
  		return false
  	}
  	if !peer.setHandshake(result) {
@@ -1189,6 +1285,7 @@ index d683ea8..d696e79 100644
 +		return false
 +	}
 +	s.watchLease(result.lease)
++	s.startMeterReporter(result.lease)
  	// This is the handshake path of transports that route peers without a
  	// per-peer control plane (datachannel over jitsi or livekit): the meter
  	// learns the session's key here, as acceptPeerHandshake does for the
@@ -1222,7 +1319,7 @@ index d683ea8..d696e79 100644
  // waitPeerHandshake blocks until the peer's control-plane handshake lands.
  // The wait is bounded: an unauthenticated peer that never handshakes would
  // otherwise pin its whole session stack until the server stops, and a peer
-@@ -590,7 +648,7 @@ func (s *Server) waitPeerHandshake(peer *peerSession) bool {
+@@ -590,7 +650,7 @@ func (s *Server) waitPeerHandshake(peer *peerSession) bool {
  	defer timer.Stop()
  	select {
  	case <-peer.sessionReady:
@@ -1231,7 +1328,7 @@ index d683ea8..d696e79 100644
  	case <-timer.C:
  		logger.Infof("server: peer %s did not handshake within %s - releasing session",
  			peer.peerID, peerHandshakeTimeout)
-@@ -622,14 +680,14 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
+@@ -622,14 +682,14 @@ func (s *Server) removePeer(peer *peerSession, reason string) {
  //
  // ai-generated: notify and the retirement a new session takes over
  // (olcrtc#49); the rest is removePeer as it was.
@@ -1249,7 +1346,7 @@ index d683ea8..d696e79 100644
  	}
  	delete(s.peerSessions, peer.peerID)
  	if s.retiring == nil {
-@@ -647,6 +705,7 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
+@@ -647,6 +707,7 @@ func (s *Server) endPeer(peer *peerSession, reason string, notify bool) {
  	if own {
  		s.retirePeer(peer.peerID)
  	}
@@ -1257,7 +1354,7 @@ index d683ea8..d696e79 100644
  }
  
  // retireEndedLocked tells the transport that the session ended for peerID
-@@ -696,6 +755,7 @@ func (s *Server) closePeerSession(peer *peerSession, reason string) {
+@@ -696,6 +757,7 @@ func (s *Server) closePeerSession(peer *peerSession, reason string) {
  func (s *Server) endPeerSession(peer *peerSession, reason string, notify bool) {
  	peer.closeOnce.Do(func() {
  		teardown := peer.closeSnapshot()
@@ -1265,7 +1362,7 @@ index d683ea8..d696e79 100644
  		peer.signalReady()
  		if notify {
  			notifyPeerClose(teardown.controlStrm)
-@@ -767,7 +827,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
+@@ -767,7 +829,11 @@ func (s *Server) trackPeerOpen(sessionID, deviceID string) {
  	s.peerStats[sessionID] = peerStat{deviceID: deviceID, openedAt: time.Now()}
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -1278,7 +1375,7 @@ index d683ea8..d696e79 100644
  	logger.Infof("%s", line)
  }
  
-@@ -781,12 +845,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
+@@ -781,12 +847,19 @@ func (s *Server) trackPeerClose(sessionID, reason string) {
  	delete(s.peerStats, sessionID)
  	line := s.peersLineLocked()
  	s.peersMu.Unlock()
@@ -1301,7 +1398,7 @@ index d683ea8..d696e79 100644
  	for _, stat := range s.peerStats {
  		devices = append(devices, stat.deviceID)
 diff --git a/internal/server/serve.go b/internal/server/serve.go
-index 203ece2..93d1698 100644
+index 203ece2..dcb4a74 100644
 --- a/internal/server/serve.go
 +++ b/internal/server/serve.go
 @@ -86,7 +86,19 @@ func (s *Server) serveSingle(ctx context.Context) {
@@ -1321,11 +1418,11 @@ index 203ece2..93d1698 100644
 +		if lease != nil {
 +			streamCtx = lease.ctx
 +		}
-+		s.goTracked(func() { s.handleStream(streamCtx, stream, sessionID) })
++		s.goTracked(func() { s.handleStreamWithLease(streamCtx, stream, sessionID, lease) })
  	}
  }
  
-@@ -127,6 +139,39 @@ func (s *Server) handshakeReady() bool {
+@@ -127,6 +139,49 @@ func (s *Server) handshakeReady() bool {
  type handshakeResult struct {
  	sessionID string
  	deviceID  string
@@ -1347,9 +1444,19 @@ index 203ece2..93d1698 100644
 +			if err != nil {
 +				return "", errLeaseDenied
 +			}
++			if s.requireMeter && (s.meterReporter == nil || lease.ByteLimit <= 0) {
++				return "", errLeaseDenied
++			}
 +			pending, err = s.leases.prepare(ctx, lease)
 +			if err != nil {
 +				return "", errLeaseDenied
++			}
++			if s.requireMeter {
++				meter := newSessionByteMeter(pending.ctx, lease.SessionID, lease.ByteLimit, s.meterReporter,
++					func() { s.goTracked(func() { s.cutoffLease(pending, "quota") }) })
++				if !s.leases.attachMeter(pending, meter) {
++					return "", errLeaseDenied
++				}
 +			}
 +			return lease.SessionID, nil
 +		}
@@ -1365,7 +1472,7 @@ index 203ece2..93d1698 100644
  }
  
  // acceptHandshake answers the hello on the server's own session, and
-@@ -164,7 +209,7 @@ func (s *Server) answerHello(
+@@ -164,7 +219,7 @@ func (s *Server) answerHello(
  			return nil, handshakeResult{}, false
  		}
  		_ = stream.SetDeadline(time.Now().Add(handshake.DefaultTimeout))
@@ -1374,7 +1481,7 @@ index 203ece2..93d1698 100644
  		_ = stream.SetDeadline(time.Time{})
  		if err != nil {
  			_ = stream.Close()
-@@ -175,11 +220,7 @@ func (s *Server) answerHello(
+@@ -175,11 +230,7 @@ func (s *Server) answerHello(
  			logger.Warnf("handshake failed: %v", err)
  			return nil, handshakeResult{}, false
  		}
@@ -1387,7 +1494,7 @@ index 203ece2..93d1698 100644
  	}
  	return nil, handshakeResult{}, false
  }
-@@ -198,10 +239,34 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
+@@ -198,17 +249,49 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
  		return false
  	}
  	s.sessMu.Lock()
@@ -1408,6 +1515,7 @@ index 203ece2..93d1698 100644
 +		return false
 +	}
 +	s.watchLease(result.lease)
++	s.startMeterReporter(result.lease)
 +	s.meter.bind(result.sessionID, s.group.KeyID())
 +	s.health.RecordSession(result.sessionID)
 +	s.trackPeerOpen(result.sessionID, result.deviceID)
@@ -1423,9 +1531,13 @@ index 203ece2..93d1698 100644
  	s.state.broadcast()
  	s.startControlLoop(ctx, session, stream)
  	return true
-@@ -209,6 +274,9 @@ func (s *Server) acceptSingletonHandshake(ctx context.Context, session *smux.Ses
+ }
  
  func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionID string) {
++	s.handleStreamWithLease(ctx, stream, sessionID, nil)
++}
++
++func (s *Server) handleStreamWithLease(ctx context.Context, stream *smux.Stream, sessionID string, lease *managedLeaseEntry) {
  	defer func() { _ = stream.Close() }()
 +	if contextDone(ctx) {
 +		return
@@ -1433,18 +1545,20 @@ index 203ece2..93d1698 100644
  	if sessionID == "" {
  		sessionID = s.currentSessionID()
  	}
-@@ -237,6 +305,9 @@ func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionI
+@@ -237,7 +320,10 @@ func (s *Server) handleStream(ctx context.Context, stream *smux.Stream, sessionI
  			header = append(header, buffer[:n]...)
  			if request, ok := parseConnectRequest(header); ok {
  				_ = stream.SetReadDeadline(time.Time{})
+-				s.dispatch(ctx, stream, request, sessionID)
 +				if contextDone(ctx) {
 +					return
 +				}
- 				s.dispatch(ctx, stream, request, sessionID)
++				s.dispatchWithLease(ctx, stream, request, sessionID, lease)
  				return
  			}
+ 		}
 diff --git a/internal/server/server.go b/internal/server/server.go
-index f9e65e8..af355fb 100644
+index f9e65e8..cb73fba 100644
 --- a/internal/server/server.go
 +++ b/internal/server/server.go
 @@ -37,8 +37,70 @@ var (
@@ -1518,7 +1632,7 @@ index f9e65e8..af355fb 100644
  // SessionOpenFunc is called after a successful handshake.
  type SessionOpenFunc func(sessionID, deviceID string, claims map[string]any)
  
-@@ -77,17 +139,22 @@ type Server struct {
+@@ -77,17 +139,24 @@ type Server struct {
  	// sessMu, made on first use. ai-generated: the field (olcrtc#49).
  	retiring map[string]*peerSession
  	// peerLimitWarn rate-limits the peer-cap warning.
@@ -1541,7 +1655,9 @@ index f9e65e8..af355fb 100644
 +	authHook        handshake.AuthFunc
 +	requireAuthHook bool
 +	requireLease    bool
++	requireMeter    bool
 +	leaseAuthHook   ManagedLeaseAuthFunc
++	meterReporter   ManagedMeterReportFunc
 +	leases          leaseRegistry
 +	onOpen          SessionOpenFunc
 +	onClose         SessionCloseFunc
@@ -1552,23 +1668,31 @@ index f9e65e8..af355fb 100644
  
  	// meter attributes stream bytes to the pinned key of their session for
  	// the /stats endpoint; link is the carrier state the same endpoint
-@@ -161,6 +228,10 @@ type Config struct {
+@@ -161,6 +230,12 @@ type Config struct {
  	Liveness                  control.Config
  	Traffic                   transport.TrafficConfig
  	AuthHook                  handshake.AuthFunc
 +	RequireAuthHook           bool
 +	RequireLease              bool
++	RequireMeter              bool
 +	ManagedLeaseAuthHook      ManagedLeaseAuthFunc
++	ManagedMeterReporter      ManagedMeterReportFunc
 +	SessionController         *SessionController
  	OnSessionOpen             SessionOpenFunc
  	OnSessionClose            SessionCloseFunc
  	OnTraffic                 TrafficFunc
-@@ -169,6 +240,12 @@ type Config struct {
+@@ -169,6 +244,18 @@ type Config struct {
  
  // Run starts the server with the given configuration.
  func Run(ctx context.Context, cfg Config) error {
++	if cfg.RequireMeter && !cfg.RequireLease {
++		return ErrMeterRequiresLease
++	}
 +	if cfg.RequireLease && cfg.ManagedLeaseAuthHook == nil {
 +		return ErrLeaseHookRequired
++	}
++	if cfg.RequireMeter && cfg.ManagedMeterReporter == nil {
++		return ErrMeterReporterRequired
 +	}
 +	if cfg.RequireAuthHook && !cfg.RequireLease && cfg.AuthHook == nil {
 +		return ErrAuthHookRequired
@@ -1576,13 +1700,14 @@ index f9e65e8..af355fb 100644
  	runCtx, cancel := context.WithCancel(ctx)
  	defer cancel()
  	ring, err := setupRing(cfg)
-@@ -192,22 +269,30 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -192,22 +279,31 @@ func Run(ctx context.Context, cfg Config) error {
  		onTraffic = func(string, string, uint64, uint64) {}
  	}
  	s := &Server{
 -		ring: ring, authHook: hook, onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
 +		ring: ring, authHook: hook, requireAuthHook: cfg.RequireAuthHook || cfg.RequireLease,
-+		requireLease: cfg.RequireLease, leaseAuthHook: cfg.ManagedLeaseAuthHook,
++		requireLease: cfg.RequireLease, requireMeter: cfg.RequireMeter,
++		leaseAuthHook: cfg.ManagedLeaseAuthHook, meterReporter: cfg.ManagedMeterReporter,
 +		onOpen: onOpen, onClose: onClose, onTraffic: onTraffic,
  		dnsServer: cfg.DNSServer, resolver: tunnelcore.Resolver(cfg.Resolver, cfg.DNSServer),
  		socksProxyAddr: cfg.SOCKSProxyAddr, socksProxyPort: cfg.SOCKSProxyPort,
@@ -1609,14 +1734,14 @@ index f9e65e8..af355fb 100644
  	}()
  	if cfg.StatsListen != "" {
  		s.serveStats(runCtx, cfg.StatsListen)
-@@ -223,6 +308,24 @@ func Run(ctx context.Context, cfg Config) error {
+@@ -223,6 +319,24 @@ func Run(ctx context.Context, cfg Config) error {
  	return nil
  }
  
 +// Managed sessions stay TCP-only until UDP flows are tied to a revocable
 +// session generation and accounted while active. A config cannot opt out.
 +func effectiveUDPDisabled(cfg Config) bool {
-+	return cfg.UDPDisabled || cfg.RequireAuthHook || cfg.RequireLease
++	return cfg.UDPDisabled || cfg.RequireAuthHook || cfg.RequireLease || cfg.RequireMeter
 +}
 +
 +func (s *Server) logSessionOpened(sessionID, deviceID, peerID string) {
@@ -2142,11 +2267,1709 @@ index a6fbbaf..ac14bcd 100644
  	if !peer.attachData(muxconn.NewGrouped(&peerRoutingStub{}, peer.group), serverSess) {
  		t.Fatal("attachData() refused a fresh peer")
  	}
+diff --git a/internal/server/stream_meter.go b/internal/server/stream_meter.go
+new file mode 100644
+index 0000000..4ace7b7
+--- /dev/null
++++ b/internal/server/stream_meter.go
+@@ -0,0 +1,392 @@
++package server
++
++import (
++	"context"
++	"errors"
++	"math"
++	"sync"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
++)
++
++// CumulativeReport is the node's immutable, monotonic acknowledgement unit.
++// A future trusted adapter must bind SessionID to the admitted subject and
++// return this exact value only after durable RecordCumulative acceptance.
++type CumulativeReport struct {
++	SessionID         string
++	Sequence          int64
++	ClientToExitBytes int64
++	ExitToClientBytes int64
++}
++
++// ManagedMeterReportFunc must return the exact snapshot only after durable
++// acceptance. It must honor ctx deadlines; any error is ambiguous and causes
++// an identical pending snapshot to be retried, never a new sequence.
++type ManagedMeterReportFunc func(context.Context, CumulativeReport) (CumulativeReport, error)
++
++var (
++	ErrMeterRequiresLease    = errors.New("managed meter requires lease mode")
++	ErrMeterReporterRequired = errors.New("managed meter requires trusted reporter")
++)
++
++// sessionByteMeter is the single reservation point for every TCP stream and
++// both directions of one admitted lease. No reporter callback runs in Reserve
++// or settle, so destination writes do not depend on Bridge latency.
++type sessionByteMeter struct {
++	mu          sync.Mutex
++	ctx         context.Context
++	sessionID   string
++	limit       int64
++	reserved    int64
++	clientBytes int64
++	exitBytes   int64
++	ackedClient int64
++	ackedExit   int64
++	sequence    int64
++	pending     *CumulativeReport
++	lastReport  time.Time
++	exhausted   bool
++	closing     bool
++	activeCopy  int
++	closeBy     time.Time
++	closeCh     chan struct{}
++	updates     chan struct{}
++	reporter    ManagedMeterReportFunc
++	onExhausted func()
++}
++
++// meterConnectHold reserves one byte of admission capacity while a target
++// dial is in flight. Its state is protected by the owning meter's mutex.
++type meterConnectHold struct {
++	meter    *sessionByteMeter
++	started  bool
++	released bool
++}
++
++func newSessionByteMeter(ctx context.Context, id string, limit int64, reporter ManagedMeterReportFunc, onExhausted func()) *sessionByteMeter {
++	return &sessionByteMeter{
++		ctx: ctx, sessionID: id, limit: limit, reporter: reporter,
++		onExhausted: onExhausted, closeCh: make(chan struct{}), updates: make(chan struct{}, 1),
++	}
++}
++
++func (m *sessionByteMeter) Reserve(leftToRight bool, requested int) (int, func(int), error) {
++	if requested <= 0 {
++		return 0, func(int) {}, nil
++	}
++	m.mu.Lock()
++	available := m.availableLocked()
++	if m.exhausted || m.closing || m.ctx.Err() != nil {
++		fire := !m.exhausted
++		m.exhausted = true
++		m.mu.Unlock()
++		if fire && m.onExhausted != nil {
++			m.onExhausted()
++		}
++		return 0, nil, tunnelcore.ErrWriteBudgetExhausted
++	}
++	if available <= 0 {
++		// A temporary in-flight reservation (including a connect hold) is
++		// not confirmed exhaustion: its unwritten bytes may still be refunded.
++		fire := available < 0 || m.clientBytes+m.exitBytes == m.limit
++		if fire {
++			m.exhausted = true
++		}
++		m.mu.Unlock()
++		if fire && m.onExhausted != nil {
++			m.onExhausted()
++		}
++		return 0, nil, tunnelcore.ErrWriteBudgetExhausted
++	}
++	allowed := requested
++	if int64(allowed) > available {
++		allowed = int(available)
++	}
++	m.reserved += int64(allowed)
++	m.mu.Unlock()
++	var once sync.Once
++	return allowed, func(written int) {
++		once.Do(func() {
++			m.settle(leftToRight, allowed, written)
++		})
++	}, nil
++}
++
++func (m *sessionByteMeter) settle(leftToRight bool, allowed, written int) {
++	m.mu.Lock()
++	m.reserved -= int64(allowed)
++	invalid := written < 0 || written > allowed
++	if invalid {
++		written = 0
++	}
++	if leftToRight {
++		m.clientBytes += int64(written)
++	} else {
++		m.exitBytes += int64(written)
++	}
++	fullyUsed := m.clientBytes+m.exitBytes == m.limit && m.reserved == 0
++	fire := (invalid || fullyUsed) && !m.exhausted
++	if fire {
++		m.exhausted = true
++	}
++	m.mu.Unlock()
++	if written > 0 {
++		m.wakeReporter()
++	}
++	if fire && m.onExhausted != nil {
++		m.onExhausted()
++	}
++}
++
++func (m *sessionByteMeter) wakeReporter() {
++	select {
++	case m.updates <- struct{}{}:
++	default:
++	}
++}
++
++func (m *sessionByteMeter) availableLocked() int64 {
++	return m.limit - m.clientBytes - m.exitBytes - m.reserved
++}
++
++// holdConnect atomically claims one admission byte before dial. It does not
++// commit traffic; every exit from dispatch releases the hold idempotently.
++func (m *sessionByteMeter) holdConnect() *meterConnectHold {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	if m.exhausted || m.closing || m.ctx.Err() != nil || m.availableLocked() <= 0 {
++		return nil
++	}
++	m.reserved++
++	return &meterConnectHold{meter: m}
++}
++
++func (h *meterConnectHold) release() {
++	if h == nil {
++		return
++	}
++	m := h.meter
++	m.mu.Lock()
++	if !h.released {
++		h.released = true
++		m.reserved--
++	}
++	m.mu.Unlock()
++}
++
++func (h *meterConnectHold) live() bool {
++	if h == nil {
++		return false
++	}
++	m := h.meter
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	return !h.released && !m.exhausted && !m.closing && m.ctx.Err() == nil
++}
++
++func (m *sessionByteMeter) beginCopyWithHold(h *meterConnectHold) bool {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	if h == nil || h.meter != m || h.released || h.started ||
++		m.exhausted || m.closing || m.ctx.Err() != nil {
++		return false
++	}
++	h.started = true
++	m.activeCopy++
++	return true
++}
++
++func (m *sessionByteMeter) beginCopy() bool {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	if m.exhausted || m.closing || m.ctx.Err() != nil || m.availableLocked() <= 0 {
++		return false
++	}
++	m.activeCopy++
++	return true
++}
++
++func (m *sessionByteMeter) endCopy() {
++	m.mu.Lock()
++	m.activeCopy--
++	m.mu.Unlock()
++	m.wakeReporter()
++}
++
++const meterReportAttemptTimeout = 500 * time.Millisecond
++const meterReportMinInterval = time.Second
++const meterReportRetryMin = 250 * time.Millisecond
++const meterReportRetryMax = 2 * time.Second
++const meterReportFlushGrace = 2 * time.Second
++
++// close stops new reservations but lets in-flight writes settle and gives the
++// single reporter a bounded chance to flush. Unconfirmed reservation is never
++// returned as an available grant by this process.
++func (m *sessionByteMeter) close() {
++	m.mu.Lock()
++	if !m.closing {
++		m.closing = true
++		m.closeBy = time.Now().Add(meterReportFlushGrace)
++		close(m.closeCh)
++	}
++	m.mu.Unlock()
++	m.wakeReporter()
++}
++
++func (m *sessionByteMeter) failClosed() {
++	m.mu.Lock()
++	fire := !m.exhausted
++	m.exhausted = true
++	m.mu.Unlock()
++	if fire && m.onExhausted != nil {
++		m.onExhausted()
++	}
++}
++
++// runReporter is the only code path allowed to call the trusted reporter.
++// A failed or ambiguous acknowledgement leaves pending immutable until the
++// exact same report is accepted; new writes only change the next snapshot.
++func (m *sessionByteMeter) runReporter(ctx context.Context) {
++	retryDelay := meterReportRetryMin
++	for {
++		if ctx.Err() != nil {
++			return
++		}
++		m.mu.Lock()
++		var rateWait time.Duration
++		if m.pending == nil && (m.clientBytes != m.ackedClient || m.exitBytes != m.ackedExit) {
++			if !m.closing && !m.lastReport.IsZero() {
++				rateWait = time.Until(m.lastReport.Add(meterReportMinInterval))
++			}
++			if rateWait <= 0 {
++				if m.sequence == math.MaxInt64 {
++					m.mu.Unlock()
++					m.failClosed()
++					return
++				}
++				m.pending = &CumulativeReport{
++					SessionID: m.sessionID, Sequence: m.sequence + 1,
++					ClientToExitBytes: m.clientBytes, ExitToClientBytes: m.exitBytes,
++				}
++				m.lastReport = time.Now()
++			}
++		}
++		pending := m.pending
++		closing, activeCopy, closeBy := m.closing, m.activeCopy, m.closeBy
++		m.mu.Unlock()
++		if closing && !time.Now().Before(closeBy) {
++			return
++		}
++		if rateWait > 0 {
++			// Ignore write wakes until the next sequence is due. closeCh
++			// interrupts the throttle so a terminal snapshot can flush.
++			timer := time.NewTimer(rateWait)
++			select {
++			case <-timer.C:
++			case <-m.closeCh:
++			case <-ctx.Done():
++				timer.Stop()
++				return
++			}
++			timer.Stop()
++			continue
++		}
++		if pending == nil {
++			if closing && activeCopy == 0 {
++				return
++			}
++			var deadline <-chan time.Time
++			var timer *time.Timer
++			if closing {
++				timer = time.NewTimer(time.Until(closeBy))
++				deadline = timer.C
++			}
++			select {
++			case <-m.updates:
++			case <-deadline:
++			case <-ctx.Done():
++				if timer != nil {
++					timer.Stop()
++				}
++				return
++			}
++			if timer != nil {
++				timer.Stop()
++			}
++			continue
++		}
++		if m.reporter == nil {
++			m.failClosed()
++			return
++		}
++		attemptDeadline := time.Now().Add(meterReportAttemptTimeout)
++		if closing && closeBy.Before(attemptDeadline) {
++			attemptDeadline = closeBy
++		}
++		attemptCtx, cancel := context.WithDeadline(ctx, attemptDeadline)
++		ack, err := m.reporter(attemptCtx, *pending)
++		cancel()
++		if err == nil && ack == *pending {
++			m.mu.Lock()
++			if m.pending == pending {
++				m.sequence = pending.Sequence
++				m.ackedClient = pending.ClientToExitBytes
++				m.ackedExit = pending.ExitToClientBytes
++				m.pending = nil
++			}
++			m.mu.Unlock()
++			retryDelay = meterReportRetryMin
++			continue
++		}
++		if err == nil { // An unknown or conflicting durable ack is not success.
++			m.failClosed()
++			return
++		}
++		m.mu.Lock()
++		closing, closeBy = m.closing, m.closeBy
++		m.mu.Unlock()
++		wait := retryDelay
++		if closing {
++			remaining := time.Until(closeBy)
++			if remaining <= 0 {
++				return
++			}
++			if wait > remaining {
++				wait = remaining
++			}
++		}
++		timer := time.NewTimer(wait)
++		var closingSignal <-chan struct{}
++		if !closing {
++			closingSignal = m.closeCh
++		}
++		select {
++		case <-timer.C:
++		case <-closingSignal:
++		case <-ctx.Done():
++			timer.Stop()
++			return
++		}
++		timer.Stop()
++		if retryDelay < meterReportRetryMax {
++			retryDelay *= 2
++			if retryDelay > meterReportRetryMax {
++				retryDelay = meterReportRetryMax
++			}
++		}
++	}
++}
++
++func (m *sessionByteMeter) currentTotals() (int64, int64) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	return m.clientBytes, m.exitBytes
++}
++
++func (s *Server) startMeterReporter(entry *managedLeaseEntry) {
++	if entry == nil || entry.byteMeter == nil {
++		return
++	}
++	s.goTracked(func() { entry.byteMeter.runReporter(context.Background()) })
++}
+diff --git a/internal/server/stream_meter_test.go b/internal/server/stream_meter_test.go
+new file mode 100644
+index 0000000..61d7784
+--- /dev/null
++++ b/internal/server/stream_meter_test.go
+@@ -0,0 +1,852 @@
++package server
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtaci/smux"
++
++	"github.com/openlibrecommunity/olcrtc/internal/control"
++	"github.com/openlibrecommunity/olcrtc/internal/handshake"
++	"github.com/openlibrecommunity/olcrtc/internal/muxconn"
++	"github.com/openlibrecommunity/olcrtc/internal/tunnelcore"
++)
++
++func echoMeterAck(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++	return report, nil
++}
++
++func TestRequireMeterRejectsMissingLeaseOrReporterBeforeKeySetup(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		cfg  Config
++		want error
++	}{
++		{name: "lease mode absent", cfg: Config{RequireMeter: true, ManagedMeterReporter: echoMeterAck}, want: ErrMeterRequiresLease},
++		{name: "reporter absent", cfg: Config{
++			RequireLease: true, RequireMeter: true,
++			ManagedLeaseAuthHook: func(context.Context, string, map[string]any) (ManagedLease, error) { return ManagedLease{}, nil },
++		}, want: ErrMeterReporterRequired},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if err := Run(context.Background(), tc.cfg); !errors.Is(err, tc.want) {
++				t.Fatalf("Run() = %v, want %v before key setup", err, tc.want)
++			}
++		})
++	}
++}
++
++func TestRequireMeterRejectsMissingByteLeaseBeforeWelcome(t *testing.T) {
++	for _, limit := range []int64{0, -1} {
++		s := newHandshakeServer()
++		s.requireLease, s.requireMeter = true, true
++		s.meterReporter = echoMeterAck
++		s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++			return ManagedLease{SessionID: "meter-missing-budget-001", NotAfter: time.Now().Add(time.Minute), ByteLimit: limit}, nil
++		}
++		serverSession, clientSession, cleanup := smuxPair(t)
++		result := make(chan error, 1)
++		go func() {
++			stream, err := clientSession.OpenStream()
++			if err == nil {
++				_, _, err = handshake.Client(stream, "device", nil)
++			}
++			result <- err
++		}()
++		stream, _, ok := s.answerHello(context.Background(), serverSession)
++		if ok || stream != nil {
++			t.Fatalf("ByteLimit=%d reached WELCOME", limit)
++		}
++		if err := <-result; !errors.Is(err, handshake.ErrRejected) {
++			t.Fatalf("ByteLimit=%d client result=%v, want reject", limit, err)
++		}
++		cleanup()
++	}
++}
++
++func TestRequireMeterWithoutActiveLeaseNeverDialsOrAcknowledgesConnect(t *testing.T) {
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	var dials atomic.Int32
++	s := &Server{
++		requireMeter: true, unsafeAllowPrivateTargets: true,
++		dialTarget: func(context.Context, string, string) (net.Conn, error) {
++			dials.Add(1)
++			a, b := net.Pipe()
++			_ = b.Close()
++			return a, nil
++		},
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		stream, err := serverSession.AcceptStream()
++		if err == nil {
++			s.handleStream(context.Background(), stream, "meter-absent-lease-001")
++		}
++	}()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatalf("OpenStream() error = %v", err)
++	}
++	request, err := json.Marshal(ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := clientStream.Write(request); err != nil {
++		t.Fatalf("CONNECT write failed: %v", err)
++	}
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("server did not decide absent lease promptly")
++	}
++	_ = clientStream.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
++	ack := make([]byte, 1)
++	if n, _ := clientStream.Read(ack); n > 0 && ack[0] == tunnelcore.ConnectAckOK {
++		t.Fatal("missing active byte lease received CONNECT OK")
++	}
++	if got := dials.Load(); got != 0 {
++		t.Fatalf("missing active byte lease dialed %d times", got)
++	}
++}
++
++func TestManagedMeterExhaustedBudgetNeverDialsOrAcknowledgesConnect(t *testing.T) {
++	s, lease, meter := activeMeterDispatchServer(t, 1)
++	_, settle, err := meter.Reserve(true, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	var dials atomic.Int32
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) {
++		dials.Add(1)
++		conn, peer := net.Pipe()
++		_ = peer.Close()
++		return conn, nil
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = clientStream.Close() }()
++	serverStream, err := serverSession.AcceptStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		defer func() { _ = serverStream.Close() }()
++		s.dispatchWithLease(context.Background(), serverStream,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("exhausted budget did not reject CONNECT promptly")
++	}
++	if got := dials.Load(); got != 0 {
++		t.Fatalf("exhausted byte budget opened %d target connections", got)
++	}
++	_ = clientStream.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
++	var ack [1]byte
++	if n, _ := clientStream.Read(ack[:]); n != 0 {
++		t.Fatalf("exhausted byte budget sent CONNECT ACK %x", ack[:n])
++	}
++}
++
++func TestManagedMeterConnectHoldPreservesLastByteThroughSlowDial(t *testing.T) {
++	s, lease, meter := activeMeterDispatchServer(t, 1)
++	dialStarted := make(chan struct{})
++	releaseDial := make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseDial) }) }
++	defer release()
++	target, remote := net.Pipe()
++	defer func() { _ = remote.Close() }()
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) {
++		close(dialStarted)
++		<-releaseDial
++		return target, nil
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = clientStream.Close() }()
++	serverStream, err := serverSession.AcceptStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		defer func() { _ = serverStream.Close() }()
++		s.dispatchWithLease(context.Background(), serverStream,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	select {
++	case <-dialStarted:
++	case <-time.After(time.Second):
++		t.Fatal("valid admission never reached the slow dial")
++	}
++	if _, _, err := meter.Reserve(true, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("other copy consumed connect hold during dial: %v", err)
++	}
++	release()
++	_ = clientStream.SetReadDeadline(time.Now().Add(time.Second))
++	var ack [1]byte
++	if _, err := io.ReadFull(clientStream, ack[:]); err != nil || ack[0] != tunnelcore.ConnectAckOK {
++		t.Fatalf("held byte did not preserve CONNECT admission: ack=%x err=%v", ack, err)
++	}
++	if _, err := clientStream.Write([]byte("X")); err != nil {
++		t.Fatalf("admitted payload write failed: %v", err)
++	}
++	_ = remote.SetReadDeadline(time.Now().Add(time.Second))
++	var payload [1]byte
++	if _, err := io.ReadFull(remote, payload[:]); err != nil || payload[0] != 'X' {
++		t.Fatalf("held byte was unavailable for payload: %q %v", payload, err)
++	}
++	_ = clientStream.Close()
++	_ = remote.Close()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("slow dial cleanup pinned dispatch")
++	}
++}
++
++func TestManagedMeterFailedDialDoesNotConsumeOrHoldByteBudget(t *testing.T) {
++	s, lease, meter := activeMeterDispatchServer(t, 1)
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) {
++		return nil, errors.New("target refused")
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = clientStream.Close() }()
++	serverStream, err := serverSession.AcceptStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		defer func() { _ = serverStream.Close() }()
++		s.dispatchWithLease(context.Background(), serverStream,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	_ = clientStream.SetReadDeadline(time.Now().Add(time.Second))
++	var ack [1]byte
++	if _, err := io.ReadFull(clientStream, ack[:]); err != nil || ack[0] != tunnelcore.ConnectAckHostUnreachable {
++		t.Fatalf("failed dial ack = %x, %v", ack, err)
++	}
++	<-done
++	allowed, settle, err := meter.Reserve(true, 1)
++	if err != nil || allowed != 1 {
++		t.Fatalf("failed dial consumed or held capacity: allowed=%d err=%v", allowed, err)
++	}
++	settle(0)
++}
++
++func TestManagedMeterConnectHoldBlocksSecondDialForLastByte(t *testing.T) {
++	s, lease, _ := activeMeterDispatchServer(t, 1)
++	entered := make(chan struct{}, 2)
++	releaseDial := make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseDial) }) }
++	defer release()
++	var dials atomic.Int32
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) {
++		dials.Add(1)
++		entered <- struct{}{}
++		<-releaseDial
++		return nil, errors.New("target unavailable")
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	open := func() (*smux.Stream, *smux.Stream) {
++		clientStream, err := clientSession.OpenStream()
++		if err != nil {
++			t.Fatal(err)
++		}
++		serverStream, err := serverSession.AcceptStream()
++		if err != nil {
++			t.Fatal(err)
++		}
++		return serverStream, clientStream
++	}
++	firstServer, firstClient := open()
++	defer func() { _ = firstClient.Close() }()
++	firstDone := make(chan struct{})
++	go func() {
++		defer close(firstDone)
++		defer func() { _ = firstServer.Close() }()
++		s.dispatchWithLease(context.Background(), firstServer,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("first admitted stream did not reach slow dial")
++	}
++	secondServer, secondClient := open()
++	defer func() { _ = secondClient.Close() }()
++	secondDone := make(chan struct{})
++	go func() {
++		defer close(secondDone)
++		defer func() { _ = secondServer.Close() }()
++		s.dispatchWithLease(context.Background(), secondServer,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	blockedSecond := false
++	select {
++	case <-secondDone:
++		blockedSecond = true
++	case <-time.After(200 * time.Millisecond):
++	}
++	release()
++	select {
++	case <-firstDone:
++	case <-time.After(time.Second):
++		t.Fatal("first dial did not finish")
++	}
++	select {
++	case <-secondDone:
++	case <-time.After(time.Second):
++		t.Fatal("second dispatch did not finish")
++	}
++	if !blockedSecond || dials.Load() != 1 {
++		t.Fatalf("last-byte connect hold failed: second returned before release=%v, dials=%d", blockedSecond, dials.Load())
++	}
++	_ = secondClient.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
++	var ack [1]byte
++	if n, _ := secondClient.Read(ack[:]); n != 0 {
++		t.Fatalf("unadmitted second stream received ACK %x", ack[:n])
++	}
++}
++
++func TestManagedMeterTemporaryConnectHoldDoesNotExhaustSession(t *testing.T) {
++	s, lease, meter := activeMeterDispatchServer(t, 1)
++	entered := make(chan struct{})
++	releaseDial := make(chan struct{})
++	var releaseOnce sync.Once
++	release := func() { releaseOnce.Do(func() { close(releaseDial) }) }
++	defer release()
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) {
++		close(entered)
++		<-releaseDial
++		return nil, errors.New("target unavailable")
++	}
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	clientStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = clientStream.Close() }()
++	serverStream, err := serverSession.AcceptStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		defer func() { _ = serverStream.Close() }()
++		s.dispatchWithLease(context.Background(), serverStream,
++			ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80}, lease.lease.SessionID, lease)
++	}()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("first admitted stream did not reach slow dial")
++	}
++	if _, _, err := meter.Reserve(true, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("last byte was not held during dial: Reserve() = %v", err)
++	}
++	release()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("failed dial did not release its hold")
++	}
++	allowed, settle, err := meter.Reserve(true, 1)
++	if err != nil || allowed != 1 {
++		t.Fatalf("temporary hold permanently exhausted session: allowed=%d err=%v", allowed, err)
++	}
++	settle(0)
++}
++
++func TestManagedMeterConnectHoldConcurrentReleaseRefundsExactlyOnce(t *testing.T) {
++	m := newSessionByteMeter(context.Background(), "meter-connect-release-001", 1, echoMeterAck, func() {})
++	hold := m.holdConnect()
++	if hold == nil {
++		t.Fatal("positive byte budget refused connect hold")
++	}
++	var workers sync.WaitGroup
++	for i := 0; i < 16; i++ {
++		workers.Add(1)
++		go func() { defer workers.Done(); hold.release() }()
++	}
++	workers.Wait()
++	allowed, settle, err := m.Reserve(true, 1)
++	if err != nil || allowed != 1 {
++		t.Fatalf("concurrent release failed to restore exactly one byte: allowed=%d err=%v", allowed, err)
++	}
++	settle(1)
++	if _, _, err := m.Reserve(false, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("double release expanded budget: %v", err)
++	}
++}
++
++func activeMeterDispatchServer(t *testing.T, limit int64) (*Server, *managedLeaseEntry, *sessionByteMeter) {
++	t.Helper()
++	s := &Server{requireLease: true, requireMeter: true, meterReporter: echoMeterAck,
++		unsafeAllowPrivateTargets: true, meter: newMeter()}
++	lease, err := s.leases.prepare(context.Background(), ManagedLease{
++		SessionID: "meter-dispatch-session-001", NotAfter: time.Now().Add(time.Minute), ByteLimit: limit,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	meter := newSessionByteMeter(lease.ctx, lease.lease.SessionID, limit, echoMeterAck, func() {})
++	if !s.leases.attachMeter(lease, meter) || !s.leases.activate(lease) {
++		t.Fatal("test byte lease did not become active")
++	}
++	t.Cleanup(func() { s.leases.finish(lease) })
++	return s, lease, meter
++}
++
++func TestManagedMeterReportsSuccessfulTCPWritesBeforeEOFWithoutFinalOnTraffic(t *testing.T) {
++	serverSession, clientSession, cleanup := smuxPair(t)
++	defer cleanup()
++	s := newHandshakeServer()
++	s.requireLease, s.requireMeter, s.requireAuthHook = true, true, true
++	s.session = serverSession
++	s.group = muxconn.PrePinned(newServerTestKeys(t), "meter-key")
++	s.meter = newMeter()
++	s.unsafeAllowPrivateTargets = true
++	s.liveness = control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 1}
++	s.leaseAuthHook = func(context.Context, string, map[string]any) (ManagedLease, error) {
++		return ManagedLease{SessionID: "meter-live-tcp-session-001", NotAfter: time.Now().Add(time.Minute), ByteLimit: 20}, nil
++	}
++	reports := make(chan CumulativeReport, 4)
++	s.meterReporter = func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++		reports <- report
++		return report, nil
++	}
++	var finalTraffic atomic.Int32
++	s.onTraffic = func(string, string, uint64, uint64) { finalTraffic.Add(1) }
++	remote, frozen := net.Pipe()
++	defer func() { _ = remote.Close(); _ = frozen.Close() }()
++	s.dialTarget = func(context.Context, string, string) (net.Conn, error) { return remote, nil }
++	ctx, cancel := context.WithCancel(context.Background())
++	serveDone := make(chan struct{})
++	go func() { s.serveSingle(ctx); close(serveDone) }()
++	defer func() {
++		cancel()
++		s.closeSession()
++		<-serveDone
++		s.wg.Wait()
++	}()
++	controlStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatalf("control OpenStream() error = %v", err)
++	}
++	if _, _, err := handshake.Client(controlStream, "device", nil); err != nil {
++		t.Fatalf("client handshake error = %v", err)
++	}
++	dataStream, err := clientSession.OpenStream()
++	if err != nil {
++		t.Fatalf("data OpenStream() error = %v", err)
++	}
++	request, err := json.Marshal(ConnectRequest{Cmd: testConnectCmd, Addr: "127.0.0.1", Port: 80})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := dataStream.Write(request); err != nil {
++		t.Fatalf("CONNECT write failed: %v", err)
++	}
++	_ = dataStream.SetReadDeadline(time.Now().Add(time.Second))
++	ack := make([]byte, 1)
++	if _, err := io.ReadFull(dataStream, ack); err != nil || ack[0] != tunnelcore.ConnectAckOK {
++		t.Fatalf("CONNECT ack = %v, %v, want OK", ack, err)
++	}
++	if _, err := dataStream.Write([]byte("abc")); err != nil {
++		t.Fatalf("client payload write failed: %v", err)
++	}
++	_ = frozen.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err := io.ReadFull(frozen, make([]byte, 3)); err != nil {
++		t.Fatalf("exit did not receive client bytes: %v", err)
++	}
++	if report := receiveMeterReport(t, reports); report != (CumulativeReport{"meter-live-tcp-session-001", 1, 3, 0}) {
++		t.Fatalf("pre-EOF client report = %+v", report)
++	}
++	if _, err := frozen.Write([]byte("XY")); err != nil {
++		t.Fatalf("exit payload write failed: %v", err)
++	}
++	if _, err := io.ReadFull(dataStream, make([]byte, 2)); err != nil {
++		t.Fatalf("client did not receive exit bytes: %v", err)
++	}
++	if report := receiveMeterReport(t, reports); report != (CumulativeReport{"meter-live-tcp-session-001", 2, 3, 2}) {
++		t.Fatalf("pre-EOF bidirectional report = %+v", report)
++	}
++	_ = dataStream.Close()
++	_ = frozen.Close()
++	cancel()
++	s.closeSession()
++	<-serveDone
++	s.wg.Wait()
++	if finalTraffic.Load() != 0 {
++		t.Fatal("managed stream invoked final OnTraffic and could be double-counted")
++	}
++}
++
++func TestManagedByteBudgetAggregatesBothDirectionsAndRefundsShortWrite(t *testing.T) {
++	m := newSessionByteMeter(context.Background(), "meter-budget-session-001", 5, echoMeterAck, func() {})
++	first, settleFirst, err := m.Reserve(true, 4)
++	if err != nil || first != 4 {
++		t.Fatalf("first reservation = %d, %v, want 4", first, err)
++	}
++	second, settleSecond, err := m.Reserve(false, 4)
++	if err != nil || second != 1 {
++		t.Fatalf("opposite direction independently exceeded budget: %d, %v", second, err)
++	}
++	settleFirst(2) // The destination accepted only half; two bytes must be refundable.
++	settleSecond(1)
++	third, settleThird, err := m.Reserve(false, 3)
++	if err != nil || third != 2 {
++		t.Fatalf("short-write refund = %d, %v, want 2", third, err)
++	}
++	settleThird(2)
++	if _, _, err := m.Reserve(true, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("sixth byte reservation = %v, want exhausted", err)
++	}
++	up, down := m.currentTotals()
++	if up != 2 || down != 3 {
++		t.Fatalf("committed totals = %d/%d, want 2/3", up, down)
++	}
++}
++
++func TestManagedByteBudgetConcurrentReservationsNeverExceedSharedLimit(t *testing.T) {
++	m := newSessionByteMeter(context.Background(), "meter-concurrent-session-001", 1000, echoMeterAck, func() {})
++	var total atomic.Int64
++	var workers sync.WaitGroup
++	for i := 0; i < 64; i++ {
++		workers.Add(1)
++		go func(direction bool) {
++			defer workers.Done()
++			allowed, settle, err := m.Reserve(direction, 100)
++			if err != nil {
++				return
++			}
++			total.Add(int64(allowed))
++			settle(allowed)
++		}(i%2 == 0)
++	}
++	workers.Wait()
++	if got := total.Load(); got != 1000 {
++		t.Fatalf("shared budget reserved %d bytes, want exactly 1000", got)
++	}
++	up, down := m.currentTotals()
++	if up+down != 1000 {
++		t.Fatalf("committed %d bytes, want 1000", up+down)
++	}
++}
++
++func TestManagedMeterReportsBeforeEOFAndRetriesImmutableSnapshot(t *testing.T) {
++	calls := make(chan CumulativeReport, 4)
++	releaseFirst := make(chan struct{})
++	var attempts atomic.Int32
++	reporter := func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++		calls <- report
++		if attempts.Add(1) == 1 {
++			<-releaseFirst
++			return CumulativeReport{}, errors.New("ambiguous commit")
++		}
++		return report, nil
++	}
++	m := newSessionByteMeter(context.Background(), "meter-report-session-001", 10, reporter, func() {})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { m.runReporter(ctx); close(done) }()
++	allowed, settle, err := m.Reserve(true, 2)
++	if err != nil || allowed != 2 {
++		t.Fatalf("first Reserve() = %d, %v", allowed, err)
++	}
++	settle(2)
++	first := receiveMeterReport(t, calls)
++	if first != (CumulativeReport{"meter-report-session-001", 1, 2, 0}) {
++		t.Fatalf("first report = %+v, want seq 1 and 2/0 before EOF", first)
++	}
++	allowed, settle, err = m.Reserve(false, 1)
++	if err != nil || allowed != 1 {
++		t.Fatalf("second Reserve() = %d, %v", allowed, err)
++	}
++	settle(1)
++	select {
++	case extra := <-calls:
++		t.Fatalf("reporter had concurrent in-flight call: %+v", extra)
++	case <-time.After(30 * time.Millisecond):
++	}
++	close(releaseFirst)
++	if retry := receiveMeterReport(t, calls); retry != first {
++		t.Fatalf("ambiguous ack changed snapshot: retry=%+v first=%+v", retry, first)
++	}
++	if next := receiveMeterReport(t, calls); next != (CumulativeReport{"meter-report-session-001", 2, 2, 1}) {
++		t.Fatalf("post-ack cumulative report = %+v, want seq 2 and 2/1", next)
++	}
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("reporter worker did not stop")
++	}
++}
++
++func TestManagedMeterCoalescesFrequentWritesBeforeEOF(t *testing.T) {
++	reports := make(chan CumulativeReport, 32)
++	m := newSessionByteMeter(context.Background(), "meter-coalesce-session-001", 100,
++		func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++			reports <- report
++			return report, nil
++		}, func() {},
++	)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { m.runReporter(ctx); close(done) }()
++	_, settle, err := m.Reserve(true, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	first := receiveMeterReport(t, reports)
++	if first.Sequence != 1 || first.ClientToExitBytes != 1 {
++		t.Fatalf("first report = %+v", first)
++	}
++	for i := 0; i < 20; i++ {
++		_, settle, err := m.Reserve(i%2 == 0, 1)
++		if err != nil {
++			t.Fatal(err)
++		}
++		settle(1)
++	}
++	select {
++	case report := <-reports:
++		t.Fatalf("new sequence was not rate-limited: %+v", report)
++	case <-time.After(200 * time.Millisecond):
++	}
++	second := receiveMeterReport(t, reports)
++	if second.Sequence != 2 || second.ClientToExitBytes != 11 || second.ExitToClientBytes != 10 {
++		t.Fatalf("coalesced report = %+v, want seq 2 and 11/10", second)
++	}
++	cancel()
++	<-done
++}
++
++func TestManagedMeterAmbiguousRetryHasBoundedBackoff(t *testing.T) {
++	type attempt struct {
++		report CumulativeReport
++		at     time.Time
++	}
++	attempts := make(chan attempt, 4)
++	m := newSessionByteMeter(context.Background(), "meter-backoff-session-001", 10,
++		func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++			attempts <- attempt{report: report, at: time.Now()}
++			return CumulativeReport{}, errors.New("ambiguous acknowledgement")
++		}, func() {},
++	)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { m.runReporter(ctx); close(done) }()
++	_, settle, err := m.Reserve(true, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	var first, second attempt
++	select {
++	case first = <-attempts:
++	case <-time.After(time.Second):
++		t.Fatal("first attempt was not sent")
++	}
++	select {
++	case second = <-attempts:
++	case <-time.After(2 * time.Second):
++		t.Fatal("retry did not occur within bounded backoff")
++	}
++	if second.report != first.report {
++		t.Fatalf("ambiguous retry changed snapshot: first=%+v second=%+v", first.report, second.report)
++	}
++	if elapsed := second.at.Sub(first.at); elapsed < 200*time.Millisecond {
++		t.Fatalf("retry rate too high: %s between ambiguous attempts", elapsed)
++	}
++	cancel()
++	<-done
++}
++
++func TestManagedMeterCloseFlushesRateLimitedTerminalSnapshot(t *testing.T) {
++	reports := make(chan CumulativeReport, 4)
++	m := newSessionByteMeter(context.Background(), "meter-terminal-session-001", 10,
++		func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++			reports <- report
++			return report, nil
++		}, func() {},
++	)
++	done := make(chan struct{})
++	go func() { m.runReporter(context.Background()); close(done) }()
++	_, settle, err := m.Reserve(true, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	if first := receiveMeterReport(t, reports); first.Sequence != 1 || first.ClientToExitBytes != 1 {
++		t.Fatalf("first report = %+v", first)
++	}
++	_, settle, err = m.Reserve(false, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	m.close()
++	select {
++	case report := <-reports:
++		if report.Sequence != 2 || report.ClientToExitBytes != 1 || report.ExitToClientBytes != 1 {
++			t.Fatalf("terminal report = %+v", report)
++		}
++	case <-time.After(500 * time.Millisecond):
++		t.Fatal("close failed to bypass new-sequence throttle for terminal report")
++	}
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("reporter failed to stop after terminal acknowledgement")
++	}
++}
++
++func TestManagedMeterReporterOutageNeverExpandsLocalBudget(t *testing.T) {
++	attempts := make(chan CumulativeReport, 4)
++	m := newSessionByteMeter(context.Background(), "meter-outage-session-001", 3,
++		func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++			attempts <- report
++			return CumulativeReport{}, errors.New("reporter unavailable")
++		}, func() {},
++	)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { m.runReporter(ctx); close(done) }()
++	_, settle, err := m.Reserve(true, 2)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(2)
++	first := receiveMeterReport(t, attempts)
++	_, settle, err = m.Reserve(false, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	settle(1)
++	if _, _, err := m.Reserve(true, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("reporter outage expanded local budget: %v", err)
++	}
++	if retry := receiveMeterReport(t, attempts); retry != first {
++		t.Fatalf("outage retry changed pending snapshot: first=%+v retry=%+v", first, retry)
++	}
++	cancel()
++	<-done
++}
++
++func TestManagedMeterUnknownAckFailsClosed(t *testing.T) {
++	failed := make(chan struct{}, 1)
++	m := newSessionByteMeter(context.Background(), "meter-unknown-ack-001", 10,
++		func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++			report.Sequence++
++			return report, nil
++		},
++		func() { failed <- struct{}{} },
++	)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() { m.runReporter(ctx); close(done) }()
++	_, settle, err := m.Reserve(true, 1)
++	if err != nil {
++		t.Fatalf("Reserve() error = %v", err)
++	}
++	settle(1)
++	select {
++	case <-failed:
++	case <-time.After(2 * time.Second):
++		t.Fatal("unknown ack was treated as durable success")
++	}
++	if _, _, err := m.Reserve(false, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("unknown ack left byte lease usable: %v", err)
++	}
++	cancel()
++	<-done
++}
++
++func TestManagedByteBudgetRejectsNewReservationAfterLeaseCancel(t *testing.T) {
++	leaseCtx, cancel := context.WithCancel(context.Background())
++	m := newSessionByteMeter(leaseCtx, "meter-revoked-session-001", 8, echoMeterAck, func() {})
++	allowed, settle, err := m.Reserve(true, 2)
++	if err != nil || allowed != 2 {
++		t.Fatalf("pre-revoke Reserve() = %d, %v", allowed, err)
++	}
++	cancel()
++	settle(1) // One in-flight successful byte may settle after the revoke.
++	if _, _, err := m.Reserve(false, 1); !errors.Is(err, tunnelcore.ErrWriteBudgetExhausted) {
++		t.Fatalf("post-revoke Reserve() = %v, want fail closed", err)
++	}
++	up, down := m.currentTotals()
++	if up != 1 || down != 0 {
++		t.Fatalf("post-revoke successful-byte accounting = %d/%d, want 1/0", up, down)
++	}
++}
++
++func TestManagedMeterCloseDoesNotWaitForeverForStuckCopy(t *testing.T) {
++	m := newSessionByteMeter(context.Background(), "meter-stuck-copy-001", 8, echoMeterAck, func() {})
++	if !m.beginCopy() {
++		t.Fatal("copy did not begin")
++	}
++	done := make(chan struct{})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	go func() { m.runReporter(ctx); close(done) }()
++	m.close()
++	select {
++	case <-done:
++	case <-time.After(meterReportFlushGrace + 300*time.Millisecond):
++		t.Fatal("reporter remained pinned by stuck copy past bounded flush grace")
++	}
++}
++
++func receiveMeterReport(t *testing.T, reports <-chan CumulativeReport) CumulativeReport {
++	t.Helper()
++	select {
++	case report := <-reports:
++		return report
++	case <-time.After(2 * time.Second):
++		t.Fatal("cumulative report was not sent")
++		return CumulativeReport{}
++	}
++}
+diff --git a/internal/tunnelcore/copy.go b/internal/tunnelcore/copy.go
+index b2c53bd..577d1da 100644
+--- a/internal/tunnelcore/copy.go
++++ b/internal/tunnelcore/copy.go
+@@ -30,6 +30,9 @@ const HalfOpenGrace = 60 * time.Second
+ // direction carried nothing for HalfOpenGrace after the other had finished.
+ var ErrHalfOpenIdle = errors.New("half-open connection idle past its grace")
+ 
++// ErrWriteBudgetExhausted means a managed copy has no valid permit for a write.
++var ErrWriteBudgetExhausted = errors.New("write budget exhausted")
++
+ // copyBufPool serves the tunnel copy loops. 32 KiB matches io.Copy's own
+ // default and one smux frame, so a full frame moves per iteration.
+ var copyBufPool = sync.Pool{ //nolint:gochecknoglobals // shared per-connection copy buffers
+@@ -45,6 +48,12 @@ type CopyCounts struct {
+ 	RightToLeft uint64
+ }
+ 
++// WritePermit limits each managed write before it reaches the destination.
++// Settle is called once with the number of bytes the destination accepted.
++type WritePermit interface {
++	Reserve(leftToRight bool, requested int) (allowed int, settle func(written int), err error)
++}
++
+ type copyResult struct {
+ 	leftToRight bool
+ 	bytes       uint64
+@@ -62,16 +71,41 @@ func CopyBidirectional(
+ 	return copyBidirectional(ctx, left, right, HalfOpenGrace)
+ }
+ 
++// CopyBidirectionalWithPermit copies both directions under a mandatory write permit.
++func CopyBidirectionalWithPermit(
++	ctx context.Context,
++	left io.ReadWriteCloser,
++	right io.ReadWriteCloser,
++	permit WritePermit,
++) (CopyCounts, error) {
++	if permit == nil {
++		_ = left.Close()
++		_ = right.Close()
++		return CopyCounts{}, ErrWriteBudgetExhausted
++	}
++	return copyBidirectionalWithPermit(ctx, left, right, HalfOpenGrace, permit)
++}
++
+ func copyBidirectional(
+ 	ctx context.Context,
+ 	left io.ReadWriteCloser,
+ 	right io.ReadWriteCloser,
+ 	grace time.Duration,
++) (CopyCounts, error) {
++	return copyBidirectionalWithPermit(ctx, left, right, grace, nil)
++}
++
++func copyBidirectionalWithPermit(
++	ctx context.Context,
++	left io.ReadWriteCloser,
++	right io.ReadWriteCloser,
++	grace time.Duration,
++	permit WritePermit,
+ ) (CopyCounts, error) {
+ 	var moved atomic.Uint64
+ 	results := make(chan copyResult, 2)
+-	go copyOneWay(results, true, right, left, &moved)
+-	go copyOneWay(results, false, left, right, &moved)
++	go copyOneWay(results, true, right, left, &moved, permit)
++	go copyOneWay(results, false, left, right, &moved, permit)
+ 
+ 	var counts CopyCounts
+ 	closeBoth := func() {
+@@ -96,6 +130,9 @@ func copyBidirectional(
+ 		return counts, err
+ 	}
+ 	err = errors.Join(awaitHalfOpen(ctx, results, &counts, &moved, grace, closeBoth)...)
++	if permit != nil && err != nil {
++		closeBoth()
++	}
+ 	return counts, err
+ }
+ 
+@@ -145,8 +182,8 @@ func drain(results <-chan copyResult, counts *CopyCounts) error {
+ 	return result.err
+ }
+ 
+-func copyOneWay(results chan<- copyResult, leftToRight bool, dst io.Writer, src io.Reader, moved *atomic.Uint64) {
+-	n, err := copyStream(countingWriter{dst, moved}, src)
++func copyOneWay(results chan<- copyResult, leftToRight bool, dst io.Writer, src io.Reader, moved *atomic.Uint64, permit WritePermit) {
++	n, err := copyStream(countingWriter{Writer: dst, moved: moved, permit: permit, leftToRight: leftToRight}, src)
+ 	result := copyResult{leftToRight: leftToRight, err: err}
+ 	if n > 0 {
+ 		result.bytes = uint64(n)
+@@ -158,15 +195,50 @@ func copyOneWay(results chan<- copyResult, leftToRight bool, dst io.Writer, src
+ // half-open grace is measured against.
+ type countingWriter struct {
+ 	io.Writer
+-	moved *atomic.Uint64
++	moved       *atomic.Uint64
++	permit      WritePermit
++	leftToRight bool
+ }
+ 
+ func (w countingWriter) Write(p []byte) (int, error) {
+-	n, err := w.Writer.Write(p)
++	if w.permit == nil {
++		n, err := w.Writer.Write(p)
++		if n > 0 {
++			w.moved.Add(uint64(n))
++		}
++		return n, err //nolint:wrapcheck // preserve the legacy copy path
++	}
++	allowed, settle, reserveErr := w.permit.Reserve(w.leftToRight, len(p))
++	if reserveErr != nil {
++		if settle != nil {
++			settle(0)
++		}
++		return 0, reserveErr
++	}
++	if allowed <= 0 || allowed > len(p) || settle == nil {
++		if settle != nil {
++			settle(0)
++		}
++		return 0, ErrWriteBudgetExhausted
++	}
++	n, err := w.Writer.Write(p[:allowed])
++	settle(n)
+ 	if n > 0 {
+ 		w.moved.Add(uint64(n))
+ 	}
+-	return n, err //nolint:wrapcheck // a transparent wrapper; callers classify this error themselves
++	if allowed < len(p) {
++		if err == nil && n < allowed {
++			err = io.ErrShortWrite
++		}
++		return n, errors.Join(ErrWriteBudgetExhausted, err)
++	}
++	if err != nil {
++		return n, err //nolint:wrapcheck // a transparent wrapper; callers classify this error themselves
++	}
++	if n < allowed {
++		return n, io.ErrShortWrite
++	}
++	return n, nil
+ }
+ 
+ // onlyReader hides a reader's WriteTo so io.CopyBuffer actually uses the
+diff --git a/internal/tunnelcore/copy_test.go b/internal/tunnelcore/copy_test.go
+index 7e39258..b966fba 100644
+--- a/internal/tunnelcore/copy_test.go
++++ b/internal/tunnelcore/copy_test.go
+@@ -37,6 +37,228 @@ func TestCopyBidirectionalCountsBothDirections(t *testing.T) {
+ 	}
+ }
+ 
++type permitFunc func(leftToRight bool, requested int) (int, func(int), error)
++
++func (fn permitFunc) Reserve(leftToRight bool, requested int) (int, func(int), error) {
++	return fn(leftToRight, requested)
++}
++
++func TestCopyBidirectionalWithPermitStopsAtBudgetBeforeWritingRemainder(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("abcdef"))}
++	right := &memoryConn{reader: bytes.NewReader(nil)}
++	var settled []int
++	permit := permitFunc(func(leftToRight bool, requested int) (int, func(int), error) {
++		if !leftToRight || requested != 6 {
++			t.Errorf("Reserve(direction=%t, requested=%d), want client-to-exit six bytes", leftToRight, requested)
++		}
++		return 3, func(n int) { settled = append(settled, n) }, nil
++	})
++
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if !errors.Is(err, ErrWriteBudgetExhausted) {
++		t.Fatalf("copy error = %v, want budget exhausted", err)
++	}
++	if counts != (CopyCounts{LeftToRight: 3}) || right.writer.String() != "abc" {
++		t.Fatalf("copied counts=%+v body=%q, want 3 bytes of prefix", counts, right.writer.String())
++	}
++	if len(settled) != 1 || settled[0] != 3 {
++		t.Fatalf("settle calls = %v, want exactly [3]", settled)
++	}
++	if !left.closed.Load() || !right.closed.Load() {
++		t.Fatal("budget exhaustion did not close both sides")
++	}
++}
++
++func TestCopyBidirectionalWithPermitUsesBothDirections(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("abc"))}
++	right := &memoryConn{reader: bytes.NewReader([]byte("WXYZ"))}
++	type write struct {
++		leftToRight bool
++		requested   int
++		settled     int
++	}
++	writes := make(chan write, 2)
++	permit := permitFunc(func(leftToRight bool, requested int) (int, func(int), error) {
++		return requested, func(n int) {
++			writes <- write{leftToRight: leftToRight, requested: requested, settled: n}
++		}, nil
++	})
++
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if err != nil {
++		t.Fatalf("copy error = %v", err)
++	}
++	if counts != (CopyCounts{LeftToRight: 3, RightToLeft: 4}) ||
++		left.writer.String() != "WXYZ" || right.writer.String() != "abc" {
++		t.Fatalf("copy counts=%+v left=%q right=%q", counts, left.writer.String(), right.writer.String())
++	}
++	got := map[bool]write{}
++	for range 2 {
++		entry := <-writes
++		got[entry.leftToRight] = entry
++	}
++	if got[true] != (write{leftToRight: true, requested: 3, settled: 3}) ||
++		got[false] != (write{leftToRight: false, requested: 4, settled: 4}) || len(writes) != 0 {
++		t.Fatalf("directional reservations = %+v", got)
++	}
++}
++
++type shortWriteConn struct {
++	*memoryConn
++	limit    int
++	writeErr error
++}
++
++func (c *shortWriteConn) Write(p []byte) (int, error) {
++	if len(p) > c.limit {
++		p = p[:c.limit]
++	}
++	n, _ := c.memoryConn.Write(p)
++	return n, c.writeErr
++}
++
++func TestCopyBidirectionalWithPermitSettlesOnlyBytesWrittenOnShortWrite(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("abcd"))}
++	right := &shortWriteConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}, limit: 2}
++	var settled []int
++	permit := permitFunc(func(leftToRight bool, requested int) (int, func(int), error) {
++		if !leftToRight || requested != 4 {
++			t.Errorf("Reserve(direction=%t, requested=%d), want client-to-exit four bytes", leftToRight, requested)
++		}
++		return requested, func(n int) { settled = append(settled, n) }, nil
++	})
++
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if !errors.Is(err, io.ErrShortWrite) {
++		t.Fatalf("copy error = %v, want short write", err)
++	}
++	if counts != (CopyCounts{LeftToRight: 2}) || right.writer.String() != "ab" {
++		t.Fatalf("copy counts=%+v body=%q, want two written bytes", counts, right.writer.String())
++	}
++	if len(settled) != 1 || settled[0] != 2 {
++		t.Fatalf("settle calls = %v, want exactly [2]", settled)
++	}
++	if !left.closed.Load() || !right.closed.Load() {
++		t.Fatal("short write did not close both sides")
++	}
++}
++
++func TestCopyBidirectionalWithPermitSettlesWrittenBytesBeforeWriteError(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("abcd"))}
++	writeErr := errors.New("destination failed")
++	right := &shortWriteConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}, limit: 2, writeErr: writeErr}
++	var settled []int
++	permit := permitFunc(func(_ bool, requested int) (int, func(int), error) {
++		return requested, func(n int) { settled = append(settled, n) }, nil
++	})
++
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if !errors.Is(err, writeErr) {
++		t.Fatalf("copy error = %v, want destination error", err)
++	}
++	if counts != (CopyCounts{LeftToRight: 2}) || right.writer.String() != "ab" ||
++		len(settled) != 1 || settled[0] != 2 {
++		t.Fatalf("copy counts=%+v body=%q settlements=%v", counts, right.writer.String(), settled)
++	}
++}
++
++func TestCopyBidirectionalWithPermitPreservesBudgetErrorOnPartialWriteFailure(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("abcd"))}
++	writeErr := errors.New("destination failed")
++	right := &shortWriteConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}, limit: 1, writeErr: writeErr}
++	var settled []int
++	permit := permitFunc(func(_ bool, requested int) (int, func(int), error) {
++		if requested != 4 {
++			t.Errorf("requested = %d, want four bytes", requested)
++		}
++		return 3, func(n int) { settled = append(settled, n) }, nil
++	})
++
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if !errors.Is(err, ErrWriteBudgetExhausted) || !errors.Is(err, writeErr) {
++		t.Fatalf("copy error = %v, want both budget and destination errors", err)
++	}
++	if counts != (CopyCounts{LeftToRight: 1}) || right.writer.String() != "a" ||
++		len(settled) != 1 || settled[0] != 1 {
++		t.Fatalf("copy counts=%+v body=%q settlements=%v", counts, right.writer.String(), settled)
++	}
++}
++
++type writeSpyConn struct {
++	*memoryConn
++	writes atomic.Int32
++}
++
++func (c *writeSpyConn) Write(p []byte) (int, error) {
++	c.writes.Add(1)
++	return c.memoryConn.Write(p)
++}
++
++func TestCopyBidirectionalWithPermitRejectsInvalidReservationsWithoutWrite(t *testing.T) {
++	for _, tc := range []struct {
++		name    string
++		allowed int
++		settle  bool
++	}{
++		{name: "negative allowance", allowed: -1, settle: true},
++		{name: "zero allowance", allowed: 0, settle: true},
++		{name: "oversized allowance", allowed: 5, settle: true},
++		{name: "missing settlement", allowed: 4, settle: false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			left := &memoryConn{reader: bytes.NewReader([]byte("abcd"))}
++			right := &writeSpyConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}}
++			var settled []int
++			permit := permitFunc(func(bool, int) (int, func(int), error) {
++				if !tc.settle {
++					return tc.allowed, nil, nil
++				}
++				return tc.allowed, func(n int) { settled = append(settled, n) }, nil
++			})
++
++			counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++			if !errors.Is(err, ErrWriteBudgetExhausted) {
++				t.Fatalf("copy error = %v, want budget exhausted", err)
++			}
++			if counts != (CopyCounts{}) || right.writes.Load() != 0 {
++				t.Fatalf("invalid permit wrote data: counts=%+v writes=%d", counts, right.writes.Load())
++			}
++			if tc.settle && (len(settled) != 1 || settled[0] != 0) {
++				t.Fatalf("invalid reservation settlement = %v, want exactly [0]", settled)
++			}
++		})
++	}
++}
++
++func TestCopyBidirectionalWithPermitRejectsMissingPermit(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("request"))}
++	right := &writeSpyConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}}
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, nil)
++	if !errors.Is(err, ErrWriteBudgetExhausted) || counts != (CopyCounts{}) {
++		t.Fatalf("copy result = %+v, %v, want no bytes and budget error", counts, err)
++	}
++	if right.writes.Load() != 0 || !left.closed.Load() || !right.closed.Load() {
++		t.Fatal("missing permit wrote data or left copy open")
++	}
++}
++
++func TestCopyBidirectionalWithPermitPropagatesReserveErrorWithoutWrite(t *testing.T) {
++	left := &memoryConn{reader: bytes.NewReader([]byte("request"))}
++	right := &writeSpyConn{memoryConn: &memoryConn{reader: bytes.NewReader(nil)}}
++	denied := errors.New("permit denied")
++	var settled []int
++	permit := permitFunc(func(bool, int) (int, func(int), error) {
++		return 3, func(n int) { settled = append(settled, n) }, denied
++	})
++	counts, err := CopyBidirectionalWithPermit(context.Background(), left, right, permit)
++	if !errors.Is(err, denied) || counts != (CopyCounts{}) {
++		t.Fatalf("copy result = %+v, %v, want no bytes and reserve error", counts, err)
++	}
++	if right.writes.Load() != 0 || len(settled) != 1 || settled[0] != 0 {
++		t.Fatalf("reserve error writes=%d settlements=%v, want no write and one refund", right.writes.Load(), settled)
++	}
++}
++
+ // blockingConn reads until it is closed, like a peer that never sends its
+ // EOF. It half-closes like the real halves do (net.TCPConn, smux.Stream), so a
+ // clean EOF on the other side leaves its read side open.
+@@ -45,6 +267,62 @@ type blockingConn struct {
+ 	once   sync.Once
+ }
+ 
++type payloadThenBlockConn struct {
++	*blockingConn
++	payload  []byte
++	consumed atomic.Bool
++}
++
++func (c *payloadThenBlockConn) Read(buffer []byte) (int, error) {
++	if !c.consumed.Swap(true) {
++		return copy(buffer, c.payload), nil
++	}
++	return c.blockingConn.Read(buffer)
++}
++
++func TestCopyBidirectionalWithPermitSettlesWhileStreamRemainsOpen(t *testing.T) {
++	left := &payloadThenBlockConn{blockingConn: newBlockingConn(), payload: []byte("abc")}
++	right := newBlockingConn()
++	settled := make(chan int, 1)
++	permit := permitFunc(func(_ bool, requested int) (int, func(int), error) {
++		return requested, func(n int) { settled <- n }, nil
++	})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	type copyOutcome struct {
++		counts CopyCounts
++		err    error
++	}
++	done := make(chan copyOutcome, 1)
++	go func() {
++		counts, err := CopyBidirectionalWithPermit(ctx, left, right, permit)
++		done <- copyOutcome{counts: counts, err: err}
++	}()
++
++	select {
++	case n := <-settled:
++		if n != 3 {
++			t.Fatalf("settled %d bytes, want three", n)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("managed copy did not settle traffic before stream EOF")
++	}
++	select {
++	case <-done:
++		t.Fatal("copy ended before the still-open stream was canceled")
++	default:
++	}
++	cancel()
++	select {
++	case outcome := <-done:
++		if !errors.Is(outcome.err, context.Canceled) || outcome.counts.LeftToRight != 3 {
++			t.Fatalf("copy after cancel = %+v, want three bytes and cancellation", outcome)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("managed copy did not stop after cancellation")
++	}
++}
++
+ func newBlockingConn() *blockingConn { return &blockingConn{closed: make(chan struct{})} }
+ 
+ func (c *blockingConn) Read([]byte) (int, error) {
 diff --git a/pkg/olcrtc/tunnel/tunnel.go b/pkg/olcrtc/tunnel/tunnel.go
-index 9ed322a..7763ffa 100644
+index 9ed322a..66d43ad 100644
 --- a/pkg/olcrtc/tunnel/tunnel.go
 +++ b/pkg/olcrtc/tunnel/tunnel.go
-@@ -59,6 +59,11 @@ func (SEIOptions) transportOptions() {}
+@@ -59,13 +59,23 @@ func (SEIOptions) transportOptions() {}
  // AuthFunc authorizes a client after CLIENT_HELLO.
  type AuthFunc func(deviceID string, claims map[string]any) (sessionID string, err error)
  
@@ -2155,10 +3978,23 @@ index 9ed322a..7763ffa 100644
 +type ManagedLease = server.ManagedLease
 +type ManagedLeaseAuthFunc = server.ManagedLeaseAuthFunc
 +
++// CumulativeReport is an immutable, generation-bound meter snapshot.
++type CumulativeReport = server.CumulativeReport
++type ManagedMeterReportFunc = server.ManagedMeterReportFunc
++
  // SessionOpenFunc is called after a successful handshake.
  type SessionOpenFunc func(sessionID, deviceID string, claims map[string]any)
  
-@@ -90,48 +95,66 @@ type TrafficConfig struct {
+ // SessionCloseFunc is called when a session ends.
+ type SessionCloseFunc func(sessionID, reason string)
+ 
+-// TrafficFunc is called after both copy loops for a tunnel stream finish.
++// TrafficFunc is a legacy EOF statistic callback. RequireMeter suppresses it
++// so a cumulative reporter cannot accidentally add the same bytes twice.
+ type TrafficFunc func(sessionID, addr string, bytesIn, bytesOut uint64)
+ 
+ // HealthStatus is a control-stream health snapshot.
+@@ -90,48 +100,68 @@ type TrafficConfig struct {
  
  // Config holds all server tunnel capabilities.
  type Config struct {
@@ -2206,7 +4042,9 @@ index 9ed322a..7763ffa 100644
 +	AuthHook             AuthFunc
 +	RequireAuthHook      bool
 +	RequireLease         bool
++	RequireMeter         bool
 +	ManagedLeaseAuthHook ManagedLeaseAuthFunc
++	ManagedMeterReporter ManagedMeterReportFunc
 +	OnSessionOpen        SessionOpenFunc
 +	OnSessionClose       SessionCloseFunc
 +	OnTraffic            TrafficFunc
@@ -2252,7 +4090,7 @@ index 9ed322a..7763ffa 100644
  		return fmt.Errorf("tunnel: %w", err)
  	}
  	return nil
-@@ -152,10 +175,13 @@ func toServerConfig(cfg Config) server.Config {
+@@ -152,10 +182,15 @@ func toServerConfig(cfg Config) server.Config {
  			MaxPayloadSize: cfg.Traffic.MaxPayloadSize,
  			MinDelay:       cfg.Traffic.MinDelay, MaxDelay: cfg.Traffic.MaxDelay,
  		},
@@ -2263,7 +4101,9 @@ index 9ed322a..7763ffa 100644
 +		AuthHook:             handshake.AuthFunc(cfg.AuthHook),
 +		RequireAuthHook:      cfg.RequireAuthHook,
 +		RequireLease:         cfg.RequireLease,
++		RequireMeter:         cfg.RequireMeter,
 +		ManagedLeaseAuthHook: cfg.ManagedLeaseAuthHook,
++		ManagedMeterReporter: cfg.ManagedMeterReporter,
 +		OnSessionOpen:        server.SessionOpenFunc(cfg.OnSessionOpen),
 +		OnSessionClose:       server.SessionCloseFunc(cfg.OnSessionClose),
 +		OnTraffic:            server.TrafficFunc(cfg.OnTraffic), OnHealth: server.HealthFunc(cfg.OnHealth),
@@ -2271,7 +4111,7 @@ index 9ed322a..7763ffa 100644
  }
  
 diff --git a/pkg/olcrtc/tunnel/tunnel_test.go b/pkg/olcrtc/tunnel/tunnel_test.go
-index 364603b..2646e6a 100644
+index 364603b..d3b848c 100644
 --- a/pkg/olcrtc/tunnel/tunnel_test.go
 +++ b/pkg/olcrtc/tunnel/tunnel_test.go
 @@ -24,6 +24,7 @@ func TestConfigMapping(t *testing.T) {
@@ -2292,7 +4132,7 @@ index 364603b..2646e6a 100644
  	if id, err := got.AuthHook("device", map[string]any{"key": "-claim"}); err != nil || id != "device-claim" {
  		t.Fatalf("AuthHook() = (%q, %v)", id, err)
  	}
-@@ -84,3 +88,48 @@ func TestRunUsesMappedConfig(t *testing.T) {
+@@ -84,3 +88,63 @@ func TestRunUsesMappedConfig(t *testing.T) {
  		t.Fatalf("runner config = %#v", got)
  	}
  }
@@ -2339,5 +4179,20 @@ index 364603b..2646e6a 100644
 +	}
 +	if New(cfg).RevokeLease("unknown") {
 +		t.Fatal("unstarted server recorded a policy revoke")
++	}
++}
++
++func TestManagedMeterConfigMapsTrustedReporter(t *testing.T) {
++	reporter := func(_ context.Context, report CumulativeReport) (CumulativeReport, error) {
++		return report, nil
++	}
++	got := toServerConfig(Config{RequireLease: true, RequireMeter: true, ManagedMeterReporter: reporter})
++	if !got.RequireLease || !got.RequireMeter || got.ManagedMeterReporter == nil {
++		t.Fatal("managed byte-meter mode or trusted reporter was dropped")
++	}
++	report := CumulativeReport{SessionID: "meter-public-session-001", Sequence: 1, ClientToExitBytes: 2, ExitToClientBytes: 3}
++	ack, err := got.ManagedMeterReporter(context.Background(), report)
++	if err != nil || ack != (server.CumulativeReport)(report) {
++		t.Fatalf("reporter mapping = %+v, %v", ack, err)
 +	}
 +}

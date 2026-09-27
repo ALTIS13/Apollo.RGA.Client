@@ -1,5 +1,5 @@
 {
   "base_sha": "8d97e32e0b1af0a727d6e785c4c467f37543aa4d",
   "patch_path": "patches/olcrtc-rga-managed-guard.patch",
-  "patch_sha256": "4145d9e02c5db44d97f1a70ad41146ca38b3d32ef06ef30be2dcbb2af0f014a7"
+  "patch_sha256": "8cf2e3c292c7c91380a97de42e88c14c8ae6bd26139a89bf01c892564d1328c8"
 }
