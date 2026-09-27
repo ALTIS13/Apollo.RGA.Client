@@ -36,6 +36,7 @@ sealed interface Routing {
         val directDns: DirectDns
         val policy: Policy
         val custom: CustomRules
+        val mandatoryTunnelSuffixes: List<String> get() = emptyList()
     }
 
     /** The original iOS routing shape, kept stable for its Xray and olcRTC paths. */
@@ -48,9 +49,10 @@ sealed interface Routing {
     }
 
     /**
-     * Android and desktop: [policy]'s lists, with the user's own rules ([custom])
-     * ahead of them. Name resolution follows the traffic: a name bound for the
-     * tunnel is resolved through it.
+     * Android and desktop: [policy]'s lists, with [mandatoryTunnelSuffixes]
+     * before the user's own rules ([custom]), then the policy lists. Name
+     * resolution follows the traffic: a name bound for the tunnel is resolved
+     * through it.
      *
      * [ruleSetDir] holds the files in [RuleSets]. Absolute where the app knows
      * the path (Android); relative to the core's working directory where only
@@ -60,7 +62,8 @@ sealed interface Routing {
         override val ruleSetDir: String,
         override val directDns: DirectDns,
         override val policy: Policy,
-        override val custom: CustomRules = CustomRules.NONE
+        override val custom: CustomRules = CustomRules.NONE,
+        override val mandatoryTunnelSuffixes: List<String> = emptyList()
     ) : RuleBased {
         /** A bypass region and nothing of the user's: what every caller built before custom rules. */
         constructor(ruleSetDir: String, directDns: DirectDns, region: String) :

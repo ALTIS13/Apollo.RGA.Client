@@ -608,7 +608,8 @@ object SingBoxConfig {
      * tunnel names, and under BlockedOnly the blocked list, are resolved through the
      * tunnel — an ISP resolver may answer a blocked name with its own stub. The
      * user's direct names, and under a bypass the region's lists, are resolved on the
-     * network underneath. First match wins, so the user's rules come first.
+     * network underneath. First match wins: mandatory tunnel suffixes come before
+     * even the user's direct rules.
      *
      * [fakeTunnelNames]: the tun shapes answer a tunnel-bound A/AAAA with a fake
      * address and refuse HTTPS, as they do for every other tunnel name.
@@ -633,6 +634,12 @@ object SingBoxConfig {
         fun direct(ruleSets: List<String>, suffixes: List<String>) {
             if (ruleSets.isEmpty() && suffixes.isEmpty()) return
             addJsonObject { putNames(ruleSets, suffixes); put("server", "dns-direct") }
+        }
+        if (bypass.mandatoryTunnelSuffixes.isNotEmpty()) {
+            addJsonObject {
+                putNames(emptyList(), bypass.mandatoryTunnelSuffixes)
+                put("server", "dns-remote")
+            }
         }
         tunnel(emptyList(), bypass.custom.tunnel.domains)
         direct(emptyList(), bypass.custom.direct.domains)
@@ -671,17 +678,24 @@ object SingBoxConfig {
     }
 
     /**
-     * After `sniff` and `hijack-dns`, in an order that matters: the local
-     * network direct first only because it is cheaper to match, then the
-     * selected regional lists. Domain matches come from the sniff, the reverse mapping or
+     * After `sniff` and `hijack-dns`, in an order that matters: mandatory
+     * suffixes ride the tunnel even if a user direct rule or regional list
+     * also matches; then local-network direct and the selected regional lists.
+     * Domain matches come from the sniff, the reverse mapping or
      * the fake-address store; the IP list matches raw-address dials. sing-box
      * skips IP rules for an unresolved name, so nothing here resolves a
      * foreign name on the network underneath.
      */
     private fun JsonArrayBuilder.addPolicyRouteRules(bypass: Routing.RuleBased) {
+        if (bypass.mandatoryTunnelSuffixes.isNotEmpty()) {
+            addJsonObject {
+                putJsonArray("domain_suffix") { bypass.mandatoryTunnelSuffixes.forEach { add(it) } }
+                put("outbound", "out")
+            }
+        }
         addJsonObject { put("ip_is_private", true); put("outbound", "direct") }
-        // The user's own rules win over every list, direct ones first: an entry is
-        // in one list only, so the order between the two decides nothing.
+        // The user's own rules win over policy lists, direct ones first: an
+        // entry is in one list only, so the order between the two decides nothing.
         addCustomRouteRule(bypass.custom.direct, "direct")
         addCustomRouteRule(bypass.custom.tunnel, "out")
         when (val policy = bypass.policy) {
