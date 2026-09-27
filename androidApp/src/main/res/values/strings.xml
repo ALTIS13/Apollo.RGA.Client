@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Apollo.RGA</string>
+    <!-- Quick Settings tile -->
+    <string name="qs_tile_label">Apollo.RGA</string>
+    <string name="qs_tile_connected">Connected</string>
+    <string name="qs_tile_connecting">Connecting…</string>
+    <string name="qs_tile_disconnected">Disconnected</string>
+</resources>

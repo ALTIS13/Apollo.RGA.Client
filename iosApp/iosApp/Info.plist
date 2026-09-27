@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>org.proofkit.app.import</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ghostlane</string>
+				<string>proofkit</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Ghostlane</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<!--
+		Taken from the build settings rather than written here.
+
+		They used to be the literals 1.0.0 and 1, which quietly outranked the
+		Version and Build fields in Xcode's General tab: changing those writes
+		MARKETING_VERSION and CURRENT_PROJECT_VERSION, and this file overrode
+		both. So an archive made after bumping the build number came out as
+		1.0.0 (1) again, and App Store Connect refuses a build number it has
+		already seen.
+
+		The PacketTunnel target never had this problem — its Info.plist is
+		generated, so it has always read the settings. Which is worse than both
+		being wrong: the app and its extension must carry the same version, and
+		only one of them was moving.
+	-->
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!--
+		Export compliance, answered once here instead of on every upload.
+
+		False, and the reason is narrower than it looks. The encryption is not
+		exempt because the algorithms are standard — almost everything uses
+		standard algorithms and is caught by 5D992 anyway. It is exempt because the
+		source is publicly available: under EAR 742.15(b), publicly available
+		object code whose source is public and **notified to BIS and the NSA** is
+		not subject to the EAR at all. No registration number, no annual
+		self-classification report.
+
+		That notification is a condition, not a formality. Until the one-time email
+		has gone to crypt@bis.doc.gov and enc@nsa.gov naming the repository, this
+		key is a false declaration on a customs question. The template and the
+		addresses are in docs/app-store-listing.md; send it before the first
+		upload, keep the sent copy.
+
+		If the app ever ships crypto that is not in the public repository — a
+		private fork of a core, a vendored binary nobody can read — this stops
+		being true and the answer goes back to true with an ERN behind it.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Ghostlane uses the camera only to read a server-list QR code. No photo or video is recorded, stored or uploaded.</string>
+	<!--
+		No UIBackgroundModes.
+
+		`audio` was declared for the silent-audio keep-alive that kept the in-app
+		SOCKS proxy alive in the background. olcRTC runs in the packet tunnel
+		extension now, `SwiftOlcRtcManager.start` is unreachable from Kotlin, and
+		that keep-alive never runs — so the app declared a background mode it does
+		not use, which App Store review rejects on sight (2.5.4). The tunnel needs
+		no background mode of its own: a NEPacketTunnelProvider is its own process
+		and the system keeps it running.
+	-->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

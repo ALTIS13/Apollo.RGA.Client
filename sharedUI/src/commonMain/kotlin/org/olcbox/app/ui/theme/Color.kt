@@ -1,0 +1,78 @@
+package org.olcbox.app.ui.theme
+
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.ui.graphics.Color
+
+// Legacy palette retained for desktop/iOS until their surfaces move to Apollo Orbit.
+internal val OlcboxDarkColorScheme = darkColorScheme(
+    primary = Color(0xFF6675FF),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFF1A1E3D),
+    onPrimaryContainer = Color(0xFF8190FF),
+    inversePrimary = Color(0xFF6675FF),
+    secondary = Color(0xFF8B93A8),
+    onSecondary = Color(0xFF07080D),
+    secondaryContainer = Color(0xFF161822),
+    onSecondaryContainer = Color(0xFFE8ECF2),
+    tertiary = Color(0xFFB5F23D),
+    onTertiary = Color(0xFF0C1300),
+    tertiaryContainer = Color(0xFF232B10),
+    onTertiaryContainer = Color(0xFFB5F23D),
+    background = Color(0xFF07080D),
+    onBackground = Color(0xFFE8ECF2),
+    surface = Color(0xFF07080D),
+    onSurface = Color(0xFFE8ECF2),
+    surfaceVariant = Color(0xFF161822),
+    onSurfaceVariant = Color(0xFF8B93A8),
+    surfaceContainerLowest = Color(0xFF05060A),
+    surfaceContainerLow = Color(0xFF0A0C14),
+    surfaceContainer = Color(0xFF0F1117),
+    surfaceContainerHigh = Color(0xFF161822),
+    surfaceContainerHighest = Color(0xFF1D2030),
+    inverseSurface = Color(0xFFE8ECF2),
+    inverseOnSurface = Color(0xFF07080D),
+    outline = Color(0xFF2A2D42),
+    outlineVariant = Color(0xFF1E2030),
+    error = Color(0xFFF43F5E),
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFF3D141C),
+    onErrorContainer = Color(0xFFF43F5E),
+    scrim = Color(0xFF000000)
+)
+
+/** Apollo.AI graphite/violet roles used by Android; other targets retain the legacy scheme. */
+internal val ApolloDarkColorScheme = darkColorScheme(
+    primary = Color(0xFF8256EE),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFF241D44),
+    onPrimaryContainer = Color(0xFFEAE0FF),
+    inversePrimary = Color(0xFF7745E0),
+    secondary = Color(0xFFB9A4FF),
+    onSecondary = Color(0xFF070A10),
+    secondaryContainer = Color(0xFF171331),
+    onSecondaryContainer = Color(0xFFEAE0FF),
+    tertiary = Color(0xFF8256EE),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFF241D44),
+    onTertiaryContainer = Color(0xFFEAE0FF),
+    background = Color(0xFF070A10),
+    onBackground = Color(0xFFEAEEF5),
+    surface = Color(0xFF090C12),
+    onSurface = Color(0xFFEAEEF5),
+    surfaceVariant = Color(0xFF161B25),
+    onSurfaceVariant = Color(0xFFAAB6C8),
+    surfaceContainerLowest = Color(0xFF060910),
+    surfaceContainerLow = Color(0xFF0C1017),
+    surfaceContainer = Color(0xFF11151D),
+    surfaceContainerHigh = Color(0xFF161B25),
+    surfaceContainerHighest = Color(0xFF1A202B),
+    inverseSurface = Color(0xFFEAEEF5),
+    inverseOnSurface = Color(0xFF11151D),
+    outline = Color(0xFF536178),
+    outlineVariant = Color(0xFF2F3948),
+    error = Color(0xFFF4635F),
+    onError = Color(0xFF070A10),
+    errorContainer = Color(0xFF2E1518),
+    onErrorContainer = Color(0xFFFF9A97),
+    scrim = Color(0xFF000000)
+)

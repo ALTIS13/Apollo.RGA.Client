@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The isolated Apollo.RGA derivative has no verified release feed yet.
+     Never offer an upstream Ghostlane APK as an update. -->
+<resources>
+    <bool name="store_self_update">false</bool>
+</resources>

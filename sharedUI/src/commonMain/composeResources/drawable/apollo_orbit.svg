@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Apollo orbit mark">
+  <defs>
+    <linearGradient id="orbit" x1="96" y1="120" x2="416" y2="392" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#33E6FF"/>
+      <stop offset="0.52" stop-color="#3187FF"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
+    </linearGradient>
+    <clipPath id="disc">
+      <circle cx="256" cy="256" r="238"/>
+    </clipPath>
+  </defs>
+  <circle cx="256" cy="256" r="238" fill="#07182F"/>
+  <g clip-path="url(#disc)">
+    <ellipse cx="256" cy="256" rx="204" ry="108" fill="none" stroke="url(#orbit)" stroke-width="14" transform="rotate(-24 256 256)"/>
+  </g>
+  <path d="M256 126 151 366h45l23-55h74l23 55h45L256 126Zm0 93 20 55h-40l20-55Z" fill="#FFF"/>
+  <circle cx="382" cy="156" r="11" fill="#45E3FF"/>
+</svg>

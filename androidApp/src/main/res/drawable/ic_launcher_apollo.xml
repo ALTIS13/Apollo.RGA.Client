@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive foreground derived from the approved Apollo.RGA v2 mark. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group android:pivotX="256" android:pivotY="256" android:scaleX="0.68" android:scaleY="0.68">
+        <path android:fillColor="#07182F"
+            android:pathData="M256,18 A238,238 0,1 1,256 494 A238,238 0,1 1,256 18" />
+        <group android:pivotX="256" android:pivotY="256" android:rotation="-24">
+            <path android:pathData="M460,256 A204,108 0,1 1,52 256 A204,108 0,1 1,460 256"
+                android:fillColor="#00000000" android:fillAlpha="0" android:strokeWidth="14">
+                <aapt:attr name="android:strokeColor">
+                    <gradient android:type="linear" android:startX="96" android:startY="120"
+                        android:endX="416" android:endY="392">
+                        <item android:offset="0" android:color="#33E6FF" />
+                        <item android:offset="0.52" android:color="#3187FF" />
+                        <item android:offset="1" android:color="#9B5CFF" />
+                    </gradient>
+                </aapt:attr>
+            </path>
+        </group>
+        <path android:pathData="M256,126 L151,366 L196,366 L219,311 L293,311 L316,366 L361,366 L256,126 Z M256,219 L276,274 L236,274 L256,219 Z"
+            android:fillColor="#FFFFFFFF" android:fillType="evenOdd" />
+        <path android:pathData="M382,145 A11,11 0,1 1,382 167 A11,11 0,1 1,382 145"
+            android:fillColor="#FF45E3FF" />
+    </group>
+</vector>

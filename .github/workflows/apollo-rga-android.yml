@@ -1,0 +1,262 @@
+name: Apollo.RGA Android candidate
+
+# This is intentionally separate from the upstream Ghostlane/OlcRTC release.
+# It produces a signed candidate artifact only; it never publishes or deploys.
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: Android version name for this candidate
+        required: true
+        type: string
+        default: '1.0.0'
+      version_code:
+        description: Monotonically increasing Android version code
+        required: true
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apollo-rga-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'ALTIS13/Apollo.RGA.Client'
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_id: ${{ steps.unsigned_artifact.outputs.artifact-id }}
+      unsigned_sha256: ${{ steps.handoff.outputs.unsigned_sha256 }}
+      singbox_sha256: ${{ steps.handoff.outputs.singbox_sha256 }}
+      xray_sha256: ${{ steps.handoff.outputs.xray_sha256 }}
+      xray_receipt_sha256: ${{ steps.handoff.outputs.xray_receipt_sha256 }}
+    env:
+      VERSION_NAME: ${{ inputs.version_name }}
+      VERSION_CODE: ${{ inputs.version_code }}
+      SINGBOX_GO_VERSION: '1.26.5'
+      ANDROID_NDK_VERSION: '28.2.13676358'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reject an unassigned CI repository and malformed version inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          pinned_repo="$(python3 -c 'import json; print(json.load(open("scripts/apollo-rga-release-pins.json"))["ci_repository"])')"
+          if [[ "$pinned_repo" == 'SET_OWNED_REPOSITORY_BEFORE_FIRST_RUN' || "$GITHUB_REPOSITORY" != "$pinned_repo" ]]; then
+            echo 'Apollo.RGA owned CI repository is not pinned to this checkout.' >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ || ! "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ || "$VERSION_CODE" -gt 2100000000 ]]; then
+            echo 'Invalid Android version name or version code.' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.SINGBOX_GO_VERSION }}
+          cache: false
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: platform-tools
+
+      - name: Install the declared Android SDK and NDK
+        run: sdkmanager 'platforms;android-37' 'build-tools;36.0.0' "ndk;${ANDROID_NDK_VERSION}"
+
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+
+      - name: Check release guard regressions
+        run: python3 -m unittest scripts.test_apollo_rga_release scripts.test_android_cores
+
+      - name: Check literal import and entitlement refresh behavior
+        run: |
+          ./gradlew :sharedUI:jvmTest \
+            --tests org.olcbox.app.data.datasource.LocationsRepositoryImplTest \
+            --tests org.olcbox.app.ui.features.home.HomeScreenModelImportLinkTest \
+            --tests org.olcbox.app.ui.HostAndSubscriptionPresenterTest
+
+      - name: Build commit-pinned sing-box for arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("scripts/apollo-rga-release-pins.json"))["singbox_version"])')"
+          expected="$(python3 -c 'import json; print(json.load(open("scripts/apollo-rga-release-pins.json"))["singbox_commit"])')"
+          git clone --depth 1 --branch "v${version}" https://github.com/SagerNet/sing-box.git "$RUNNER_TEMP/sing-box"
+          cd "$RUNNER_TEMP/sing-box"
+          [[ "$(git rev-parse HEAD)" == "$expected" && -z "$(git status --porcelain)" ]] || { echo 'sing-box tag moved or checkout is dirty.' >&2; exit 1; }
+          tags="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          ldflags="$(cat release/LDFLAGS)"
+          ndk_bin="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          out="${GITHUB_WORKSPACE}/androidApp/jniLibs/arm64-v8a"
+          mkdir -p "$out"
+          CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+          CC="${ndk_bin}/aarch64-linux-android23-clang" CXX="${ndk_bin}/aarch64-linux-android23-clang++" \
+          go build -trimpath -o "${out}/libsingboxcore.so" -tags "$tags" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${version}' ${ldflags} -s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384" \
+            ./cmd/sing-box
+
+      - name: Build exact pinned Xray for arm64
+        run: |
+          python3 scripts/build-xray-android.py --abis arm64-v8a \
+            --source "$RUNNER_TEMP/xray-android" --ndk "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+
+      - name: Verify executable core alignment
+        run: python3 scripts/verify-android-cores.py --abis arm64-v8a
+
+      - name: Assemble unsigned ordinary Apollo.RGA arm64 APK
+        shell: bash
+        env:
+          OLCRTC_REPO: ${{ runner.temp }}/absent-olcrtc
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          ./gradlew -Papollo.rga.externalSigning=true -Polcbox.version="$VERSION_NAME" -Polcbox.versionCode="$VERSION_CODE" \
+            -Polcbox.android.abiFilters=arm64-v8a :androidApp:assembleGithubRelease --stacktrace
+
+      - name: Prepare exact unsigned artifact handoff
+        id: handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t unsigned < <(find androidApp/build/outputs/apk/github/release -maxdepth 1 -type f -name '*-unsigned.apk')
+          [[ "${#unsigned[@]}" == 1 ]] || { echo 'Expected exactly one unsigned release APK.' >&2; exit 1; }
+          mkdir -p handoff/cores/arm64-v8a
+          cp "${unsigned[0]}" handoff/unsigned.apk
+          cp androidApp/jniLibs/arm64-v8a/libsingboxcore.so handoff/cores/arm64-v8a/
+          cp androidApp/jniLibs/arm64-v8a/libxraycore.so handoff/cores/arm64-v8a/
+          cp build/xray-receipts/arm64-v8a.json handoff/xray-receipt.json
+          printf 'unsigned_sha256=%s\n' "$(sha256sum handoff/unsigned.apk | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          printf 'singbox_sha256=%s\n' "$(sha256sum handoff/cores/arm64-v8a/libsingboxcore.so | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          printf 'xray_sha256=%s\n' "$(sha256sum handoff/cores/arm64-v8a/libxraycore.so | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          printf 'xray_receipt_sha256=%s\n' "$(sha256sum handoff/xray-receipt.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable unsigned artifact handoff
+        id: unsigned_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Apollo-RGA-unsigned-${{ github.sha }}-${{ github.run_attempt }}
+          path: handoff/
+          if-no-files-found: error
+          retention-days: 3
+
+  sign:
+    needs: build
+    if: github.repository == 'ALTIS13/Apollo.RGA.Client' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: apollo-rga-candidate
+    env:
+      VERSION_NAME: ${{ inputs.version_name }}
+      VERSION_CODE: ${{ inputs.version_code }}
+    steps:
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: platform-tools
+
+      - name: Install signing and verification build tools
+        run: sdkmanager 'build-tools;36.0.0'
+
+      - name: Download unsigned handoff by artifact ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: handoff
+
+      - name: Verify unsigned artifact handoff before key access
+        shell: bash
+        env:
+          EXPECTED_UNSIGNED_SHA256: ${{ needs.build.outputs.unsigned_sha256 }}
+          EXPECTED_SINGBOX_SHA256: ${{ needs.build.outputs.singbox_sha256 }}
+          EXPECTED_XRAY_SHA256: ${{ needs.build.outputs.xray_sha256 }}
+          EXPECTED_XRAY_RECEIPT_SHA256: ${{ needs.build.outputs.xray_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'ALTIS13/Apollo.RGA.Client' && "$GITHUB_REF" == 'refs/heads/main' ]] || exit 1
+          [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || exit 1
+          [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ && "$VERSION_CODE" -le 2100000000 ]] || exit 1
+          [[ "$(find handoff -type f | wc -l)" -eq 4 && -z "$(find handoff -type l -print -quit)" ]] || {
+            echo 'Unsigned handoff has missing or unexpected files.' >&2
+            exit 1
+          }
+          for expected in EXPECTED_UNSIGNED_SHA256 EXPECTED_SINGBOX_SHA256 EXPECTED_XRAY_SHA256 EXPECTED_XRAY_RECEIPT_SHA256; do
+            [[ "${!expected}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          done
+          printf '%s  %s\n' "$EXPECTED_UNSIGNED_SHA256" handoff/unsigned.apk \
+            "$EXPECTED_SINGBOX_SHA256" handoff/cores/arm64-v8a/libsingboxcore.so \
+            "$EXPECTED_XRAY_SHA256" handoff/cores/arm64-v8a/libxraycore.so \
+            "$EXPECTED_XRAY_RECEIPT_SHA256" handoff/xray-receipt.json | sha256sum -c -
+
+      - name: Sign finished APK with the permanent key only
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for key in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            if [[ -z "${!key}" ]]; then
+              echo 'Permanent Android signing material is incomplete; no ephemeral key is permitted.' >&2
+              exit 1
+            fi
+          done
+          umask 077
+          key_file="$RUNNER_TEMP/apollo-rga-release.p12"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | tr -d '\r\n' | base64 --decode > "$key_file"
+          mkdir -p dist
+          aligned="$RUNNER_TEMP/apollo-rga-aligned.apk"
+          "${ANDROID_HOME}/build-tools/36.0.0/zipalign" -P 16 -f 4 handoff/unsigned.apk "$aligned"
+          "${ANDROID_HOME}/build-tools/36.0.0/apksigner" sign \
+            --ks "$key_file" --ks-type PKCS12 --ks-key-alias "$ANDROID_RELEASE_KEY_ALIAS" \
+            --ks-pass env:ANDROID_RELEASE_STORE_PASSWORD --key-pass env:ANDROID_RELEASE_KEY_PASSWORD \
+            --v4-signing-enabled false \
+            --out "dist/Apollo-RGA-${VERSION_NAME}-android-arm64.apk" "$aligned"
+          "${ANDROID_HOME}/build-tools/36.0.0/zipalign" -c -P 16 4 "dist/Apollo-RGA-${VERSION_NAME}-android-arm64.apk"
+
+      - name: Check out the exact source only after key disposal
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Compare the signed APK to the published App Link and core receipts
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          apk="$GITHUB_WORKSPACE/dist/Apollo-RGA-${VERSION_NAME}-android-arm64.apk"
+          test -f "$apk"
+          python3 scripts/verify-apollo-rga-release.py \
+            --apk "$apk" --aapt "${ANDROID_HOME}/build-tools/36.0.0/aapt" \
+            --apksigner "${ANDROID_HOME}/build-tools/36.0.0/apksigner" \
+            --stage "$GITHUB_WORKSPACE/handoff/cores" \
+            --xray-receipt "$GITHUB_WORKSPACE/handoff/xray-receipt.json" \
+            --version-name "$VERSION_NAME" --version-code "$VERSION_CODE" \
+            --source-sha "$GITHUB_SHA" --output "$GITHUB_WORKSPACE/dist/apollo-rga-release-evidence.json"
+
+      - name: Preserve candidate and non-secret evidence for review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Apollo-RGA-android-arm64-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error

@@ -1,0 +1,101 @@
+package org.olcbox.app.net
+
+/**
+ * The one-tap import link a panel or a bot hands to a person.
+ *
+ * Apollo.RGA registers `apollorga://add?url=…` only in the Android debug build
+ * for synthetic tests. Release has no custom-scheme handler until an owned,
+ * verified HTTPS App Link is available. Legacy Ghostlane/Proofkit spellings
+ * are still read when pasted, but this derivative must not intercept their
+ * app links or claim proofkit.org as its web origin.
+ *
+ * The app's scheme also takes the shape provider subscription pages write for
+ * clients, `apollorga://add/<list URL>` (and `import/`), the list raw or
+ * percent-encoded. Never on the web origin: there the path reaches the server.
+ *
+ * The payload is whatever a paste accepts: a list URL, an `olcrtc://crypt1/…`
+ * link of ours, a partner's `happ://crypt5/…`.
+ */
+object ImportLink {
+    /** Apollo.RGA's own one-tap scheme; legacy upstream schemes are parse-only. */
+    const val SCHEME = "apollorga"
+    const val GHOSTLANE_SCHEME = "ghostlane"
+    private const val LEGACY_PROOFKIT_SCHEME = "proofkit"
+    const val HOST = "add"
+    /** What v2RayTun, Streisand and Hiddify call it; subscription pages write both. */
+    const val IMPORT_HOST = "import"
+    const val WEB_ORIGIN = "https://proofkit.org"
+    const val WEB_PATH = "/add"
+
+    private val schemePrefixes = listOf(SCHEME, GHOSTLANE_SCHEME, LEGACY_PROOFKIT_SCHEME).flatMap { scheme ->
+        listOf("$scheme://$HOST", "$scheme://$IMPORT_HOST")
+    }
+    private val webPrefixes = listOf("$WEB_ORIGIN$WEB_PATH", "https://www.proofkit.org$WEB_PATH")
+
+    fun schemeLink(payload: String): String = "$SCHEME://$HOST?url=${encode(payload)}"
+
+    @Deprecated("Upstream-only web origin; Apollo.RGA needs its own verified App Link before web-link generation")
+    fun webLink(payload: String): String = "$WEB_ORIGIN$WEB_PATH#${encode(payload)}"
+
+    /** The payload of an import link, or null for anything that is not one. */
+    fun payloadOf(uri: String): String? {
+        val text = uri.trim()
+        val lower = text.lowercase()
+        val scheme = schemePrefixes.firstOrNull { lower.startsWith(it) }
+        val prefix = scheme ?: webPrefixes.firstOrNull { lower.startsWith(it) } ?: return null
+        var rest = text.substring(prefix.length)
+        val slashed = rest.startsWith("/")
+        if (slashed) rest = rest.substring(1)
+        val encoded = when {
+            rest.isEmpty() -> return null
+            rest.startsWith("#") -> rest.substring(1)
+            rest.startsWith("?") -> queryValue(rest.substring(1), "url") ?: return null
+            // add/<list URL>: raw as pages write it, whose own `?` and `#` belong
+            // to the list, or percent-encoded whole. Decoding a raw one would eat
+            // an escape the list itself carries, so only an encoded one is decoded.
+            slashed && scheme != null -> return (if ("://" in rest) rest else decode(rest)).trim().takeIf { it.isNotEmpty() }
+            else -> return null
+        }
+        return decode(encoded).trim().takeIf { it.isNotEmpty() }
+    }
+
+    private fun queryValue(query: String, key: String): String? =
+        query.substringBefore('#').split('&').firstNotNullOfOrNull { pair ->
+            if (pair.substringBefore('=') == key) pair.substringAfter('=', "") else null
+        }
+
+    private fun encode(s: String): String = buildString {
+        for (b in s.encodeToByteArray()) {
+            val c = b.toInt() and 0xff
+            val ch = c.toChar()
+            if (c < 128 && (ch.isLetterOrDigit() || ch in "-._~")) append(ch)
+            else append('%').append(HEX[c shr 4]).append(HEX[c and 0xf])
+        }
+    }
+
+    /**
+     * Percent-decoding that leaves a stray `%` alone: a list URL pasted raw
+     * into the fragment is still a list URL, not a decoding error.
+     */
+    private fun decode(s: String): String {
+        val out = ArrayList<Byte>(s.length)
+        var i = 0
+        while (i < s.length) {
+            val ch = s[i]
+            if (ch == '%' && i + 2 < s.length) {
+                val hi = s.getOrNull(i + 1)?.digitToIntOrNull(16)
+                val lo = s.getOrNull(i + 2)?.digitToIntOrNull(16)
+                if (hi != null && lo != null) {
+                    out.add(((hi shl 4) or lo).toByte())
+                    i += 3
+                    continue
+                }
+            }
+            for (b in ch.toString().encodeToByteArray()) out.add(b)
+            i++
+        }
+        return out.toByteArray().decodeToString()
+    }
+
+    private const val HEX = "0123456789ABCDEF"
+}

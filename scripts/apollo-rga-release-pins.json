@@ -1,0 +1,8 @@
+{
+  "package": "tech.gatealtas.rga",
+  "app_link_host": "rga.apollot.ru",
+  "ci_repository": "ALTIS13/Apollo.RGA.Client",
+  "signing_cert_sha256": "7D1028460690F766AC56A0E4F21134D5C2A45CC6E17509B53FC5037D774058B6",
+  "singbox_version": "1.13.14",
+  "singbox_commit": "25a600db24f7680ad9806ce5427bd0ab8afe1114"
+}
