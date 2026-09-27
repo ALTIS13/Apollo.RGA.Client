@@ -62,6 +62,9 @@ internal class RestrictedNetworkClassifier {
     ) {
         if (generation <= cancelledThroughGeneration || generation < latestGeneration) return
         val current = network
+        if (current != null && current.generation == generation &&
+            current.networkId == networkId && revision < current.revision
+        ) return
         if (current != null && current.matches(generation, networkId, revision) &&
             current.cellular == cellular && current.captive == captive
         ) return

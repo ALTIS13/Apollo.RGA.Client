@@ -89,6 +89,18 @@ class RestrictedNetworkClassifierTest {
         assertFalse(detector.begin(2, 18, 1, 14_999))
     }
 
+    @Test fun olderRevisionCallbackCannotReplaceActiveAttempt() {
+        val detector = RestrictedNetworkClassifier()
+        detector.onNetwork(1, 17, 2, cellular = true, captive = false, nowMs = 0)
+        assertTrue(detector.begin(1, 17, 2, 5_000))
+        assertTrue(detector.record(round(1, 17, 2, 5_000)))
+
+        detector.onNetwork(1, 17, 1, cellular = true, captive = false, nowMs = 5_500)
+
+        assertTrue(detector.record(round(1, 17, 2, 8_000)))
+        assertEquals(RestrictedSuspect, detector.finish(1, 17, 2, 8_000, Failed, Unknown))
+    }
+
     @Test fun manualCancelAndCooldownPreventNewAttempt() {
         val detector = RestrictedNetworkClassifier()
         detector.onNetwork(1, 17, 1, cellular = true, captive = false, nowMs = 0)
