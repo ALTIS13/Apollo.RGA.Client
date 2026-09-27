@@ -80,12 +80,14 @@ jobs:
       - name: Check release guard regressions
         run: python3 -m unittest scripts.test_apollo_rga_release scripts.test_android_cores
 
-      - name: Check literal import and entitlement refresh behavior
+      - name: Check import, entitlement and exact-routing behavior
         run: |
           ./gradlew :sharedUI:jvmTest \
             --tests org.olcbox.app.data.datasource.LocationsRepositoryImplTest \
             --tests org.olcbox.app.ui.features.home.HomeScreenModelImportLinkTest \
-            --tests org.olcbox.app.ui.HostAndSubscriptionPresenterTest
+            --tests org.olcbox.app.ui.HostAndSubscriptionPresenterTest \
+            --tests org.olcbox.app.net.ExactXrayChainPlanTest \
+            --tests org.olcbox.app.net.SingBoxConfigTest
 
       - name: Build commit-pinned sing-box for arm64
         shell: bash
