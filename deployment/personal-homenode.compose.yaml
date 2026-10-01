@@ -95,9 +95,6 @@
         }
       ],
       "pull_policy": "never",
-      "profiles": [
-        "personal-runtime"
-      ],
       "container_name": "rga-personal-node",
       "labels": [
         "coolify.managed=true",
