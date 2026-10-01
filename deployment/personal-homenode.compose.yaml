@@ -1,0 +1,244 @@
+{
+  "networks": {
+    "carrier-control": {
+      "driver": "bridge",
+      "ipam": {}
+    },
+    "qa-internal": {
+      "ipam": {},
+      "internal": true
+    },
+    "ru-egress": {
+      "ipam": {},
+      "internal": true
+    }
+  },
+  "services": {
+    "personal-node": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 2,
+      "depends_on": {
+        "qa-db": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "rga-egress": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "environment": {
+        "GOMAXPROCS": "2",
+        "RGA_PERSONAL_NODE_CONFIG": "/run/personal/node.json",
+        "RGA_PERSONAL_PANEL_CREDENTIALS_FILE": "/run/personal/panel-credentials.json"
+      },
+      "expose": [
+        "18443"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "code=$$(curl --silent --max-time 3 --cacert /run/personal/tls.crt --output /dev/null --write-out '%{http_code}' --request POST --header 'Content-Type: application/json' --data '{}' https://127.0.0.1:18443/v1/personal/link/begin) && [ \"$$code\" = 400 ]"
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "image": "apollo-rga-personal-node:20261001-a38b096c",
+      "init": true,
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "5m"
+        }
+      },
+      "mem_limit": "536870912",
+      "networks": {
+        "carrier-control": null,
+        "qa-internal": null,
+        "ru-egress": null
+      },
+      "pids_limit": 128,
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 18443,
+          "published": "18443",
+          "protocol": "tcp"
+        }
+      ],
+      "read_only": true,
+      "restart": "unless-stopped",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "stop_grace_period": "1m0s",
+      "stop_signal": "SIGTERM",
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700"
+      ],
+      "user": "10001:10001",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/srv/apollo-rga-personal/config",
+          "target": "/run/personal",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "pull_policy": "never",
+      "profiles": [
+        "personal-runtime"
+      ],
+      "container_name": "rga-personal-node",
+      "labels": {
+        "coolify.managed": "true",
+        "coolify.type": "application",
+        "coolify.applicationId": "24",
+        "coolify.name": "rga-personal-node",
+        "apollo.rga.scope": "personal"
+      }
+    },
+    "qa-db": {
+      "cpus": 1,
+      "environment": {
+        "POSTGRES_DB": "rga_personal_qa",
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/qa-db-password",
+        "POSTGRES_USER": "rga_qa_admin"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "pg_isready",
+          "-U",
+          "rga_qa_admin",
+          "-d",
+          "rga_personal_qa"
+        ],
+        "timeout": "5s",
+        "interval": "10s",
+        "retries": 5
+      },
+      "image": "postgres:18-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "5m"
+        }
+      },
+      "mem_limit": "268435456",
+      "networks": {
+        "qa-internal": null
+      },
+      "pids_limit": 128,
+      "restart": "unless-stopped",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "shm_size": "67108864",
+      "stop_grace_period": "1m0s",
+      "stop_signal": "SIGTERM",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "qa-postgres",
+          "target": "/var/lib/postgresql",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/srv/apollo-rga-personal/database/qa-admin-password",
+          "target": "/run/secrets/qa-db-password",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "command": [
+        "postgres",
+        "-c",
+        "shared_buffers=32MB",
+        "-c",
+        "max_connections=16"
+      ],
+      "container_name": "rga-qa-db",
+      "labels": {
+        "coolify.managed": "true",
+        "coolify.type": "application",
+        "coolify.applicationId": "24",
+        "coolify.name": "rga-qa-db",
+        "apollo.rga.scope": "personal"
+      }
+    },
+    "rga-egress": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "cpus": 0.5,
+      "expose": [
+        "1080"
+      ],
+      "image": "apollo-rga-personal-gateway:20261001",
+      "init": true,
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "2m"
+        }
+      },
+      "mem_limit": "67108864",
+      "networks": {
+        "carrier-control": null,
+        "ru-egress": null
+      },
+      "pids_limit": 32,
+      "read_only": true,
+      "restart": "unless-stopped",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "stop_grace_period": "15s",
+      "stop_signal": "SIGTERM",
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=8m,uid=10002,gid=10002,mode=0700"
+      ],
+      "user": "10002:10002",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/srv/apollo-rga-personal/gateway",
+          "target": "/srv/apollo-rga-personal/gateway",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "pull_policy": "never",
+      "container_name": "rga-rga-egress",
+      "labels": {
+        "coolify.managed": "true",
+        "coolify.type": "application",
+        "coolify.applicationId": "24",
+        "coolify.name": "rga-rga-egress",
+        "apollo.rga.scope": "personal"
+      }
+    }
+  },
+  "volumes": {
+    "qa-postgres": {
+      "name": "rga-personal-qa18-data"
+    }
+  }
+}
