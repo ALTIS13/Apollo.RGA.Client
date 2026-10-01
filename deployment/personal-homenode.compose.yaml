@@ -99,13 +99,13 @@
         "personal-runtime"
       ],
       "container_name": "rga-personal-node",
-      "labels": {
-        "coolify.managed": "true",
-        "coolify.type": "application",
-        "coolify.applicationId": "24",
-        "coolify.name": "rga-personal-node",
-        "apollo.rga.scope": "personal"
-      }
+      "labels": [
+        "coolify.managed=true",
+        "coolify.type=application",
+        "coolify.applicationId=24",
+        "coolify.name=rga-personal-node",
+        "apollo.rga.scope=personal"
+      ]
     },
     "qa-db": {
       "cpus": 1,
@@ -172,13 +172,13 @@
         "max_connections=16"
       ],
       "container_name": "rga-qa-db",
-      "labels": {
-        "coolify.managed": "true",
-        "coolify.type": "application",
-        "coolify.applicationId": "24",
-        "coolify.name": "rga-qa-db",
-        "apollo.rga.scope": "personal"
-      }
+      "labels": [
+        "coolify.managed=true",
+        "coolify.type=application",
+        "coolify.applicationId=24",
+        "coolify.name=rga-qa-db",
+        "apollo.rga.scope=personal"
+      ]
     },
     "rga-egress": {
       "cap_drop": [
@@ -227,13 +227,13 @@
       ],
       "pull_policy": "never",
       "container_name": "rga-rga-egress",
-      "labels": {
-        "coolify.managed": "true",
-        "coolify.type": "application",
-        "coolify.applicationId": "24",
-        "coolify.name": "rga-rga-egress",
-        "apollo.rga.scope": "personal"
-      }
+      "labels": [
+        "coolify.managed=true",
+        "coolify.type=application",
+        "coolify.applicationId=24",
+        "coolify.name=rga-rga-egress",
+        "apollo.rga.scope=personal"
+      ]
     }
   },
   "volumes": {
