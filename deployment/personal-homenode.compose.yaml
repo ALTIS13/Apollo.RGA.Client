@@ -47,7 +47,7 @@
         "retries": 3,
         "start_period": "30s"
       },
-      "image": "apollo-rga-personal-node:20261001-a38b096c",
+      "image": "apollo-rga-personal-node:20261001-84ddd6b7",
       "init": true,
       "logging": {
         "driver": "json-file",
