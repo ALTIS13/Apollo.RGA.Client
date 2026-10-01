@@ -2,9 +2,11 @@ package org.olcbox.app.update.personal
 
 import java.io.File
 import java.security.MessageDigest
+import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.*
+import org.junit.Assume.assumeNoException
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -68,6 +70,51 @@ class AndroidPersonalApkVerifierTest {
         val f = Fixture(); val other = f.gate.newDownloadFile()
         assertNotEquals(f.download, other)
         assertEquals(f.dir.canonicalFile, other.canonicalFile.parentFile)
+    }
+    @Test fun ownProducerFromDotDotCacheDirectoryVerifiesAndItsFrozenTokenRevalidates() {
+        val f = Fixture()
+        val child = File(f.dir, "alias-child").apply { assertTrue(mkdirs()) }
+        val aliasedCache = File(child, "..")
+        assertNotEquals("fixture must contain a real path alias", aliasedCache.absoluteFile, aliasedCache.canonicalFile)
+        assertEquals(f.dir.canonicalFile, aliasedCache.canonicalFile)
+        val gate = AndroidPersonalApkVerifier(aliasedCache, f.reader, 35, setOf("arm64-v8a")) { f.clock }
+        val produced = gate.newDownloadFile().apply { writeBytes(f.download.readBytes()) }
+        assertEquals(PersonalBaselineRead.Ready(f.baseline), gate.readBaseline())
+        val result = gate.verifyApk(produced, f.verified, f.baseline)
+        assertTrue("own matching producer must not be rejected because its cache path is aliased",
+            result is PersonalApkVerification.Verified)
+        val token = (result as PersonalApkVerification.Verified).apk
+        assertEquals(PersonalApkVerification.Verified(token), gate.revalidate(token))
+    }
+    @Test fun callerDotDotAliasOfRegisteredProducerIsStillRefused() {
+        val f = Fixture()
+        val child = File(f.dir, "caller-alias-child").apply { assertTrue(mkdirs()) }
+        val alias = File(child, "../${f.download.name}")
+        assertNotEquals(alias.absoluteFile, alias.canonicalFile)
+        assertEquals(f.download.canonicalFile, alias.canonicalFile)
+        assertArrayEquals(f.download.readBytes(), alias.readBytes())
+        assertEquals(PersonalApkVerification.Refused(PersonalApkRefusal.FILE),
+            f.gate.verifyApk(alias, f.verified, f.baseline))
+        assertTrue("refusing a caller alias must not poison the registered real producer",
+            f.verify() is PersonalApkVerification.Verified)
+    }
+    @Test fun callerSymlinkOutsideCacheToRegisteredProducerIsStillRefused() {
+        val f = Fixture()
+        val alias = File(f.dir.parentFile, "caller-link-${System.nanoTime()}.apk")
+        try {
+            Files.createSymbolicLink(alias.toPath(), f.download.canonicalFile.toPath())
+        } catch (unsupported: Exception) {
+            assumeNoException("host must support symbolic links for this negative boundary proof", unsupported)
+            return
+        }
+        try {
+            assertTrue(Files.isSymbolicLink(alias.toPath()))
+            assertEquals(f.download.canonicalFile, alias.canonicalFile)
+            assertArrayEquals(f.download.readBytes(), alias.readBytes())
+            assertEquals(PersonalApkVerification.Refused(PersonalApkRefusal.FILE),
+                f.gate.verifyApk(alias, f.verified, f.baseline))
+            assertTrue(f.verify() is PersonalApkVerification.Verified)
+        } finally { Files.deleteIfExists(alias.toPath()) }
     }
     @Test fun metadataChangeExpiryAndRemovalInvalidatePreviouslyVerifiedCandidate() {
         val changed = Fixture(); val token = (changed.verify() as PersonalApkVerification.Verified).apk
