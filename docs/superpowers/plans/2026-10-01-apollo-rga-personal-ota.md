@@ -10,6 +10,23 @@ Legacy GitHub updater stays disabled; general subscribers stay disabled.
 existing SOCKS/session guards, RGA-only Home static artifacts.
 **Spec:** `docs/superpowers/specs/2026-10-01-apollo-rga-personal-ota-design.md`.
 
+### Execution checkpoint — 2026-10-01
+
+Root runtime rulings are recorded in the ignored personal OTA ledger. Source,
+variant, full-build and permanent-key recovery gates passed. Native bootstrap2
+exposed an Android ICU literal-brace error, then a companion TLS-close-on-Main
+error. The verifier repair is proven on A063. The companion closure repair is
+source-reviewed, production-owner regression7/0, and Android-compiled; its native
+acceptance remains open. No gate is relaxed: manually replace companion0 in place
+with the same signer and a newly frozen exact hash before the first true OTA.
+Published candidates3/4 are immutable, withdrawn from offers and never installed.
+The first real OTA candidate is now5/sequence3, declaring the repaired helper's
+exact installed hash. This is a dependency bootstrap repair, not automatic pair
+updating. A063 is released at the user's request, subscription retained, VPN off,
+WiFi/font/USB-awake restored. Finish ordinary checks on Realme when connected;
+selected OlcRTC/install/retention proof waits for explicit A063 return. No general
+release, quota or production Remnawave changes are authorized by this checkpoint.
+
 ## Global Constraints
 
 - Personal package `tech.gatealtas.rga.personal`, companion `tech.gatealtas.rga.personal.test`.

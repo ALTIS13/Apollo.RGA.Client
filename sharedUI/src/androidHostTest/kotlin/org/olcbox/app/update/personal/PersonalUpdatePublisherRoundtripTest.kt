@@ -36,7 +36,7 @@ class PersonalUpdatePublisherRoundtripTest {
         assertTrue("publisher manifest must pass production verifier", result is PersonalUpdateVerification.Success)
         val success = result as PersonalUpdateVerification.Success
         val wire = bytes.toString(Charsets.US_ASCII)
-        val match = Regex("\\{\"payload\":\"([A-Za-z0-9_-]+)\",\"signature\":\"([A-Za-z0-9_-]+)\"}").matchEntire(wire)
+        val match = Regex("\\{\"payload\":\"([A-Za-z0-9_-]+)\",\"signature\":\"([A-Za-z0-9_-]+)\"\\}").matchEntire(wire)
         assertTrue("publisher envelope must be exact canonical v1", match != null)
         val payload = Base64.getUrlDecoder().decode(match!!.groupValues[1])
         val signature = Base64.getUrlDecoder().decode(match.groupValues[2])

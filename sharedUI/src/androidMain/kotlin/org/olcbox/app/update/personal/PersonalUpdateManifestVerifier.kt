@@ -17,7 +17,8 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 object PersonalUpdateManifestVerifier {
     private const val PACKAGE = "tech.gatealtas.rga.personal"
     private const val COMPANION_PACKAGE = "tech.gatealtas.rga.personal.test"
-    private val envelopePattern = Regex("\\{\"payload\":\"([A-Za-z0-9_-]+)\",\"signature\":\"([A-Za-z0-9_-]+)\"}")
+    // Android ICU requires both literal braces to be escaped.
+    private val envelopePattern = Regex("\\{\"payload\":\"([A-Za-z0-9_-]+)\",\"signature\":\"([A-Za-z0-9_-]+)\"\\}")
     private val decimalPattern = Regex("0|[1-9][0-9]*")
     private val hexPattern = Regex("[0-9a-f]{64}")
     private val url64 = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT)
