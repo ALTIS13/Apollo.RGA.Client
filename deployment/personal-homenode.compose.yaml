@@ -8,6 +8,10 @@
       "ipam": {},
       "internal": true
     },
+    "udp-private": {
+      "external": true,
+      "name": "rga-personal-udp-private"
+    },
     "ru-egress": {
       "ipam": {},
       "internal": true
@@ -47,7 +51,7 @@
         "retries": 3,
         "start_period": "30s"
       },
-      "image": "apollo-rga-personal-node:20261001-84ddd6b7",
+      "image": "apollo-rga-personal-node:20261002-5aa5931d",
       "init": true,
       "logging": {
         "driver": "json-file",
@@ -60,7 +64,10 @@
       "networks": {
         "carrier-control": null,
         "qa-internal": null,
-        "ru-egress": null
+        "ru-egress": null,
+        "udp-private": {
+          "ipv4_address": "10.93.27.3"
+        }
       },
       "pids_limit": 128,
       "ports": [
