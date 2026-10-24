@@ -49,13 +49,16 @@ const (
 )
 
 type UserSnapshot struct {
-	ID                   int64
-	Status               Status
-	ExpiresAt            time.Time
-	TrafficLimitBytes    int64 // Zero means unlimited in Remnawave.
-	TrafficLimitStrategy TrafficStrategy
-	UsedTrafficBytes     int64
-	HWIDDeviceLimit      *int64
+	ID                        int64
+	Status                    Status
+	ExpiresAt                 time.Time
+	TrafficLimitBytes         int64 // Zero means unlimited in Remnawave.
+	TrafficLimitStrategy      TrafficStrategy
+	UsedTrafficBytes          int64
+	HWIDDeviceLimit           *int64
+	CreatedAt                 *time.Time
+	LastTrafficResetAt        *time.Time
+	LastTrafficResetAtPresent bool // Explicit null is distinct from an absent legacy field.
 }
 
 type Client struct {
@@ -149,6 +152,8 @@ func (c *Client) lookupUser(ctx context.Context, id int64, shortUUID string) (Us
 			TrafficLimitBytes    *int64          `json:"trafficLimitBytes"`
 			TrafficLimitStrategy TrafficStrategy `json:"trafficLimitStrategy"`
 			HWIDDeviceLimit      *int64          `json:"hwidDeviceLimit"`
+			CreatedAt            json.RawMessage `json:"createdAt"`
+			LastTrafficResetAt   json.RawMessage `json:"lastTrafficResetAt"`
 			UserTraffic          *struct {
 				UsedTrafficBytes *int64 `json:"usedTrafficBytes"`
 			} `json:"userTraffic"`
@@ -162,15 +167,41 @@ func (c *Client) lookupUser(ctx context.Context, id int64, shortUUID string) (Us
 	if err != nil || u.ID != id || (shortUUID != "" && u.ShortUUID != shortUUID) || !knownStatus(u.Status) || !knownStrategy(u.TrafficLimitStrategy) || u.TrafficLimitBytes == nil || *u.TrafficLimitBytes < 0 || u.UserTraffic == nil || u.UserTraffic.UsedTrafficBytes == nil || *u.UserTraffic.UsedTrafficBytes < 0 {
 		return UserSnapshot{}, ErrInvalidResponse
 	}
+	createdAt, err := optionalTimestamp(u.CreatedAt, false)
+	if err != nil {
+		return UserSnapshot{}, err
+	}
+	resetAt, err := optionalTimestamp(u.LastTrafficResetAt, true)
+	if err != nil {
+		return UserSnapshot{}, err
+	}
 	return UserSnapshot{
-		ID:                   u.ID,
-		Status:               u.Status,
-		ExpiresAt:            expiresAt,
-		TrafficLimitBytes:    *u.TrafficLimitBytes,
-		TrafficLimitStrategy: u.TrafficLimitStrategy,
-		UsedTrafficBytes:     *u.UserTraffic.UsedTrafficBytes,
-		HWIDDeviceLimit:      u.HWIDDeviceLimit,
+		ID:                        u.ID,
+		Status:                    u.Status,
+		ExpiresAt:                 expiresAt,
+		TrafficLimitBytes:         *u.TrafficLimitBytes,
+		TrafficLimitStrategy:      u.TrafficLimitStrategy,
+		UsedTrafficBytes:          *u.UserTraffic.UsedTrafficBytes,
+		HWIDDeviceLimit:           u.HWIDDeviceLimit,
+		CreatedAt:                 createdAt,
+		LastTrafficResetAt:        resetAt,
+		LastTrafficResetAtPresent: len(u.LastTrafficResetAt) != 0,
 	}, nil
+}
+
+func optionalTimestamp(raw json.RawMessage, nullable bool) (*time.Time, error) {
+	if len(raw) == 0 || (nullable && bytes.Equal(raw, []byte("null"))) {
+		return nil, nil
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return nil, ErrInvalidResponse
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, ErrInvalidResponse
+	}
+	return &parsed, nil
 }
 
 func knownStatus(status Status) bool {

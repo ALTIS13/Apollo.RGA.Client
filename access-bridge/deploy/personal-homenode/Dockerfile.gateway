@@ -1,0 +1,9 @@
+ARG RUNTIME_BASE
+FROM ${RUNTIME_BASE}
+RUN apk add --no-cache openssh-client \
+    && addgroup -g 10002 gateway \
+    && adduser -D -H -u 10002 -G gateway gateway
+USER 10002:10002
+WORKDIR /tmp
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["ssh", "-F", "/srv/apollo-rga-personal/gateway/config", "-NT", "-D", "0.0.0.0:1080", "rga-exit"]

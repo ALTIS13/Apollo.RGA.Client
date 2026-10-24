@@ -54,6 +54,11 @@ func NewLinkService(panelInstance string, resolver LinkResolver, challenges Chal
 	if (Subject{PanelInstance: panelInstance, UserID: 1}).Validate() != nil || resolver == nil || challenges == nil {
 		return nil, ErrLinkConfig
 	}
+	// A personal allowlist cannot be reused against another panel where the
+	// same numeric user ID might identify a different subscription.
+	if scoped, ok := eligibility.(interface{ PanelInstance() string }); ok && scoped.PanelInstance() != panelInstance {
+		return nil, ErrLinkConfig
+	}
 	if eligibility == nil {
 		eligibility = DenyAllDeviceEligibility{}
 	}
