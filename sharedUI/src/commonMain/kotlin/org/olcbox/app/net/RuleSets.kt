@@ -5,9 +5,10 @@ import multiplatform_app.sharedui.generated.resources.Res
 /**
  * The sing-box rule-sets the app ships, and what the configs call them.
  *
- * The Russian, Iranian and Chinese binary rule-sets come from SagerNet's
- * `rule-set` branches. The Russian lists are v2fly's `geosite:category-ru`,
- * `geosite:tld-ru` and `geoip:ru`, compiled to sing-box's format. The TLD
+ * Domain rule-sets come from SagerNet's `rule-set` branches and v2fly data.
+ * Country IP rule-sets use DB-IP IP-to-Country Lite October 2026 (CC BY 4.0),
+ * converted without widening ranges using the pinned sing-box SRS codec.
+ * The Russian domain lists are `geosite:category-ru` and `geosite:tld-ru`. The TLD
  * list is a file of its own because SagerNet's
  * build of category-ru leaves the bare TLDs out despite the `include:tld-ru`
  * in the v2fly source — without it `sberbank.ru` is matched and `ozon.ru` is
@@ -16,9 +17,9 @@ import multiplatform_app.sharedui.generated.resources.Res
  * Bundled rather than downloaded. The networks this mode exists for are the
  * ones where github.com answers slowly or not at all, and a list that arrives
  * after the first connection is a first connection with no bypass in it.
- * `scripts/update-rule-sets.sh` refreshes them and records what it fetched in
- * `scripts/rule-sets.lock`; [RuleSetsTest] refuses a bundle whose bytes do not
- * hash to the values pinned here.
+ * Release input hashes and country-source provenance accompany the distributed
+ * source/notice packet. Monthly country refreshes ship in signed APK updates;
+ * [RuleSetsTest] refuses a bundle whose bytes differ from the pins here.
  */
 object RuleSets {
     class File(val name: String, val tag: String, val sha256: String)
@@ -36,14 +37,14 @@ object RuleSets {
     val GEOIP_RU = File(
         name = "geoip-ru.srs",
         tag = "geoip-ru",
-        sha256 = "1a8115af741918ff24b37b87d3c6da21eccabc58f1eec059e461dca8bac16ff7"
+        sha256 = "7eff5d0d665eb3745c9a613d758000aa24d5b865d8bf836413e2125e7a0ec7f6"
     )
 
     val GEOSITE_CATEGORY_IR = File(name = "geosite-category-ir.srs", tag = "geosite-category-ir", sha256 = "5e4ef5289e0b4f73018854730b2ab049860ec1e87e1a601fdbe976bcb6c669b6")
     val GEOSITE_CN = File(name = "geosite-cn.srs", tag = "geosite-cn", sha256 = "a32d727f1a71b2f9c67627ea4ae489d8d6cfb010f8ec2d6800538493fe5a77ae")
     val GEOSITE_TLD_CN = File(name = "geosite-tld-cn.srs", tag = "geosite-tld-cn", sha256 = "246d4792b8d1959854d485420e4f85ea906f85562860c08a34bfd20b1a33c630")
-    val GEOIP_IR = File(name = "geoip-ir.srs", tag = "geoip-ir", sha256 = "c88af3372f71234f6d015d0452ba472f26b0d9d62e82ae5167d066c1df24b8f5")
-    val GEOIP_CN = File(name = "geoip-cn.srs", tag = "geoip-cn", sha256 = "ebee603fdf402314b44b9f653cdcf6d9cc9c41e84e2b3515e3123c5c920a93bc")
+    val GEOIP_IR = File(name = "geoip-ir.srs", tag = "geoip-ir", sha256 = "a88589dbde1742d121b88ba64d1d2754aae80d094a5b8f6e2d50f0d44ee6c13b")
+    val GEOIP_CN = File(name = "geoip-cn.srs", tag = "geoip-cn", sha256 = "95195e3fefeb6c1c372e241d6aed26004473aaa34e5867040b3a3433c53de9eb")
 
     /**
      * Sites blocked in Russia, for "only blocked sites through the tunnel": Re:filter

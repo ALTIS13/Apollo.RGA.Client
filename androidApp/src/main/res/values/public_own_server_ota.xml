@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Safe defaults for debug/play/unbound builds. Release bindings are generated. -->
+    <bool name="public_own_server_ota_enabled">false</bool>
+    <string name="public_own_server_ota_compiled_variant" translatable="false"></string>
+    <string name="public_own_server_ota_public_spki" translatable="false"></string>
+    <string name="public_own_server_ota_release_signer_sha256" translatable="false"></string>
+</resources>

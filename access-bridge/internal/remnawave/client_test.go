@@ -2,11 +2,13 @@ package remnawave
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -392,5 +394,64 @@ func TestNewClientBoundsNegativeTimeout(t *testing.T) {
 	}
 	if provided.Timeout != -time.Second {
 		t.Fatalf("NewClient mutated caller's HTTP client: %v", provided.Timeout)
+	}
+}
+
+// These fixtures catch dropped accounting facts and conflation of absent/null
+// reset markers at the real HTTP-to-consumer boundary.
+func TestLookupByIDPreservesOptionalAccountingFacts(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, created, reset string
+		present                      bool
+	}{
+		{"legacy missing", "", "", "", false},
+		{"explicit null reset", `,"createdAt":"2026-09-01T00:00:00Z","lastTrafficResetAt":null`, "2026-09-01T00:00:00Z", "", true},
+		{"timestamp reset", `,"createdAt":"2026-09-01T00:00:00Z","lastTrafficResetAt":"2026-09-20T00:00:00Z"`, "2026-09-01T00:00:00Z", "2026-09-20T00:00:00Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.TrimSuffix(canonicalUserJSON, "}}") + tc.fields + "}}"
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) })
+			snapshot, err := client.LookupByID(context.Background(), 42)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var facts map[string]json.RawMessage
+			if err := json.Unmarshal(data, &facts); err != nil {
+				t.Fatal(err)
+			}
+			if string(facts["LastTrafficResetAtPresent"]) != fmt.Sprint(tc.present) {
+				t.Fatalf("reset presence fact dropped: %s", data)
+			}
+			for key, want := range map[string]string{"CreatedAt": tc.created, "LastTrafficResetAt": tc.reset} {
+				if want == "" {
+					if string(facts[key]) != "null" {
+						t.Fatalf("%s: want null, got %s", key, facts[key])
+					}
+					continue
+				}
+				if string(facts[key]) != strconv.Quote(want) {
+					t.Fatalf("%s fact dropped: %s", key, data)
+				}
+			}
+		})
+	}
+}
+
+func TestLookupRejectsInvalidPresentAccountingTimestamps(t *testing.T) {
+	for _, fields := range []string{
+		`,"createdAt":null`, `,"createdAt":""`, `,"createdAt":"invalid"`, `,"createdAt":123`,
+		`,"lastTrafficResetAt":""`, `,"lastTrafficResetAt":"invalid"`, `,"lastTrafficResetAt":123`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			body := strings.TrimSuffix(canonicalUserJSON, "}}") + fields + "}}"
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) })
+			if _, err := client.LookupByID(context.Background(), 42); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("malformed present fact accepted: %v", err)
+			}
+		})
 	}
 }

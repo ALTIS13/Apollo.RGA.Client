@@ -1,5 +1,15 @@
 {
   "base_sha": "8d97e32e0b1af0a727d6e785c4c467f37543aa4d",
   "patch_path": "patches/olcrtc-rga-managed-guard.patch",
-  "patch_sha256": "8cf2e3c292c7c91380a97de42e88c14c8ae6bd26139a89bf01c892564d1328c8"
+  "patch_sha256": "8cf2e3c292c7c91380a97de42e88c14c8ae6bd26139a89bf01c892564d1328c8",
+  "overlay_patch_path": "patches/olcrtc-rga-managed-overlay.patch",
+  "overlay_patch_sha256": "03d0c36ebd6f140b9babbe1160c178fc9f567d80bb3361f511406a10e3dfd224",
+  "client_patch_path": "patches/olcrtc-rga-managed-client.patch",
+  "client_patch_sha256": "932415dc4aed9f208b73d67f2037cc8a5584f6b7c6f710c4efb12fe69fdd8bba",
+  "provider_upstream_sha": "7ac128ac8bc59bd008f116f072c0a2b14c70395f",
+  "provider_patch_path": "patches/olcrtc-rga-vkcalls-provider.patch",
+  "provider_patch_sha256": "7c196068e026dcda4ae379f4344a89bbf58881a144aafbee479c8d1de9498f15",
+  "mts_upstream_sha": "b6cb4c417d17dfb7b9b780d7c37280df02e5dc6e",
+  "mts_patch_path": "patches/olcrtc-rga-mtslink-provider.patch",
+  "mts_patch_sha256": "88c8cce26cd0ed318d20d93a482384a44b15623afe2fc75d09b63259161a762c"
 }

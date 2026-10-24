@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- The personal QA test APK binds back with an exact package and signature gate. -->
+    <permission
+        android:name="${applicationId}.permission.PERSONAL_TUN_PROBE"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="${applicationId}.permission.PERSONAL_TUN_PROBE" />
+    <queries>
+        <package android:name="tech.gatealtas.rga.personal.test" />
+    </queries>
+
     <application>
         <!-- Test-only import scheme. Never put bearer subscriptions through it. -->
         <activity android:name=".AppActivity">
@@ -21,6 +30,15 @@
                 <action android:name="tech.gatealtas.rga.debug.DEBUG_STOP_VPN" />
             </intent-filter>
         </receiver>
+        <!-- Explicit shell broadcast only; DUMP is a signature-level Android permission. -->
+        <receiver
+            android:name="org.olcbox.app.debug.PersonalBindingExportReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <receiver
+            android:name="org.olcbox.app.debug.PersonalUpdateDiagnosticReadReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
     </application>
 
 </manifest>

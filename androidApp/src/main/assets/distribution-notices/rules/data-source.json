@@ -1,0 +1,18 @@
+{
+  "url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz",
+  "release": "2026-10",
+  "advertisedSHA1": "c8ad1dfe98cb29bcacd82a5c3ec361c880e5bb59",
+  "advertisedChecksumMatchesCompressed": false,
+  "compressed": {
+    "bytes": 4491785,
+    "sha256": "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80"
+  },
+  "plain": {
+    "bytes": 31210433,
+    "sha256": "53864a68fbfef02c27c717d08d431a6d453e9e00e77d9e8da841d382267fca88"
+  },
+  "publishedRecords": 710834,
+  "license": "CC-BY-4.0",
+  "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+  "source": "https://db-ip.com/db/download/ip-to-country-lite"
+}

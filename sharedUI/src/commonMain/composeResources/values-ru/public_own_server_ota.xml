@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="public_own_server_ota_summary">Подписанные обновления с сервера Apollo</string>
+    <string name="public_own_server_ota_intro">Принимаются только этот публичный канал, установленный ключ подписи и проверенный APK новой версии. Android запрашивает подтверждение установки. Подписка и данные приложения сохраняются.</string>
+    <string name="public_own_server_ota_compatibility_refused">Обновление не соответствует установленному публичному пакету, ключу подписи, каналу или поддерживаемому устройству.</string>
+</resources>

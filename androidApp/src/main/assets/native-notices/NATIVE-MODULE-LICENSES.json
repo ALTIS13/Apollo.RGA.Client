@@ -1,0 +1,2124 @@
+{
+  "schema": "rga.managed91.actual-linked-native-notices/1",
+  "aar": {
+    "bytes": 12160323,
+    "sha256": "2d061e6270af0a8f7cd844416a7f964ab6369057d9f2c02cd3bbe2faac6db7ad"
+  },
+  "linkedModuleCount": 91,
+  "externalCacheCount": 90,
+  "localReplacementCount": 1,
+  "originalAndPackagedElfInventoriesEqual": null,
+  "architectures": [
+    "arm64"
+  ],
+  "modules": [
+    {
+      "module": "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go",
+      "version": "v1.36.11-20260415201107-50325440f8f2.1",
+      "sum": "h1:s6hzCXtND/ICdGPTMGk7C+/BFlr2Jg5GyH0NKf4XGXg=",
+      "replacement": null,
+      "id": "m002",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m002/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "ab870089234b247d1f41828bf8f39a7dbb7171277f81a56e69b474dc2fe51098",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "buf.build/go/protovalidate",
+      "version": "v1.2.0",
+      "sum": "h1:DQVrUWkmGTBij+kOYv/x2LLxwcLaGKMdzShj1/6/3H0=",
+      "replacement": null,
+      "id": "m003",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m003/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "ab870089234b247d1f41828bf8f39a7dbb7171277f81a56e69b474dc2fe51098",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "buf.build/go/protoyaml",
+      "version": "v0.7.0",
+      "sum": "h1:z4oVoFicbpPefhT7WAykxUdfp0yEQlhMQ2mCZOY5V38=",
+      "replacement": null,
+      "id": "m004",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m004/c693279643b8-LICENSE",
+          "bytes": 11352,
+          "sha256": "de29af064d46f3c67f591f508499d595dc71a75d5ba64a2ed2e76af2847d7b3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "cel.dev/expr",
+      "version": "v0.25.2",
+      "sum": "h1:K6j46C81hXtZQfuX60cVWQFBJahKSE2gfRbNuvr5bFs=",
+      "replacement": null,
+      "id": "m005",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m005/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "codeberg.org/rape4me/kc",
+      "version": "v0.0.0-20260527074346-4cb2a45790c2",
+      "sum": "h1:u7QorW08YOZGj86cubeGpiwm+d0tMKa0e7syiBkO2eo=",
+      "replacement": null,
+      "id": "m006",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m006/c693279643b8-LICENSE",
+          "bytes": 630,
+          "sha256": "db553851d3a420d95cbb2d2dbe5cd964ec3607e5a969d103307a119de2bf0476",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/antlr4-go/antlr/v4",
+      "version": "v4.13.1",
+      "sum": "h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=",
+      "replacement": null,
+      "id": "m009",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m009/c693279643b8-LICENSE",
+          "bytes": 1480,
+          "sha256": "683fcd416d83b64781e229a3c2a598462fbf55c5c9fea54be244766b22c033cf",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/benbjohnson/clock",
+      "version": "v1.3.5",
+      "sum": "h1:VvXlSJBzZpA/zum6Sj74hxwYI2DIxRWuNIoXAzHZz5o=",
+      "replacement": null,
+      "id": "m011",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m011/c693279643b8-LICENSE",
+          "bytes": 1078,
+          "sha256": "4a45268602cb0bb14943ff51689dbd1e4c87acd13b9cd3842a7e3de4c4b27f03",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/beorn7/perks",
+      "version": "v1.0.1",
+      "sum": "h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=",
+      "replacement": null,
+      "id": "m012",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m012/c693279643b8-LICENSE",
+          "bytes": 1058,
+          "sha256": "0db7c9ebb3717e526f34f87dd1ee8bc77d36846e29cb0cec9246f7138fbe962b",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/bep/debounce",
+      "version": "v1.2.1",
+      "sum": "h1:v67fRdBA9UQu2NhLFXrSg0Brw7CexQekrBwDMM8bzeY=",
+      "replacement": null,
+      "id": "m013",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m013/c693279643b8-LICENSE",
+          "bytes": 1087,
+          "sha256": "77d1b21a5460ffc70d50101e9490a44b35dd713dab8a6f847c54ce4d3e81234a",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/cespare/xxhash/v2",
+      "version": "v2.3.0",
+      "sum": "h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=",
+      "replacement": null,
+      "id": "m014",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE.txt",
+          "public": "licenses/m014/d0ed4cc3fb70-LICENSE.txt",
+          "bytes": 1068,
+          "sha256": "f566a9f97bacdaf00d9f21dd991e81dc11201c4e016c86b470799429a1c9a79c",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/coder/websocket",
+      "version": "v1.8.14",
+      "sum": "h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=",
+      "replacement": null,
+      "id": "m016",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE.txt",
+          "public": "licenses/m016/d0ed4cc3fb70-LICENSE.txt",
+          "bytes": 720,
+          "sha256": "cc0975a5f6305145bdd7b41ce9479632fdac3870e6ac4281f28017f18c767c4e",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/dennwc/iters",
+      "version": "v1.2.2",
+      "sum": "h1:XH2/Etihiy9ZvPOVCR+icQXeYlhbvS7k0qro4x/2qQo=",
+      "replacement": null,
+      "id": "m017",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m017/c693279643b8-LICENSE",
+          "bytes": 1070,
+          "sha256": "c3598286cf0a3c093d47e28bb058ca21fe90fc78971c7b8943c35c55bfcef7f9",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/frostbyte73/core",
+      "version": "v0.1.1",
+      "sum": "h1:ChhJOR7bAKOCPbA+lqDLE2cGKlCG5JXsDvvQr4YaJIA=",
+      "replacement": null,
+      "id": "m018",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m018/c693279643b8-LICENSE",
+          "bytes": 1070,
+          "sha256": "a2e0c945f7a67b846a064a6d35e75b39b63c185e6d3ca449c7e71042080a538a",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/fsnotify/fsnotify",
+      "version": "v1.10.1",
+      "sum": "h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx59Ho=",
+      "replacement": null,
+      "id": "m019",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m019/c693279643b8-LICENSE",
+          "bytes": 1531,
+          "sha256": "2dfbe6d2b5eb18b55148f3805d88648a09e0d17e38428123259afb08c8996e37",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/gammazero/deque",
+      "version": "v1.2.1",
+      "sum": "h1:9fnQVFCCZ9/NOc7ccTNqzoKd1tCWOqeI05/lPqFPMGQ=",
+      "replacement": null,
+      "id": "m020",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m020/c693279643b8-LICENSE",
+          "bytes": 1073,
+          "sha256": "33b7614d6cb1f09eb73b72656228375212267f74ea4719768dc8aef5aad288a7",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/go-logr/logr",
+      "version": "v1.4.3",
+      "sum": "h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=",
+      "replacement": null,
+      "id": "m022",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m022/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/go-logr/stdr",
+      "version": "v1.2.2",
+      "sum": "h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=",
+      "replacement": null,
+      "id": "m023",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m023/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/golang-jwt/jwt/v5",
+      "version": "v5.3.1",
+      "sum": "h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=",
+      "replacement": null,
+      "id": "m024",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m024/c693279643b8-LICENSE",
+          "bytes": 1100,
+          "sha256": "fe26ca41577b9b2b4448050a24b25e5753af66b5d5945d5d36094e7790bfcb2f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/google/cel-go",
+      "version": "v0.28.1",
+      "sum": "h1:YWIwi77J4xIsYUwAF/iIuS6haffzIHS8yWI8glSbLWM=",
+      "replacement": null,
+      "id": "m026",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m026/c693279643b8-LICENSE",
+          "bytes": 13053,
+          "sha256": "4cdb9af102dfbb0ca03d87d6f650a505df098646a4080f4665b389ad9c6caa02",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "sum": "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+      "replacement": null,
+      "id": "m027",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m027/c693279643b8-LICENSE",
+          "bytes": 1480,
+          "sha256": "0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/gorilla/websocket",
+      "version": "v1.5.4-0.20250319132907-e064f32e3674",
+      "sum": "h1:JeSE6pjso5THxAzdVpqr6/geYxZytqFMBCOtn/ujyeo=",
+      "replacement": null,
+      "id": "m028",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m028/c693279643b8-LICENSE",
+          "bytes": 1312,
+          "sha256": "2be1b548b0387ca8948e1bb9434e709126904d15f622cc2d0d8e7f186e4d122d",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/jxskiss/base62",
+      "version": "v1.1.0",
+      "sum": "h1:A5zbF8v8WXx2xixnAKD2w+abC+sIzYJX+nxmhA6HWFw=",
+      "replacement": null,
+      "id": "m030",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m030/c693279643b8-LICENSE",
+          "bytes": 1085,
+          "sha256": "b870a7ebbcce98c46e5b262c29a5d17f0dab1c90831169dea05dce775ab05aad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/klauspost/compress",
+      "version": "v1.18.6",
+      "sum": "h1:2jupLlAwFm95+YDR+NwD2MEfFO9d4z4Prjl1XXDjuao=",
+      "replacement": null,
+      "id": "m031",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "gzhttp/LICENSE",
+          "public": "licenses/m031/e83775ac87dd-LICENSE",
+          "bytes": 11361,
+          "sha256": "2252a5b1e2b1d3663b53ea77051b8ed065cb9270a3d1174d5d6ead8a2de051b6",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "internal/lz4ref/LICENSE",
+          "public": "licenses/m031/09b69489504c-LICENSE",
+          "bytes": 1477,
+          "sha256": "6a358d2540ca14048f02d366f23787c0a480157e58f058113f0e27168dd4e447",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "internal/snapref/LICENSE",
+          "public": "licenses/m031/e386007ab893-LICENSE",
+          "bytes": 1486,
+          "sha256": "f69f157b0be75da373605dbc8bbf142e8924ee82d8f44f11bcaf351335bf98cf",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m031/c693279643b8-LICENSE",
+          "bytes": 16733,
+          "sha256": "0d9e582ee4bff57bf1189c9e514e6da7ce277f9cd3bc2d488b22fbb39a6d87cf",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "s2/cmd/internal/filepathx/LICENSE",
+          "public": "licenses/m031/fb4d1f11987c-LICENSE",
+          "bytes": 1061,
+          "sha256": "8582c87d9a6baa28f7827c5205b7d16c3179bc794ebd4c7cc287c49a89b7eaa1",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "s2/cmd/internal/readahead/LICENSE",
+          "public": "licenses/m031/a4f1bcb908dc-LICENSE",
+          "bytes": 1100,
+          "sha256": "10fa24a602fde465db603cd5d546e37e33642a73cd24ddf5910be81724fec8b2",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "s2/LICENSE",
+          "public": "licenses/m031/c71dd03289c3-LICENSE",
+          "bytes": 1538,
+          "sha256": "08683b14bda8ae3538abf19e1879e853a39e3b8276a8d673363b529d15a61c1a",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "snappy/LICENSE",
+          "public": "licenses/m031/f6cbbf1f0d3d-LICENSE",
+          "bytes": 1486,
+          "sha256": "f69f157b0be75da373605dbc8bbf142e8924ee82d8f44f11bcaf351335bf98cf",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "snappy/xerial/LICENSE",
+          "public": "licenses/m031/3eb709d2f161-LICENSE",
+          "bytes": 1106,
+          "sha256": "d4ff111fa30ac75e28dca3868de957a3b73ff50b76bc4b8fe5c3a1f008d26703",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "zstd/internal/xxhash/LICENSE.txt",
+          "public": "licenses/m031/07d1e1161858-LICENSE.txt",
+          "bytes": 1068,
+          "sha256": "f566a9f97bacdaf00d9f21dd991e81dc11201c4e016c86b470799429a1c9a79c",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/klauspost/cpuid/v2",
+      "version": "v2.3.0",
+      "sum": "h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=",
+      "replacement": null,
+      "id": "m032",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m032/c693279643b8-LICENSE",
+          "bytes": 1078,
+          "sha256": "5d966570d7a442d4e969892860a914e542c97f262c873baee8f0aa48e1f40212",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/klauspost/reedsolomon",
+      "version": "v1.14.0",
+      "sum": "h1:5YSZeclzSYg5nl349+GDG/agDtQ6MZiwUYXvVKN1Jx0=",
+      "replacement": null,
+      "id": "m033",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m033/c693279643b8-LICENSE",
+          "bytes": 1107,
+          "sha256": "345aa942daa8c117669a85bd75f44a8364faceee962812ddb5a576977e0610ee",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/lithammer/shortuuid/v4",
+      "version": "v4.2.0",
+      "sum": "h1:LMFOzVB3996a7b8aBuEXxqOBflbfPQAiVzkIcHO0h8c=",
+      "replacement": null,
+      "id": "m034",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m034/c693279643b8-LICENSE",
+          "bytes": 1082,
+          "sha256": "d2e98cf1530c13d97df36a890831a2a1adb0a4580af192b6477bdac7f7af2461",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/livekit/mediatransportutil",
+      "version": "v0.0.0-20260605212259-862d4a7bcb1e",
+      "sum": "h1:SkgQRcG2VYEhh80Qb/zYZo8rWKJzNfJcfUQnXe6su2M=",
+      "replacement": null,
+      "id": "m035",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m035/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m035/dfb14fbb9e7d-NOTICE",
+          "bytes": 553,
+          "sha256": "6d0f7c5e0deb284362296c5da110dd353831da2e67ca77cb5abc051b951b0fac",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/livekit/protocol",
+      "version": "v1.50.1",
+      "sum": "h1:MOaLOFedKHQ1vteYjCFb+1Jypk3kQsV6h7gV4apgc+M=",
+      "replacement": null,
+      "id": "m036",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m036/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m036/dfb14fbb9e7d-NOTICE",
+          "bytes": 553,
+          "sha256": "6d0f7c5e0deb284362296c5da110dd353831da2e67ca77cb5abc051b951b0fac",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/livekit/psrpc",
+      "version": "v0.7.2",
+      "sum": "h1:6oZ+NODJ2pLyaT6VqDq1F4Qc/3TpDUSpyphj/P9MhQc=",
+      "replacement": null,
+      "id": "m037",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m037/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m037/dfb14fbb9e7d-NOTICE",
+          "bytes": 723,
+          "sha256": "8db0d0c9536464c8b3cd402d8914a25ba8641b751af95e5389ef6c52587d9ed2",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/makiuchi-d/gozxing",
+      "version": "v0.1.1",
+      "sum": "h1:xxqijhoedi+/lZlhINteGbywIrewVdVv2wl9r5O9S1I=",
+      "replacement": null,
+      "id": "m038",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m038/c693279643b8-LICENSE",
+          "bytes": 12654,
+          "sha256": "0221fa7ba7a053546a008478fb73399f6454cda4da36dd22a2a56f4a73f18a8d",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/munnerz/goautoneg",
+      "version": "v0.0.0-20191010083416-a7dc8b61c822",
+      "sum": "h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=",
+      "replacement": null,
+      "id": "m040",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m040/c693279643b8-LICENSE",
+          "bytes": 1546,
+          "sha256": "aa1376b9bc5dea6f30cdefde40c176a254f247d2814d0a9929395138631b2ae0",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/nats-io/nats.go",
+      "version": "v1.52.0",
+      "sum": "h1:n3avV4VBsCgsdwh71TppsTwtv+QdPs7ntSKM8qJLGsc=",
+      "replacement": null,
+      "id": "m041",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m041/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/nats-io/nkeys",
+      "version": "v0.4.16",
+      "sum": "h1:rd5oAuLOb8mnAycB0xleuEBNS1pVVnN0fv/FF34Eypg=",
+      "replacement": null,
+      "id": "m042",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m042/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/nats-io/nuid",
+      "version": "v1.0.1",
+      "sum": "h1:5iA8DT8V7q8WK2EScv2padNa/rTESc1KdnPw4TC2paw=",
+      "replacement": null,
+      "id": "m043",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m043/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/openlibrecommunity/olcrtc",
+      "version": "v0.0.0-00010101000000-000000000000",
+      "sum": null,
+      "replacement": "source/olc",
+      "id": "m044",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m044/c693279643b8-LICENSE",
+          "bytes": 11350,
+          "sha256": "542028c2bcc7a523798da062abc3116dca3186d6ddc09a7d6f1febe03041abd3",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m044/dfb14fbb9e7d-NOTICE",
+          "bytes": 2262,
+          "sha256": "045c23836751afbcf7e6090dd316c9c5160b0fced7db74820c78e083bd9ab74f",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "docs/upstream-license-wtfpl.txt",
+          "public": "licenses/m044/e8b8f82059e4-upstream-license-wtfpl.txt",
+          "bytes": 408,
+          "sha256": "7321836b10600d7221f5bfee57924fbdf453cdd38377e4a2fc808e01399ae51d",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "closed-current-source"
+    },
+    {
+      "module": "github.com/owenewans/owenlivekit/v2",
+      "version": "v2.18.2",
+      "sum": "h1:O9dehD2jv4PY5XftUOESAQxQi/nnRFRpJ0sMLuvVHms=",
+      "replacement": null,
+      "id": "m045",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m045/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m045/dfb14fbb9e7d-NOTICE",
+          "bytes": 553,
+          "sha256": "6d0f7c5e0deb284362296c5da110dd353831da2e67ca77cb5abc051b951b0fac",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "pkg/samplebuilder/NOTICE",
+          "public": "licenses/m045/cd17448a9cea-NOTICE",
+          "bytes": 1232,
+          "sha256": "19f73a269d92e4c4474dd2cbffb3d4a53fb84795b9130d963d406ccb848a4642",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/datachannel",
+      "version": "v1.6.0",
+      "sum": "h1:XecBlj+cvsxhAMZWFfFcPyUaDZtd7IJvrXqlXD/53i0=",
+      "replacement": null,
+      "id": "m047",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m047/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "87272dba8c4fcf57101a3195f4f53f7b010b6e153b9b0977bb1a3f91acddf691",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/dtls/v3",
+      "version": "v3.1.4",
+      "sum": "h1:QhvtMflMfu9Kf0RcDC5BJBle4caPskByrKQR6uuYqpY=",
+      "replacement": null,
+      "id": "m048",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m048/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/ice/v4",
+      "version": "v4.2.7",
+      "sum": "h1:zDEbC6MiEdhQpF8TxBOTws+NU6ZgGpveHrQq4Lc1kao=",
+      "replacement": null,
+      "id": "m049",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m049/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/interceptor",
+      "version": "v0.1.45",
+      "sum": "h1:6PUo/5829bIfRFIPPJQzuDn8EjxRTSB/CSD7QVCOaqo=",
+      "replacement": null,
+      "id": "m050",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m050/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/logging",
+      "version": "v0.2.4",
+      "sum": "h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=",
+      "replacement": null,
+      "id": "m051",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m051/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "87272dba8c4fcf57101a3195f4f53f7b010b6e153b9b0977bb1a3f91acddf691",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/mdns/v2",
+      "version": "v2.1.0",
+      "sum": "h1:3IJ9+Xio6tWYjhN6WwuY142P/1jA0D5ERaIqawg/fOY=",
+      "replacement": null,
+      "id": "m052",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m052/c693279643b8-LICENSE",
+          "bytes": 1057,
+          "sha256": "83e4dd21429a91fb7cea67a476032a9641425e5355df2e0f589a738b6ec9fd2c",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/randutil",
+      "version": "v0.1.0",
+      "sum": "h1:CFG1UdESneORglEsnimhUjf33Rwjubwj6xfiOXBa3mA=",
+      "replacement": null,
+      "id": "m053",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m053/c693279643b8-LICENSE",
+          "bytes": 1061,
+          "sha256": "badaf9bc72e71d5a70e7604c636b5b7adf79b9cafc188688438105d2b1e54722",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/rtcp",
+      "version": "v1.2.16",
+      "sum": "h1:fk1B1dNW4hsI78XUCljZJlC4kZOPk67mNRuQ0fcEkSo=",
+      "replacement": null,
+      "id": "m054",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m054/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "87272dba8c4fcf57101a3195f4f53f7b010b6e153b9b0977bb1a3f91acddf691",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/rtp",
+      "version": "v1.10.2",
+      "sum": "h1:l+f6tTDcAH6xwepaAoW791ddhuYsJlqRATOzirO04Mo=",
+      "replacement": null,
+      "id": "m055",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m055/c693279643b8-LICENSE",
+          "bytes": 1078,
+          "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/sctp",
+      "version": "v1.10.0",
+      "sum": "h1:qeoD6swF/2M5bYRcAGayqSbTKX3m4AW29CiQxG1+Pfg=",
+      "replacement": null,
+      "id": "m056",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m056/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/sdp/v3",
+      "version": "v3.0.19",
+      "sum": "h1:1VMKs3gIkTQV5M3hNKfTAPrDXSNrYtOlmOD8+mSZUGQ=",
+      "replacement": null,
+      "id": "m057",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m057/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/srtp/v3",
+      "version": "v3.0.11",
+      "sum": "h1:GiESUr54/K4UuPigfq/CvWUed80JenQAHXn0C2MQQIQ=",
+      "replacement": null,
+      "id": "m058",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m058/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/stun/v3",
+      "version": "v3.1.5",
+      "sum": "h1:Y1FHlhaI6+4UoC5i/zQf4F7JvdZtB24/05oyy/GF1x8=",
+      "replacement": null,
+      "id": "m059",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m059/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/transport/v4",
+      "version": "v4.0.2",
+      "sum": "h1:ifYlPqNwsy6aKQ9y8yzxXlHae5431ZrH2avkD/Rn6Tk=",
+      "replacement": null,
+      "id": "m060",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m060/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/turn/v5",
+      "version": "v5.0.9",
+      "sum": "h1:zNeBfRyzGn7MPyUTvmvxeltLEjlFdSLPT1tlakoaOXM=",
+      "replacement": null,
+      "id": "m061",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m061/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pion/webrtc/v4",
+      "version": "v4.2.15",
+      "sum": "h1:Ir/MauNFCfg+kgyBYPQLiGdVWFlzEcLxqtuzAkYkky0=",
+      "replacement": null,
+      "id": "m062",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m062/c693279643b8-LICENSE",
+          "bytes": 1093,
+          "sha256": "6483daf6c8aa2c8192528e60be098aa82dd18f6d7b96dc8246f4f7c3333fbf3f",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "test-wasm/LICENSE",
+          "public": "licenses/m062/2abbe28a045f-LICENSE",
+          "bytes": 1479,
+          "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/pkg/errors",
+      "version": "v0.9.1",
+      "sum": "h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=",
+      "replacement": null,
+      "id": "m064",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m064/c693279643b8-LICENSE",
+          "bytes": 1312,
+          "sha256": "8d427fd87bc9579ea368fde3d49f9ca22eac857f91a9dec7e3004bdfab7dee86",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/prometheus/client_golang",
+      "version": "v1.23.2",
+      "sum": "h1:Je96obch5RDVy3FDMndoUsjAhG5Edi49h0RJWRi/o0o=",
+      "replacement": null,
+      "id": "m065",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "internal/github.com/golang/gddo/LICENSE",
+          "public": "licenses/m065/c9b6f8dc575d-LICENSE",
+          "bytes": 1479,
+          "sha256": "dfffb9ec737eaba985243e95a549bd8c3a4d462032cfe603e2a6704c346427b6",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m065/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m065/dfb14fbb9e7d-NOTICE",
+          "bytes": 631,
+          "sha256": "8548bfb2bc1913396df38c548a6ec60b8dbcac3b0800485a40569c8bdd184471",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/prometheus/client_model",
+      "version": "v0.6.2",
+      "sum": "h1:oBsgwpGs7iVziMvrGhE53c/GrLUsZdHnqNwqPLxwZyk=",
+      "replacement": null,
+      "id": "m066",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m066/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m066/dfb14fbb9e7d-NOTICE",
+          "bytes": 167,
+          "sha256": "6c79faa15168885fb88a316ae0df18f486deafddefdc16826cdc56dfbd421e24",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/prometheus/common",
+      "version": "v0.68.1",
+      "sum": "h1:omjRRl4QP4komogpXuhfeOiisQg7xdy8VM1UY+pStaY=",
+      "replacement": null,
+      "id": "m067",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m067/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m067/dfb14fbb9e7d-NOTICE",
+          "bytes": 178,
+          "sha256": "600244c8052c8c1d307043fafacbc83b429c171dd8e08f5a537c0a54014585ee",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/prometheus/procfs",
+      "version": "v0.20.1",
+      "sum": "h1:XwbrGOIplXW/AU3YhIhLODXMJYyC1isLFfYCsTEycfc=",
+      "replacement": null,
+      "id": "m068",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m068/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m068/dfb14fbb9e7d-NOTICE",
+          "bytes": 237,
+          "sha256": "497fcdb9fae55924c12f55f05cbe83a096662e5c591d79b74e4a8f23bab5ffee",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/puzpuzpuz/xsync/v4",
+      "version": "v4.5.0",
+      "sum": "h1:vOSWu6b57/emh+L/Cw0BeQfvxa/cogFywXHeGUxQxAg=",
+      "replacement": null,
+      "id": "m069",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m069/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/redis/go-redis/v9",
+      "version": "v9.20.0",
+      "sum": "h1:WnQYxLkgO2xiXTCJY0ldIiI8dNqCDlQAG+AtaH7a2a0=",
+      "replacement": null,
+      "id": "m071",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m071/c693279643b8-LICENSE",
+          "bytes": 1318,
+          "sha256": "a3a7dff87da3927db65cb4c87b1cfbc96ca2755704461a485d457be7ae300a86",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/tjfoc/gmsm",
+      "version": "v1.4.1",
+      "sum": "h1:aMe1GlZb+0bLjn+cKTPEvvn9oUEBlJitaZiiBwsbgho=",
+      "replacement": null,
+      "id": "m076",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m076/c693279643b8-LICENSE",
+          "bytes": 11357,
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/twitchtv/twirp",
+      "version": "v8.1.3+incompatible",
+      "sum": "h1:+F4TdErPgSUbMZMwp13Q/KgDVuI7HJXP61mNV3/7iuU=",
+      "replacement": null,
+      "id": "m077",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "_tools/src/github.com/kisielk/errcheck/LICENSE",
+          "public": "licenses/m077/09754063dd13-LICENSE",
+          "bytes": 1056,
+          "sha256": "0ce4c88de32a297069615b5f314fbd4c7ffa806e760856a7c79bf908e6236c0a",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "_tools/src/github.com/kisielk/gotool/LICENSE",
+          "public": "licenses/m077/f3c6319ffcc6-LICENSE",
+          "bytes": 1080,
+          "sha256": "25ad56f47146a8c6e502d5b1eefe145933b460a8b314bbb66bb7fc964b92298b",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "_tools/src/github.com/twitchtv/retool/LICENSE",
+          "public": "licenses/m077/0850e9e05933-LICENSE",
+          "bytes": 11354,
+          "sha256": "3f552a949c0023b9c833138f479bcc9632c7faa5c7bd3f54c6f8d345c7b5e3a3",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m077/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "license_test.go",
+          "public": "licenses/m077/8ac8021266ec-license_test.go",
+          "bytes": 2524,
+          "sha256": "ea129de346d4d3955bd2817f4710cb83c559f78cd62da01ad4ec85a46ebd42ef",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m077/dfb14fbb9e7d-NOTICE",
+          "bytes": 69,
+          "sha256": "79947e17139d654f5b2269f2a42183ee37a749b5149872bec5d57651f6f3a1d4",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/wlynxg/anet",
+      "version": "v0.0.5",
+      "sum": "h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=",
+      "replacement": null,
+      "id": "m080",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m080/c693279643b8-LICENSE",
+          "bytes": 1493,
+          "sha256": "6b8970dbe36fe214fd02b438c06daee19897708e435d761ecd18adc9ef7e7a05",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/xtaci/kcp-go/v5",
+      "version": "v5.6.72",
+      "sum": "h1:FLaQPalgpufJYQRk0OK+gErEhXGLUPjv6FSRPrFR8Lk=",
+      "replacement": null,
+      "id": "m081",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m081/c693279643b8-LICENSE",
+          "bytes": 1073,
+          "sha256": "68eb46479424095361384cbb6b056dd10c0f9bb708796a68bdd830fa7baa6ebb",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/xtaci/smux",
+      "version": "v1.5.57",
+      "sum": "h1:N72VbGoSYxgcm6mPOYX0QzEZNVD3UI/JlVvAtXF+WrY=",
+      "replacement": null,
+      "id": "m082",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m082/c693279643b8-LICENSE",
+          "bytes": 1067,
+          "sha256": "4d853d6e64790ccada70727c25334c50529b25ce57048129aaf6f8b0f2208516",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/zarazaex69/gr",
+      "version": "v0.0.1",
+      "sum": "h1:B2WiCmgpGolnzsO2ItBRG8JjkYY4pZbyhXyF4ZebNU0=",
+      "replacement": null,
+      "id": "m085",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m085/c693279643b8-LICENSE",
+          "bytes": 1495,
+          "sha256": "ff13cea47e8cb1a3363f2367d95070791089a4befa97d07f27c5aae1ae934a6e",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/zarazaex69/j",
+      "version": "v0.0.1",
+      "sum": "h1:a39NFrw6fipURi0qHh3axZIynVJTVT8NO0we8CUCMqE=",
+      "replacement": null,
+      "id": "m086",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m086/c693279643b8-LICENSE",
+          "bytes": 584,
+          "sha256": "d48543a2a9a90a67e2979e010d06adf81c398ca9e4670bd3ee56b49596d13a20",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "github.com/zeebo/xxh3",
+      "version": "v1.1.0",
+      "sum": "h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=",
+      "replacement": null,
+      "id": "m087",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m087/c693279643b8-LICENSE",
+          "bytes": 1371,
+          "sha256": "f19854b341534d1f2314c0c70d9cd2bb4fa1f7c86fffdc4444ca33cccce412ba",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.opentelemetry.io/otel",
+      "version": "v1.44.0",
+      "sum": "h1:JjwHmHpA4iZ3wBxluu2fbbE7j4kqlE8jXyAyPXH7HqU=",
+      "replacement": null,
+      "id": "m089",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m089/c693279643b8-LICENSE",
+          "bytes": 12892,
+          "sha256": "1ae07514be1d7bb33f0698f8d91fb51b8b9fe1463157ec1c72081a49b9bc6f40",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.uber.org/atomic",
+      "version": "v1.11.0",
+      "sum": "h1:ZvwS0R+56ePWxUNi+Atn9dWONBPp/AUETXlHW0DxSjE=",
+      "replacement": null,
+      "id": "m090",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE.txt",
+          "public": "licenses/m090/d0ed4cc3fb70-LICENSE.txt",
+          "bytes": 1067,
+          "sha256": "edbb5a4d165ac69376c765b551c0662ff42bea87e1f1eda85f42ac90c34b09d0",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.uber.org/multierr",
+      "version": "v1.11.0",
+      "sum": "h1:blXXJkSxSSfBVBlC76pxqeO+LN3aDfLQo+309xJstO0=",
+      "replacement": null,
+      "id": "m091",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE.txt",
+          "public": "licenses/m091/d0ed4cc3fb70-LICENSE.txt",
+          "bytes": 1072,
+          "sha256": "dcdabe03bef2382a130640d1c3a4cd5ec42aba1035095c38272fde694eb72405",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.uber.org/zap",
+      "version": "v1.28.0",
+      "sum": "h1:IZzaP1Fv73/T/pBMLk4VutPl36uNC+OSUh3JLG3FIjo=",
+      "replacement": null,
+      "id": "m092",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m092/c693279643b8-LICENSE",
+          "bytes": 1072,
+          "sha256": "c2b97b3281be272711909076c8402499b4b5a3216196af47a25b1d3674d86152",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.uber.org/zap/exp",
+      "version": "v0.3.0",
+      "sum": "h1:6JYzdifzYkGmTdRR59oYH+Ng7k49H9qVpWwNSsGJj3U=",
+      "replacement": null,
+      "id": "m093",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m093/c693279643b8-LICENSE",
+          "bytes": 1072,
+          "sha256": "c2b97b3281be272711909076c8402499b4b5a3216196af47a25b1d3674d86152",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "go.yaml.in/yaml/v3",
+      "version": "v3.0.4",
+      "sum": "h1:tfq32ie2Jv2UxXFdLJdh3jXuOzWiL1fo0bu/FbuKpbc=",
+      "replacement": null,
+      "id": "m094",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m094/c693279643b8-LICENSE",
+          "bytes": 2151,
+          "sha256": "d18f6323b71b0b768bb5e9616e36da390fbd39369a81807cca352de4e4e6aa0b",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m094/dfb14fbb9e7d-NOTICE",
+          "bytes": 560,
+          "sha256": "f6c2dd3a67b576eafb89b80200b8b1627230bf3821a0c14cb99a22ac19107d00",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "version": "v0.53.0",
+      "sum": "h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=",
+      "replacement": null,
+      "id": "m096",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m096/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/exp",
+      "version": "v0.0.0-20260603202125-055de637280b",
+      "sum": "h1:v1uXiEBHo8QA0LiGCo7UgHMzHT4Kdfpl2zmtH5vaP1Q=",
+      "replacement": null,
+      "id": "m097",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m097/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/mobile",
+      "version": "v0.0.0-20260520154334-0e4426e1883d",
+      "sum": "h1:pWrEKZvKeqE2xPrylgBjgCyJSpPPt3L2WG2DmA+Xccg=",
+      "replacement": null,
+      "id": "m098",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m098/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/mod",
+      "version": "v0.36.0",
+      "sum": "h1:JJjpVx6myfUsUdAzZuOSTTmRE0PfZeNWzzvKrP7amb4=",
+      "replacement": null,
+      "id": "m099",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m099/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/net",
+      "version": "v0.55.0",
+      "sum": "h1:bcvxaJn3e1U6InsFWt1JUq1aSjnRxLzT2rtD2KfkDF8=",
+      "replacement": null,
+      "id": "m100",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m100/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/sync",
+      "version": "v0.21.0",
+      "sum": "h1:HLII4xRRTtCRkxYp4HNFF0Js/Og6q2i++KXbg0gHCwM=",
+      "replacement": null,
+      "id": "m101",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m101/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/sys",
+      "version": "v0.46.0",
+      "sum": "h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=",
+      "replacement": null,
+      "id": "m102",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m102/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/text",
+      "version": "v0.38.0",
+      "sum": "h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=",
+      "replacement": null,
+      "id": "m103",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m103/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/time",
+      "version": "v0.15.0",
+      "sum": "h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=",
+      "replacement": null,
+      "id": "m104",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m104/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/tools",
+      "version": "v0.45.0",
+      "sum": "h1:18qN3FAooORvApf5XjCXgsuayZOEtXf6JK18I3+ONa8=",
+      "replacement": null,
+      "id": "m105",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "copyright/copyright.go",
+          "public": "licenses/m105/a1c6d6b85955-copyright.go",
+          "bytes": 2392,
+          "sha256": "baba6d0b0c166373f5691e3982176d15519c6150bc9ead641b89366670618bf0",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "copyright/copyright_test.go",
+          "public": "licenses/m105/af62cd3f3ee9-copyright_test.go",
+          "bytes": 446,
+          "sha256": "4496ed3ad571fb90f8abd650c6973565c834d650cff2d2c57cb970ff462dc4bf",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m105/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "golang.org/x/xerrors",
+      "version": "v0.0.0-20240903120638-7835f813f4da",
+      "sum": "h1:noIWHXmPHxILtqtCOPIhSt0ABwskkZKjD3bXGnZGpNY=",
+      "replacement": null,
+      "id": "m106",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m106/c693279643b8-LICENSE",
+          "bytes": 1453,
+          "sha256": "f9a2df4fb1d45cef691b8bc2e35776f8bee5af5b3696d48d4547635d7858bf91",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "google.golang.org/genproto",
+      "version": "v0.0.0-20260523011958-0a33c5d7ca68",
+      "sum": "h1:cTHF8xtqtBN5sQ4dcoNwOS6FFejvFTkWQbZXsTU3trM=",
+      "replacement": null,
+      "id": "m108",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m108/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "google.golang.org/genproto/googleapis/api",
+      "version": "v0.0.0-20260526163538-3dc84a4a5aaa",
+      "sum": "h1:Kjn0N0tCrDgiAFW+lGO4JZ3ck44CehvJQMAwj9QF0G8=",
+      "replacement": null,
+      "id": "m109",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m109/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20260526163538-3dc84a4a5aaa",
+      "sum": "h1:mZHHdPZl0dbGHCflZgAq/Q468DWVFcU2whhB2KAo8fk=",
+      "replacement": null,
+      "id": "m110",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m110/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "version": "v1.82.1",
+      "sum": "h1:NnAxzGRA0677vCa4BUkOAnO5+FfQqVl9iUXeD0IqcGE=",
+      "replacement": null,
+      "id": "m111",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m111/c693279643b8-LICENSE",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE.txt",
+          "public": "licenses/m111/b810ebe4ffda-NOTICE.txt",
+          "bytes": 554,
+          "sha256": "693ff28ec216d5112ac1bbfe64ef539005867d1c7bd427b57d579683293b947f",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "version": "v1.36.11",
+      "sum": "h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=",
+      "replacement": null,
+      "id": "m112",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m112/c693279643b8-LICENSE",
+          "bytes": 1479,
+          "sha256": "4835612df0098ca95f8e7d9e3bffcb02358d435dbb38057c844c99d7f725eb20",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "sum": "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+      "replacement": null,
+      "id": "m114",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m114/c693279643b8-LICENSE",
+          "bytes": 2151,
+          "sha256": "d18f6323b71b0b768bb5e9616e36da390fbd39369a81807cca352de4e4e6aa0b",
+          "identicalExistingOrdinary": []
+        },
+        {
+          "relative": "NOTICE",
+          "public": "licenses/m114/dfb14fbb9e7d-NOTICE",
+          "bytes": 560,
+          "sha256": "f6c2dd3a67b576eafb89b80200b8b1627230bf3821a0c14cb99a22ac19107d00",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    },
+    {
+      "module": "rsc.io/qr",
+      "version": "v0.2.0",
+      "sum": "h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=",
+      "replacement": null,
+      "id": "m117",
+      "architectures": [
+        "arm64"
+      ],
+      "texts": [
+        {
+          "relative": "LICENSE",
+          "public": "licenses/m117/c693279643b8-LICENSE",
+          "bytes": 1479,
+          "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+          "identicalExistingOrdinary": []
+        }
+      ],
+      "licenceOrigin": "selected-cache-version"
+    }
+  ],
+  "missing": [],
+  "standardLibrary": {
+    "version": "go1.26.8",
+    "public": "licenses/go1.26.8/LICENSE"
+  },
+  "historicalDelta": {
+    "previousModuleCount": 117,
+    "removedModuleCount": 26,
+    "removedModules": [
+      "apollo.local/task-6b-node-api-gate",
+      "github.com/ALTIS13/Apollo.RGA.Client/access-bridge",
+      "github.com/andybalholm/brotli",
+      "github.com/apernet/quic-go",
+      "github.com/cloudflare/circl",
+      "github.com/ghodss/yaml",
+      "github.com/google/btree",
+      "github.com/juju/ratelimit",
+      "github.com/miekg/dns",
+      "github.com/pelletier/go-toml",
+      "github.com/pires/go-proxyproto",
+      "github.com/quic-go/qpack",
+      "github.com/refraction-networking/utls",
+      "github.com/robfig/cron/v3",
+      "github.com/sagernet/sing",
+      "github.com/sagernet/sing-shadowsocks",
+      "github.com/vishvananda/netlink",
+      "github.com/vishvananda/netns",
+      "github.com/xtls/reality",
+      "github.com/xtls/xray-core",
+      "go.etcd.io/bbolt",
+      "go4.org/netipx",
+      "golang.zx2c4.com/wireguard",
+      "gopkg.in/yaml.v2",
+      "gvisor.dev/gvisor",
+      "lukechampine.com/blake3"
+    ],
+    "changedExternalVersions": [
+      {
+        "module": "github.com/pion/stun/v3",
+        "previousVersion": "v3.1.6",
+        "currentVersion": "v3.1.5"
+      },
+      {
+        "module": "golang.org/x/net",
+        "previousVersion": "v0.56.0",
+        "currentVersion": "v0.55.0"
+      }
+    ]
+  },
+  "nativeSource": {
+    "portableRoot": "source/olc",
+    "files": 567
+  },
+  "scope": "actual ELF Go linked modules, not all MVS or every NDK/system component",
+  "originalElfInventoryVerified": true,
+  "packagedElfVerification": "separate APK acceptance required",
+  "providerBackport": {
+    "upstream": "7ac128ac8bc59bd008f116f072c0a2b14c70395f",
+    "scope": "VK auth/engine + VP8 RED; local managed lifecycle/privacy corrections; no DTLS profile or module change"
+  },
+  "mtsBackport": {
+    "upstream": "b6cb4c417d17dfb7b9b780d7c37280df02e5dc6e",
+    "scope": "MTS guest auth/VP9/explicit ICE-TCP; RGA pending-start Close ownership and secret-free errors; no dependency/DTLS profile change"
+  }
+}

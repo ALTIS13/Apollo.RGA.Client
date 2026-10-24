@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS bridge_installations (
 );
 
 -- migration-step
+-- PostgreSQL requires an explicit unique key matching the composite QA FK.
+CREATE UNIQUE INDEX IF NOT EXISTS bridge_installations_subject_identity_idx
+    ON bridge_installations (installation_id, panel_instance, user_id);
+
+-- migration-step
 CREATE TABLE IF NOT EXISTS bridge_link_challenges (
     challenge_id VARCHAR(128) PRIMARY KEY,
     panel_instance VARCHAR(64) NOT NULL,
@@ -91,5 +96,101 @@ CREATE TABLE IF NOT EXISTS bridge_budget_leases (
         ON DELETE RESTRICT,
     FOREIGN KEY (installation_id)
         REFERENCES bridge_installations (installation_id)
+        ON DELETE RESTRICT
+);
+
+-- migration-step
+-- Diagnostic journaling only. This switch is not a network admission grant.
+CREATE TABLE IF NOT EXISTS bridge_qa_installations (
+    installation_id VARCHAR(128) PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    FOREIGN KEY (installation_id)
+        REFERENCES bridge_installations (installation_id)
+        ON DELETE RESTRICT
+);
+
+-- migration-step
+CREATE TABLE IF NOT EXISTS bridge_qa_sessions (
+    session_id VARCHAR(128) PRIMARY KEY,
+    panel_instance VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    installation_id VARCHAR(128) NOT NULL,
+    -- NULL means a legacy/unadmitted journal row and is never renewable.
+    policy_revision BIGINT CHECK (policy_revision > 0),
+    deadline TIMESTAMPTZ NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'closed', 'unconfirmed')),
+    last_sequence BIGINT NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+    client_to_exit_bytes BIGINT NOT NULL DEFAULT 0 CHECK (client_to_exit_bytes >= 0),
+    exit_to_client_bytes BIGINT NOT NULL DEFAULT 0 CHECK (exit_to_client_bytes >= 0),
+    terminal_client_to_exit_bytes BIGINT CHECK (terminal_client_to_exit_bytes >= 0),
+    terminal_exit_to_client_bytes BIGINT CHECK (terminal_exit_to_client_bytes >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    closed_at TIMESTAMPTZ,
+    CHECK ((terminal_client_to_exit_bytes IS NULL) = (terminal_exit_to_client_bytes IS NULL)),
+    CHECK (
+        (status = 'active' AND closed_at IS NULL AND terminal_client_to_exit_bytes IS NULL)
+        OR (status = 'closed' AND closed_at IS NOT NULL
+            AND terminal_client_to_exit_bytes IS NOT NULL
+            AND terminal_client_to_exit_bytes = client_to_exit_bytes
+            AND terminal_exit_to_client_bytes = exit_to_client_bytes)
+        OR (status = 'unconfirmed' AND closed_at IS NOT NULL)
+    ),
+    FOREIGN KEY (panel_instance, user_id)
+        REFERENCES bridge_subjects (panel_instance, user_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (installation_id)
+        REFERENCES bridge_qa_installations (installation_id)
+        ON DELETE RESTRICT
+);
+
+-- migration-step
+-- Existing QA rows intentionally remain NULL: migration cannot invent the
+-- policy revision under which their original admission occurred.
+ALTER TABLE bridge_qa_sessions
+    ADD COLUMN IF NOT EXISTS policy_revision BIGINT CHECK (policy_revision > 0);
+
+-- migration-step
+-- CREATE TABLE IF NOT EXISTS does not retrofit constraints on an existing
+-- journal, so add this FK idempotently for both fresh and existing databases.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'bridge_qa_sessions'::regclass
+          AND conname = 'bridge_qa_sessions_installation_subject_fkey'
+    ) THEN
+        ALTER TABLE bridge_qa_sessions
+            ADD CONSTRAINT bridge_qa_sessions_installation_subject_fkey
+            FOREIGN KEY (installation_id, panel_instance, user_id)
+            REFERENCES bridge_installations (installation_id, panel_instance, user_id)
+            ON DELETE RESTRICT;
+    END IF;
+END
+$$;
+
+-- migration-step
+CREATE INDEX IF NOT EXISTS bridge_qa_sessions_installation_idx
+    ON bridge_qa_sessions (installation_id, status);
+
+-- migration-step
+CREATE UNIQUE INDEX IF NOT EXISTS bridge_qa_sessions_subject_identity_idx
+    ON bridge_qa_sessions (session_id, panel_instance, user_id, installation_id);
+
+-- migration-step
+-- A consumed join nonce is stored only as a digest and cannot be reused after
+-- reconnect or process restart. It is not a grant or subscription bearer.
+CREATE TABLE IF NOT EXISTS bridge_qa_join_uses (
+    nonce_sha256 BYTEA PRIMARY KEY CHECK (octet_length(nonce_sha256) = 32),
+    session_id VARCHAR(128) NOT NULL UNIQUE,
+    panel_instance VARCHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    installation_id VARCHAR(128) NOT NULL,
+    room_id VARCHAR(128) NOT NULL,
+    country CHAR(2) NOT NULL CHECK (country ~ '^[A-Z]{2}$'),
+    consumed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (session_id, panel_instance, user_id, installation_id)
+        REFERENCES bridge_qa_sessions (session_id, panel_instance, user_id, installation_id)
         ON DELETE RESTRICT
 );

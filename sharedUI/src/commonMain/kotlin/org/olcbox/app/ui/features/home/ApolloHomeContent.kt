@@ -79,6 +79,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -92,6 +94,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import multiplatform_app.sharedui.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
+import org.jetbrains.compose.resources.StringResource
 import org.olcbox.app.data.model.LocationEntry
 import org.olcbox.app.net.LocationKind
 import org.olcbox.app.ui.HostPresentation
@@ -106,6 +109,9 @@ import org.olcbox.app.ui.theme.LocalPkPalette
 import org.olcbox.app.vpn.PersonalActivePath
 import org.olcbox.app.vpn.PersonalTunnelPhase
 import org.olcbox.app.vpn.PersonalTunnelUiState
+import org.olcbox.app.vpn.OlcChannelRole
+import org.olcbox.app.vpn.OlcConnectionProgress
+import org.olcbox.app.vpn.OlcConnectionStage
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -114,6 +120,20 @@ import kotlin.math.sin
 internal enum class ApolloConnectionNotice { NONE, FAILED, CHECKING, BLOCKED }
 enum class ApolloHeroPhase { IDLE, CONNECTING, CONNECTED, ERROR }
 private class OrbitCheckpoint(var angle: Float = 0f)
+
+internal fun olcConnectionMessage(progress: OlcConnectionProgress): StringResource? = when (progress.stage) {
+    OlcConnectionStage.Inactive -> null
+    OlcConnectionStage.Connecting -> if (progress.channel == OlcChannelRole.Reserve)
+        Res.string.apollo_olc_connecting_reserve else Res.string.apollo_olc_connecting_primary
+    OlcConnectionStage.ConnectingReserve -> Res.string.apollo_olc_primary_failed_reserve
+    OlcConnectionStage.Checking -> if (progress.channel == OlcChannelRole.Reserve)
+        Res.string.apollo_olc_checking_reserve else Res.string.apollo_olc_checking_primary
+    OlcConnectionStage.ChannelReady -> if (progress.channel == OlcChannelRole.Reserve)
+        Res.string.apollo_olc_ready_reserve else Res.string.apollo_olc_ready_primary
+    OlcConnectionStage.Unavailable -> Res.string.apollo_olc_unavailable
+    OlcConnectionStage.Denied -> Res.string.apollo_olc_denied
+    OlcConnectionStage.Stopping -> Res.string.apollo_olc_stopping
+}
 
 @Composable
 internal fun ApolloHomeContent(
@@ -136,10 +156,15 @@ internal fun ApolloHomeContent(
     onDismissNotice: () -> Unit = {},
     ambientMotionEnabled: Boolean = false,
     routeMotion: (@Composable (ApolloHeroPhase, Modifier) -> Boolean)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    olcConnection: OlcConnectionProgress = OlcConnectionProgress()
 ) {
-    val ordinary = remember(locations) {
-        locations.mapNotNull { item ->
+    val subscriptionChoices = remember(locations, selectedLocationId) {
+        ApolloSubscriptions(locations, selectedLocationId)
+    }
+    val visibleLocations = subscriptionChoices.visibleLocations
+    val ordinary = remember(visibleLocations) {
+        visibleLocations.mapNotNull { item ->
             val config = item.config ?: return@mapNotNull null
             if (config.kind == LocationKind.Olcrtc) return@mapNotNull null
             val entry = LocationEntry.from(item.storageId, config, item.subscriptionUrl, item.subscriptionOriginLink, item.metadata)
@@ -148,13 +173,22 @@ internal fun ApolloHomeContent(
     }
     // Task 5 controls which modes are admitted. This is presentation grouping,
     // not a second security filter: an explicitly opted-in mode gets its own area.
-    val experimental = locations.filter { it.config?.kind == LocationKind.Olcrtc }
+    val experimental = visibleLocations.filter { it.config?.kind == LocationKind.Olcrtc }
     val selectedPair = ordinary.firstOrNull { it.first.storageId == selectedLocationId }
     val selected = selectedPair?.second
     val selectedExperimental = experimental.any { it.storageId == selectedLocationId }
     val personalActive = personalTunnel.phase != PersonalTunnelPhase.Inactive
-    val visualConnected = if (personalActive) personalTunnel.phase == PersonalTunnelPhase.Working else isConnected
-    val visualConnecting = if (personalActive) {
+    val olcActive = olcConnection.active
+    val olcChannelReady = olcConnection.stage == OlcConnectionStage.ChannelReady
+    val olcMessage = olcConnectionMessage(olcConnection)?.let { stringResource(it) }
+    val olcChannelTitle = stringResource(if (olcConnection.channel == OlcChannelRole.Reserve)
+        Res.string.apollo_olc_reserve_channel else Res.string.apollo_olc_primary_channel)
+    val firstLaunch = locations.isEmpty() && subscription.state == SubscriptionDisplayState.UNKNOWN &&
+        !personalActive && !olcActive && !isConnected && !isConnecting
+    // Render the completed channel check, not a new connectivity/admission grant.
+    val visualConnected = if (olcActive) olcChannelReady
+        else if (personalActive) personalTunnel.phase == PersonalTunnelPhase.Working else isConnected
+    val visualConnecting = if (olcActive) olcConnection.connecting else if (personalActive) {
         personalTunnel.phase == PersonalTunnelPhase.Switching || personalTunnel.phase == PersonalTunnelPhase.Checking
     } else isConnecting
     val activePathTitle = when (personalTunnel.activePath) {
@@ -172,6 +206,7 @@ internal fun ApolloHomeContent(
         SubscriptionDisplayState.REFRESH_FAILED -> stringResource(Res.string.apollo_status_refresh_failed)
     }
     val connectionTitle = when {
+        olcMessage != null -> olcMessage
         personalTunnel.phase == PersonalTunnelPhase.Switching -> "Переключаемся"
         personalTunnel.phase == PersonalTunnelPhase.Checking -> "Проверяем"
         personalTunnel.phase == PersonalTunnelPhase.Working -> "Работает"
@@ -182,6 +217,7 @@ internal fun ApolloHomeContent(
         else -> stringResource(Res.string.apollo_disconnected)
     }
     val linkCode = when {
+        olcActive -> olcChannelTitle
         personalActive -> "OLCRTC // ${connectionTitle.uppercase()}"
         notice == ApolloConnectionNotice.FAILED || notice == ApolloConnectionNotice.BLOCKED ->
             stringResource(Res.string.apollo_link_failed)
@@ -191,23 +227,27 @@ internal fun ApolloHomeContent(
         else -> stringResource(Res.string.apollo_link_idle)
     }
     val actionTitle = when {
+        olcChannelReady -> stringResource(Res.string.apollo_disconnect)
+        olcActive -> stringResource(if (olcConnection.connecting) Res.string.apollo_cancel
+            else Res.string.apollo_olc_stop)
         personalActive -> "Остановить"
+        firstLaunch -> stringResource(Res.string.apollo_add)
         isConnected -> stringResource(Res.string.apollo_disconnect)
         isConnecting -> stringResource(Res.string.apollo_cancel)
         else -> stringResource(Res.string.apollo_connect)
     }
-    val compactActionTitle = if (!personalActive && isConnecting && !isConnected)
+    val compactActionTitle = if (olcConnection.connecting || (!olcActive && !personalActive && isConnecting && !isConnected))
         stringResource(Res.string.apollo_cancel_short) else actionTitle
     val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED,
         SubscriptionDisplayState.LIMITED, SubscriptionDisplayState.DEVICE_DENIED)
-    val actionEnabled = personalActive || isConnected || isConnecting ||
+    val actionEnabled = firstLaunch || olcActive || personalActive || isConnected || isConnecting ||
         (canStartVpn && !accessBlocked && selectedLocationId != null)
     val unknownCountry = stringResource(Res.string.apollo_country_unknown)
-    val selectedCountry = selected?.let { localizedCountry(it.country, unknownCountry) }
-    val actionFlag = if (personalActive && personalTunnel.activePath != PersonalActivePath.Ordinary) {
+    val selectedCountry = selected?.takeUnless { olcActive }?.let { localizedCountry(it.country, unknownCountry) }
+    val actionFlag = if (olcActive || (personalActive && personalTunnel.activePath != PersonalActivePath.Ordinary)) {
         null
     } else selected?.flag
-    val actionDescription = if (personalActive) "Остановить VPN" else
+    val actionDescription = if (firstLaunch || olcActive) actionTitle else if (personalActive) "Остановить VPN" else
         listOfNotNull(actionTitle, selectedCountry).joinToString(", ")
     val route = when {
         selected?.relay != null -> stringResource(Res.string.apollo_route_configured,
@@ -217,6 +257,10 @@ internal fun ApolloHomeContent(
     val palette = LocalPkPalette.current
     val signalColor by animateColorAsState(
         targetValue = when {
+            olcActive && olcConnection.stage in setOf(OlcConnectionStage.Unavailable, OlcConnectionStage.Denied) ->
+                MaterialTheme.colorScheme.error
+            olcChannelReady -> palette.success
+            olcActive -> if (visualConnecting) palette.warning else MaterialTheme.colorScheme.secondary
             personalTunnel.phase == PersonalTunnelPhase.Unavailable -> MaterialTheme.colorScheme.error
             personalActive && visualConnecting -> palette.warning
             personalActive && visualConnected -> palette.success
@@ -235,7 +279,7 @@ internal fun ApolloHomeContent(
     val scrollState = rememberScrollState()
     var heroHeightPx by remember { mutableIntStateOf(0) }
     var statusRowHeightPx by remember { mutableIntStateOf(0) }
-    val compactDestination = if (personalActive) {
+    val compactDestination = if (olcActive) olcChannelTitle else if (personalActive) {
         when (personalTunnel.activePath) {
             PersonalActivePath.OlcRtc -> "OlcRTC"
             PersonalActivePath.Ordinary -> selected?.let { destination(it) } ?: "VPN"
@@ -265,8 +309,10 @@ internal fun ApolloHomeContent(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f).padding(start = 10.dp)
                 )
-                IconButton(onClick = onAdd, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Outlined.Add, contentDescription = stringResource(Res.string.apollo_add))
+                if (!firstLaunch) {
+                    IconButton(onClick = onAdd, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Outlined.Add, contentDescription = stringResource(Res.string.apollo_add))
+                    }
                 }
                 if (showSettings) {
                     IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
@@ -297,7 +343,7 @@ internal fun ApolloHomeContent(
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(compactDestination.orEmpty(), style = MaterialTheme.typography.titleSmall,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            selected?.let {
+                            selected?.takeUnless { olcActive }?.let {
                                 Text(hostMode(it, selectedPair.first.config?.kind),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -354,26 +400,32 @@ internal fun ApolloHomeContent(
                             Text(linkCode, style = MaterialTheme.typography.labelSmall,
                                 fontFamily = FontFamily.Monospace, letterSpacing = 0.5.sp,
                                 color = signalColor.copy(alpha = 0.80f),
+                                modifier = Modifier.fillMaxWidth(),
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(connectionTitle, style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.SemiBold, color = signalColor)
+                            Text(connectionTitle, style = if (olcActive) MaterialTheme.typography.bodyLarge
+                                else MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.SemiBold, color = signalColor,
+                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                         }
                         ApolloStatusSignal(signalColor, visualConnected, visualConnecting, ambientMotionEnabled)
                     }
-                    if (selected != null) {
+                    if (olcActive) {
+                        // The chosen ordinary host is not evidence of this channel's active route.
+                    } else if (selected != null) {
                         Text(hostMode(selected, selectedPair.first.config?.kind),
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.semantics { testTag = "apollo-selected-mode" })
                     } else if (selectedExperimental) {
                         Text(stringResource(Res.string.apollo_experimental), style = MaterialTheme.typography.titleLarge)
                     } else {
-                        Text(stringResource(Res.string.apollo_no_destination), style = MaterialTheme.typography.bodyLarge)
+                        Text(stringResource(if (firstLaunch) Res.string.apollo_no_hosts
+                            else Res.string.apollo_no_destination), style = MaterialTheme.typography.bodyLarge)
                     }
                     if (accessBlocked) {
                         Text(statusTitle, style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.error)
                     }
-                    if (notice != ApolloConnectionNotice.NONE) {
+                    if (!olcActive && notice != ApolloConnectionNotice.NONE) {
                         val noticeText = when (notice) {
                             ApolloConnectionNotice.FAILED -> stringResource(Res.string.apollo_connection_failed)
                             ApolloConnectionNotice.CHECKING -> stringResource(Res.string.apollo_connection_checking)
@@ -408,7 +460,7 @@ internal fun ApolloHomeContent(
                         label = "primary action press"
                     )
                     Button(
-                        onClick = onAction,
+                        onClick = if (firstLaunch) onAdd else onAction,
                         enabled = actionEnabled,
                         modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 64.dp)
                             .graphicsLayer(scaleX = actionScale, scaleY = actionScale)
@@ -436,13 +488,17 @@ internal fun ApolloHomeContent(
                         )
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            ApolloActionFlag(actionFlag, visualConnecting, ambientMotionEnabled,
-                                tag = "apollo-action-flag")
+                            if (!firstLaunch) {
+                                ApolloActionFlag(actionFlag, visualConnecting, ambientMotionEnabled,
+                                    tag = "apollo-action-flag")
+                            }
                             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(actionTitle, style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     textAlign = TextAlign.Center,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    maxLines = if (firstLaunch) 2 else 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth())
                                 selectedCountry?.takeUnless { personalActive }?.let { country ->
                                     Text(country, style = MaterialTheme.typography.labelMedium,
                                         textAlign = TextAlign.Center, maxLines = 1,
@@ -450,14 +506,18 @@ internal fun ApolloHomeContent(
                                         modifier = Modifier.semantics { testTag = "apollo-action-country" })
                                 }
                             }
-                            Text(if (personalActive || isConnected || isConnecting) "×" else "→",
-                                style = MaterialTheme.typography.titleLarge,
-                                color = Color.White.copy(alpha = 0.78f),
-                                textAlign = TextAlign.Center, maxLines = 1,
-                                modifier = Modifier.width(32.dp).clearAndSetSemantics { })
+                            if (!firstLaunch) {
+                                Text(if (olcActive || personalActive || isConnected || isConnecting) "×" else "→",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = Color.White.copy(alpha = 0.78f),
+                                    textAlign = TextAlign.Center, maxLines = 1,
+                                    modifier = Modifier.width(32.dp).clearAndSetSemantics { })
+                            }
                         }
                     }
-                    if (personalActive) {
+                    if (olcActive) {
+                        // Route/Connected visuals await full-TUN qualification, not SOCKS readiness.
+                    } else if (personalActive) {
                         Text(activePathTitle, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.semantics { testTag = "apollo-active-path" })
@@ -495,9 +555,13 @@ internal fun ApolloHomeContent(
                 SubscriptionDisplayState.DEVICE_DENIED -> MaterialTheme.colorScheme.error
                 SubscriptionDisplayState.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
             }
-            Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(18.dp),
+            if (!firstLaunch) Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(18.dp),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier.semantics { testTag = "apollo-subscription-card" }) {
+                Column {
+                ApolloSubscriptionSelector(subscriptionChoices,
+                    locked = olcActive || isConnected || isConnecting || personalActive,
+                    onLocationSelected = onLocationSelected)
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -530,7 +594,7 @@ internal fun ApolloHomeContent(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    if (locations.any { !it.subscriptionUrl.isNullOrBlank() }) {
+                    if (visibleLocations.any { !it.subscriptionUrl.isNullOrBlank() }) {
                         IconButton(onClick = onRefresh, enabled = !isRefreshing,
                             modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Outlined.Refresh,
@@ -539,49 +603,52 @@ internal fun ApolloHomeContent(
                         }
                     }
                 }
+                }
             }
 
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(stringResource(Res.string.apollo_destinations),
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.semantics { heading() })
-                Text(stringResource(Res.string.apollo_single_connection_note),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (ordinary.isEmpty()) {
-                Text(stringResource(Res.string.apollo_no_hosts), style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedButton(onClick = onAdd, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
-                    Text(stringResource(Res.string.apollo_add))
+            if (!firstLaunch) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(stringResource(Res.string.apollo_destinations),
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.semantics { heading() })
+                    Text(stringResource(Res.string.apollo_single_connection_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ordinary.groupBy { it.second.country }.forEach { (country, hosts) ->
-                        val sharedIngress = hosts.map { (_, host) ->
-                            host.relay?.let { stringResource(Res.string.apollo_ingress_configured) }
-                        }.distinct().singleOrNull()
-                        ApolloCountryHostCard(
-                            countryTitle = destination(hosts.first().second),
-                            sharedIngress = sharedIngress,
-                            choices = hosts.map { (item, host) ->
-                                val protocol = if (host.protocol == "Протокол не указан")
-                                    stringResource(Res.string.apollo_protocol_unknown) else host.protocol
-                                val ingress = host.relay?.let {
-                                    stringResource(Res.string.apollo_ingress_configured)
-                                }
-                                ApolloHostChoice(
-                                    id = item.storageId,
-                                    destination = destination(host),
-                                    mode = hostMode(host, item.config?.kind),
-                                    technical = protocol,
-                                    selected = item.storageId == selectedLocationId,
-                                    ingress = ingress
-                                )
-                            },
-                            onSelect = onLocationSelected,
-                            modifier = Modifier.semantics { testTag = "apollo-group-$country" }
-                        )
+                if (ordinary.isEmpty()) {
+                    Text(stringResource(Res.string.apollo_no_hosts), style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedButton(onClick = onAdd, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
+                        Text(stringResource(Res.string.apollo_add))
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ordinary.groupBy { it.second.country }.forEach { (country, hosts) ->
+                            val sharedIngress = hosts.map { (_, host) ->
+                                host.relay?.let { stringResource(Res.string.apollo_ingress_configured) }
+                            }.distinct().singleOrNull()
+                            ApolloCountryHostCard(
+                                countryTitle = destination(hosts.first().second),
+                                sharedIngress = sharedIngress,
+                                choices = hosts.map { (item, host) ->
+                                    val protocol = if (host.protocol == "Протокол не указан")
+                                        stringResource(Res.string.apollo_protocol_unknown) else host.protocol
+                                    val ingress = host.relay?.let {
+                                        stringResource(Res.string.apollo_ingress_configured)
+                                    }
+                                    ApolloHostChoice(
+                                        id = item.storageId,
+                                        destination = destination(host),
+                                        mode = hostMode(host, item.config?.kind),
+                                        technical = protocol,
+                                        selected = item.storageId == selectedLocationId,
+                                        ingress = ingress
+                                    )
+                                },
+                                onSelect = onLocationSelected,
+                                modifier = Modifier.semantics { testTag = "apollo-group-$country" }
+                            )
+                        }
                     }
                 }
             }

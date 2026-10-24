@@ -94,6 +94,7 @@ class HomeScreenViewModel(
     val state get() = _state.asStateFlow()
     val logs get() = vpnManager.logs
     val personalTunnel get() = vpnManager.personalTunnel
+    val olcConnection get() = vpnManager.olcConnection
 
     /**
      * Passed straight through rather than copied into [HomeScreenState]: it is
@@ -527,13 +528,17 @@ class HomeScreenViewModel(
         _state.update { it.copy(failure = null) }
     }
 
-    /** Stop never toggles into Start while a personal TUN or failed cleanup may remain. */
+    /** Stop never toggles into Start while an owned transport or failed cleanup may remain. */
     fun stopPersonalVpn() {
         cancelAutomaticSelection()
         vpnManager.stopVpn()
     }
 
     fun ToggleVpn() {
+        if (vpnManager.olcConnection.value.active) {
+            stopPersonalVpn()
+            return
+        }
         val status = vpnManager.status.value
         val selectedOnly = selectedOnlyForNextToggle
         selectedOnlyForNextToggle = false

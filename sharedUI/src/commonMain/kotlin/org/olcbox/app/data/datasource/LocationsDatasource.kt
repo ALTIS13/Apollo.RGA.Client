@@ -60,6 +60,10 @@ internal typealias SubscriptionFailureSink = (SubscriptionRefreshError, Int?) ->
 interface LocationsDataSource {
     suspend fun loadLocationBundle(): LocationBundleV4?
     suspend fun saveLocationBundle(bundle: LocationBundleV4)
+    /** Unsupported stores must reject fenced writes; never degrade to an ordinary save. */
+    suspend fun saveLocationBundleFenced(
+        bundle: LocationBundleV4, fence: org.olcbox.app.data.repository.SubscriptionFetchFence
+    ): Boolean = false
     suspend fun loadLegacyLocations(): List<Pair<String, String>>
     suspend fun loadLegacyActiveLocationId(): String?
     suspend fun loadDeviceIdentity(): String? = null
@@ -88,8 +92,31 @@ class LocationsRepositoryImpl(
     private val nowEpochMs: () -> Long = { kotlin.time.Clock.System.now().toEpochMilliseconds() },
     private val cryptCodec: CryptCodec? = CryptCodec.default(),
     private val partnerLinkResolver: PartnerLinkResolver? = HttpPartnerLinkResolver(httpClient),
-    private val runtimePolicy: RuntimeLocationPolicy = RuntimeLocationPolicy.OrdinaryOnly
+    private val runtimePolicy: RuntimeLocationPolicy = RuntimeLocationPolicy.OrdinaryOnly,
+    private val proxyHttpClientFactory: (SubscriptionFetchProxy) -> HttpClient = {
+        createProxyHttpClient(it, followRedirects = false)
+    }
 ) : LocationsRepository {
+    /** A false or throwing personal fence is never permission to use default HTTP. */
+    private fun SubscriptionFetchProxy?.fenceAllows(url: String? = null): Boolean {
+        val guard = this?.fence ?: return true
+        return try {
+            guard.current() && (url == null || guard.allowsUrl(url)) && guard.current()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun SubscriptionFetchProxy?.fenceAllowsOrFails(
+        url: String?, onFailure: SubscriptionFailureSink?
+    ): Boolean {
+        if (fenceAllows(url)) return true
+        onFailure?.invoke(SubscriptionRefreshError.SessionChanged, null)
+        return false
+    }
+
     private data class ImportSource(
         val content: String,
         val subscriptionUrl: String? = null,
@@ -218,9 +245,26 @@ class LocationsRepositoryImpl(
         }
     }
 
-    private suspend fun saveBundleUnlocked(bundle: LocationBundleV4) {
-        dataSource.saveLocationBundle(bundle.normalized())
+    private suspend fun saveBundleUnlocked(
+        bundle: LocationBundleV4, subscriptionProxy: SubscriptionFetchProxy? = null
+    ): Boolean {
+        val normalized = bundle.normalized()
+        val fence = subscriptionProxy?.fence
+        if (fence == null) {
+            dataSource.saveLocationBundle(normalized)
+        } else {
+            if (fence.commit == null || !subscriptionProxy.fenceAllows()) return false
+            val saved = try {
+                dataSource.saveLocationBundleFenced(normalized, fence)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            if (!saved) return false
+        }
         _changes.value = _changes.value + 1
+        return true
     }
 
     override suspend fun exportBundle(): String {
@@ -233,17 +277,19 @@ class LocationsRepositoryImpl(
             subscriptionProxy = subscriptionProxy
         ) ?: return false
         if (resolved.parsed.bundle.locations.any { !runtimePolicy.permits(it.location.kind) }) return false
+        if (!subscriptionProxy.fenceAllows(resolved.source.subscriptionUrl)) return false
 
-        mutationMutex.withLock {
+        return mutationMutex.withLock {
+            if (!subscriptionProxy.fenceAllows(resolved.source.subscriptionUrl)) return@withLock false
             val merged = mergeImportedBundle(
                 current = getBundleUnlocked(),
                 imported = resolved.parsed.bundle.normalized(),
                 replaceMatchingStorageIds = resolved.parsed.mode == ImportMode.Restore,
                 verifiedSubscriptionUrl = resolved.source.subscriptionUrl
             )
-            saveBundleUnlocked(merged)
+            if (!subscriptionProxy.fenceAllows(resolved.source.subscriptionUrl)) return@withLock false
+            saveBundleUnlocked(merged, subscriptionProxy)
         }
-        return true
     }
 
     override suspend fun refreshSubscriptions(
@@ -286,6 +332,10 @@ class LocationsRepositoryImpl(
         if (groupedByUrl.isEmpty()) return SubscriptionRefreshReport.EMPTY
 
         val targetUrls = groupedByUrl.keys
+        fun staleFenceFailure(): SubscriptionRefreshReport = SubscriptionRefreshReport(
+            failures = targetUrls.map { SubscriptionRefreshFailure(it, SubscriptionRefreshError.SessionChanged) }
+        )
+        if (!subscriptionProxy.fenceAllows()) return staleFenceFailure()
         val refreshedLocations = bundle.locations
             .filter { entry ->
                 val url = entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() }
@@ -345,6 +395,7 @@ class LocationsRepositoryImpl(
                     onProfile = { lastDownloadedProfile = it }
                 )
             } ?: run {
+                if (!subscriptionProxy.fenceAllows()) return staleFenceFailure()
                 // Keep the cached config for display/recovery, but an explicit
                 // HWID refusal must not leave that config eligible to run.
                 val retained = if (lastFailure?.error == SubscriptionRefreshError.DeviceDenied) {
@@ -364,7 +415,9 @@ class LocationsRepositoryImpl(
                     ?: SubscriptionRefreshFailure(url, SubscriptionRefreshError.Empty)
                 return@forEach
             }
+            if (!subscriptionProxy.fenceAllows()) return staleFenceFailure()
             val source = resolved.source
+            if (!subscriptionProxy.fenceAllows(source.subscriptionUrl ?: url)) return staleFenceFailure()
             // Filed from now on where the provider says the list lives.
             val listUrl = if (source.content.startsWith("[")) url else source.profile?.movedTo ?: url
             // A refresh parses fresh entries, which remember nothing: a note the
@@ -488,20 +541,22 @@ class LocationsRepositoryImpl(
 
         if (successfulRefreshes == 0) {
             if (metadataOnlyChanged) {
+                if (!subscriptionProxy.fenceAllows()) return staleFenceFailure()
                 val retainedById = refreshedLocations.associateBy { it.storageId }
-                saveBundleUnlocked(bundle.copy(locations = bundle.locations.map { entry ->
+                if (!saveBundleUnlocked(bundle.copy(locations = bundle.locations.map { entry ->
                     retainedById[entry.storageId] ?: entry
-                }))
+                }), subscriptionProxy)) return staleFenceFailure()
             }
             return SubscriptionRefreshReport(updatedCount = 0, failures = failures)
         }
 
-        saveBundleUnlocked(
+        if (!subscriptionProxy.fenceAllows()) return staleFenceFailure()
+        if (!saveBundleUnlocked(
             bundle.copy(
                 activeLocationId = activeAfter,
                 locations = refreshedLocations
-            )
-        )
+            ), subscriptionProxy
+        )) return staleFenceFailure()
         return SubscriptionRefreshReport(updatedCount = successfulRefreshes, failures = failures)
     }
 
@@ -745,6 +800,14 @@ class LocationsRepositoryImpl(
     ): ResolvedImport? {
         val input = text.normalizedImportText()
         if (input.isBlank()) return null
+        if (!subscriptionProxy.fenceAllowsOrFails(null, onFailure)) return null
+
+        // The partner resolver owns its own default HTTP client. It cannot borrow
+        // a selected-path fence, so never let a fenced request reach it.
+        if (subscriptionProxy?.fence != null && isPartnerLink(input)) {
+            onFailure?.invoke(SubscriptionRefreshError.SessionChanged, null)
+            return null
+        }
 
         // What the user actually pasted, when that was an encrypted link. Everything
         // below sees only plaintext — the resolver and the codec have done their work
@@ -784,11 +847,14 @@ class LocationsRepositoryImpl(
             onProfile = onProfile
         ) ?: return null
 
+        if (!subscriptionProxy.fenceAllowsOrFails(source.subscriptionUrl, onFailure)) return null
+
         val parsed = parseImportSource(source, fallbackSubscriptionInterval, originLink)
         if (parsed == null) {
             onFailure?.invoke(SubscriptionRefreshError.Empty, null)
             return null
         }
+        if (!subscriptionProxy.fenceAllowsOrFails(source.subscriptionUrl, onFailure)) return null
         return ResolvedImport(source, parsed)
     }
 
@@ -866,6 +932,8 @@ class LocationsRepositoryImpl(
             return ImportSource(content = text.normalizedImportText())
         }
 
+        if (!subscriptionProxy.fenceAllowsOrFails(text.trim(), onFailure)) return null
+
         if (httpsUrlOrNull(text.trim()) == null) {
             onFailure?.invoke(SubscriptionRefreshError.Rejected, null)
             return null
@@ -886,6 +954,9 @@ class LocationsRepositoryImpl(
         } else {
             rawContent
         }
+        val subscriptionUrl = if (content.startsWith("[")) text.trim()
+            else downloaded.profile?.movedTo ?: text.trim()
+        if (!subscriptionProxy.fenceAllowsOrFails(subscriptionUrl, onFailure)) return null
         return content
             .takeIf { it.isNotBlank() }
             ?.let {
@@ -893,7 +964,7 @@ class LocationsRepositoryImpl(
                     content = it,
                     // A list that says it has moved is stored at its new address
                     // from its very first fetch (see subscriptionProfile).
-                    subscriptionUrl = if (content.startsWith("[")) text.trim() else downloaded.profile?.movedTo ?: text.trim(),
+                    subscriptionUrl = subscriptionUrl,
                     updateIntervalHours = downloaded.updateIntervalHours,
                     profile = downloaded.profile
                 )
@@ -906,15 +977,40 @@ class LocationsRepositoryImpl(
         onFailure: SubscriptionFailureSink? = null,
         onProfile: ((SubscriptionProfile?) -> Unit)? = null
     ): DownloadedSubscription? {
+        if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) return null
         val hwid = deviceIdentityProvider.hwid()
+        if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) return null
+        val owned = subscriptionProxy?.ownedFetch
+        if (owned != null) {
+            val result = try { owned.fetch(url,hwid,CurrentAppInfo.userAgent) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { onFailure?.invoke(SubscriptionRefreshError.Unreachable,null); return null }
+            if (!subscriptionProxy.fenceAllowsOrFails(url,onFailure)) return null
+            val headers = io.ktor.http.Headers.build { result.headers.forEach { (name, values) -> appendAll(name,values) } }
+            if (listOf("x-hwid-not-supported","x-hwid-max-devices-reached").any { headers[it]?.trim()?.equals("true",true)==true }) {
+                onFailure?.invoke(SubscriptionRefreshError.DeviceDenied,result.status); return null
+            }
+            if (result.status !in 200..299) {
+                onFailure?.invoke(if(result.status>=500) SubscriptionRefreshError.ServerError else SubscriptionRefreshError.Rejected,result.status); return null
+            }
+            val profile = subscriptionProfile(headers,Url(url))
+            if (!subscriptionProxy.fenceAllowsOrFails(profile?.movedTo ?: url,onFailure)) return null
+            onProfile?.invoke(profile)
+            if (!subscriptionProxy.fenceAllowsOrFails(url,onFailure)) return null
+            val content = result.body.takeIf { it.isNotBlank() } ?: run { onFailure?.invoke(SubscriptionRefreshError.Empty,null);return null }
+            return DownloadedSubscription(content,profileUpdateIntervalHours(headers),profile)
+        }
         val client = if (subscriptionProxy == null) {
             httpClient
         } else {
-            createProxyHttpClient(subscriptionProxy, followRedirects = false)
+            proxyHttpClientFactory(subscriptionProxy)
         }
 
         return try {
             withProxyAuthentication(subscriptionProxy) {
+                if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) {
+                    return@withProxyAuthentication null
+                }
                 val response = runCatching {
                     client.get(url) {
                         headers {
@@ -928,6 +1024,9 @@ class LocationsRepositoryImpl(
                     }
                 }.onFailure { if (it is CancellationException) throw it }.getOrNull() ?: run {
                     onFailure?.invoke(SubscriptionRefreshError.Unreachable, null)
+                    return@withProxyAuthentication null
+                }
+                if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) {
                     return@withProxyAuthentication null
                 }
 
@@ -955,11 +1054,24 @@ class LocationsRepositoryImpl(
                 // when its body is empty or contains non-runnable notice hosts.
                 // HWID denials and non-2xx replies never reach this callback.
                 val profile = response.subscriptionProfile()
-                onProfile?.invoke(profile)
+                if (subscriptionProxy?.fence == null) onProfile?.invoke(profile)
 
-                val content = runCatching {
+                val body = runCatching {
                     response.bodyAsText()
-                }.onFailure { if (it is CancellationException) throw it }.getOrNull()?.takeIf { it.isNotBlank() }
+                }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+                if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) {
+                    return@withProxyAuthentication null
+                }
+                if (subscriptionProxy?.fence != null) {
+                    if (!subscriptionProxy.fenceAllowsOrFails(profile?.movedTo ?: url, onFailure)) {
+                        return@withProxyAuthentication null
+                    }
+                    onProfile?.invoke(profile)
+                    if (!subscriptionProxy.fenceAllowsOrFails(url, onFailure)) {
+                        return@withProxyAuthentication null
+                    }
+                }
+                val content = body?.takeIf { it.isNotBlank() }
                     ?: run {
                         onFailure?.invoke(SubscriptionRefreshError.Empty, null)
                         return@withProxyAuthentication null
@@ -1706,7 +1818,8 @@ class LocationsRepositoryImpl(
      * if it is https itself: over plain http anyone on the path could write
      * these headers, and a moved list never comes back by itself.
      */
-    private fun HttpResponse.subscriptionProfile(): SubscriptionProfile? {
+    private fun HttpResponse.subscriptionProfile(): SubscriptionProfile? = subscriptionProfile(headers,request.url)
+    private fun subscriptionProfile(headers: io.ktor.http.Headers, here: Url): SubscriptionProfile? {
         val title = headers["profile-title"]?.trim()?.let(::headerText)?.takeIf { it.isNotBlank() }
 
         // `upload=..; download=..; total=..; expire=..` — used is what the two
@@ -1734,7 +1847,6 @@ class LocationsRepositoryImpl(
             }
         }
 
-        val here = request.url
         val secure = here.protocol == URLProtocol.HTTPS
         val movedTo = if (!secure) {
             null
@@ -1786,7 +1898,8 @@ class LocationsRepositoryImpl(
         return URLBuilder(url).apply { this.host = host }.buildString()
     }
 
-    private fun HttpResponse.profileUpdateIntervalHours(): Int? {
+    private fun HttpResponse.profileUpdateIntervalHours(): Int? = profileUpdateIntervalHours(headers)
+    private fun profileUpdateIntervalHours(headers: io.ktor.http.Headers): Int? {
         return headers["profile-update-interval"]
             ?.trim()
             ?.toIntOrNull()

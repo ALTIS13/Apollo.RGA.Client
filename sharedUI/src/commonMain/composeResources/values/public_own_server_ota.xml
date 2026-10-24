@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="public_own_server_ota_summary">Signed updates from Apollo’s own server</string>
+    <string name="public_own_server_ota_intro">Only this public release channel, the installed signing key and a verified newer APK are accepted. Android asks before installation. Your subscription and app data stay in place.</string>
+    <string name="public_own_server_ota_compatibility_refused">This update does not match the installed public package, signing key, channel or supported device.</string>
+</resources>

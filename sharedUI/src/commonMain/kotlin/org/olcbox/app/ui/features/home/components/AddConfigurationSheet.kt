@@ -21,9 +21,18 @@ import multiplatform_app.sharedui.generated.resources.add_manual_subscription_hi
 import multiplatform_app.sharedui.generated.resources.add_manual_subscription_submit
 import multiplatform_app.sharedui.generated.resources.add_update_lists
 import multiplatform_app.sharedui.generated.resources.add_update_lists_subtitle
+import multiplatform_app.sharedui.generated.resources.apollo_import_more
+import multiplatform_app.sharedui.generated.resources.apollo_add
+import multiplatform_app.sharedui.generated.resources.apollo_import_subtitle
+import multiplatform_app.sharedui.generated.resources.apollo_import_paste
+import multiplatform_app.sharedui.generated.resources.apollo_import_paste_hint
+import multiplatform_app.sharedui.generated.resources.apollo_import_scan_hint
+import multiplatform_app.sharedui.generated.resources.ping_checking
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,7 +51,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +61,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -73,6 +86,9 @@ fun AddConfigurationSheet(
     onScanQrClick: () -> Unit,
     onPasteLinkClick: () -> Unit,
     onManualSubscriptionUrl: (String) -> Unit = {},
+    manualImportError: String? = null,
+    manualImportInProgress: Boolean = false,
+    onManualUrlChanged: () -> Unit = {},
     onImportFileClick: () -> Unit,
     /** "From your phone", where the platform offers it; null leaves the row out. */
     onImportFromPhoneClick: (() -> Unit)? = null,
@@ -95,8 +111,9 @@ fun AddConfigurationSheet(
     showManualSubscriptionUrl: Boolean = false
 ) {
     PkBottomSheet(
-        title = stringResource(Res.string.add_connection),
-        subtitle = stringResource(Res.string.add_connection_subtitle),
+        title = stringResource(if (showManualSubscriptionUrl) Res.string.apollo_add else Res.string.add_connection),
+        subtitle = stringResource(if (showManualSubscriptionUrl) Res.string.apollo_import_subtitle
+            else Res.string.add_connection_subtitle),
         onDismiss = onDismiss,
         imeAware = true
     ) {
@@ -107,6 +124,9 @@ fun AddConfigurationSheet(
             onScanQrClick = onScanQrClick,
             onPasteLinkClick = onPasteLinkClick,
             onManualSubscriptionUrl = onManualSubscriptionUrl,
+            manualImportError = manualImportError,
+            manualImportInProgress = manualImportInProgress,
+            onManualUrlChanged = onManualUrlChanged,
             showManualSubscriptionUrl = showManualSubscriptionUrl,
             onImportFileClick = onImportFileClick,
             onImportFromPhoneClick = onImportFromPhoneClick,
@@ -126,6 +146,9 @@ internal fun AddConfigurationBody(
     onScanQrClick: () -> Unit,
     onPasteLinkClick: () -> Unit,
     onManualSubscriptionUrl: (String) -> Unit = {},
+    manualImportError: String? = null,
+    manualImportInProgress: Boolean = false,
+    onManualUrlChanged: () -> Unit = {},
     showManualSubscriptionUrl: Boolean = false,
     onImportFileClick: () -> Unit,
     /** "From your phone", where the platform offers it; null leaves the row out. */
@@ -135,32 +158,49 @@ internal fun AddConfigurationBody(
 ) {
     var isManualEntryOpen by remember { mutableStateOf(false) }
     var manualUrl by remember { mutableStateOf("") }
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    var showAdvanced by remember { mutableStateOf(false) }
+    val manualFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(isManualEntryOpen) {
+        if (isManualEntryOpen) manualFocusRequester.requestFocus()
+    }
+    Column(
+        modifier = Modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         if (isManualEntryOpen) {
             OutlinedTextField(
                 value = manualUrl,
-                onValueChange = { manualUrl = it },
+                onValueChange = {
+                    manualUrl = it
+                    onManualUrlChanged()
+                },
                 label = { Text(stringResource(Res.string.add_manual_subscription_hint)) },
                 singleLine = true,
+                isError = manualImportError != null,
+                supportingText = if (manualImportError != null) {
+                    { Text(manualImportError) }
+                } else null,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth().testTag("manual-subscription-url")
+                modifier = Modifier.fillMaxWidth()
+                    .focusRequester(manualFocusRequester)
+                    .testTag("manual-subscription-url")
             )
             PkSheetButton(
-                label = stringResource(Res.string.add_manual_subscription_submit),
-                onClick = {
-                    val submitted = manualUrl
-                    manualUrl = ""
-                    isManualEntryOpen = false
-                    onManualSubscriptionUrl(submitted)
-                },
-                primary = true
+                label = stringResource(
+                    if (manualImportInProgress) Res.string.ping_checking
+                    else Res.string.add_manual_subscription_submit
+                ),
+                onClick = { onManualSubscriptionUrl(manualUrl) },
+                primary = true,
+                enabled = !manualImportInProgress
             )
             PkSheetButton(
                 label = stringResource(Res.string.action_back),
                 onClick = {
                     manualUrl = ""
                     isManualEntryOpen = false
-                }
+                },
+                enabled = !manualImportInProgress
             )
         } else {
         // No row here points at a purchase. Someone with nothing yet gets the
@@ -178,65 +218,89 @@ internal fun AddConfigurationBody(
             )
         }
 
+        if (showManualSubscriptionUrl) {
+            PasteImportRow(showManualSubscriptionUrl, onPasteLinkClick)
+        }
+
         if (canScanQr) {
             PkSheetActionRow(
                 title = stringResource(Res.string.add_scan_qr),
                 subtitle = stringResource(
-                    if (showManualSubscriptionUrl) Res.string.add_connection_subtitle
+                    if (showManualSubscriptionUrl) Res.string.apollo_import_scan_hint
                     else Res.string.add_scan_qr_subtitle
                 ),
                 icon = PkIcons.QrCodeScanner,
-                accent = true,
+                accent = !showManualSubscriptionUrl,
                 onClick = onScanQrClick
             )
         }
 
-        PkSheetActionRow(
-            title = stringResource(Res.string.add_paste),
-            subtitle = stringResource(
-                if (showManualSubscriptionUrl) Res.string.add_connection_subtitle
-                else Res.string.add_paste_subtitle
-            ),
-            icon = PkIcons.Input,
-            onClick = onPasteLinkClick
-        )
+        if (!showManualSubscriptionUrl) {
+            PasteImportRow(showManualSubscriptionUrl, onPasteLinkClick)
+        }
 
         if (showManualSubscriptionUrl) {
             PkSheetActionRow(
                 title = stringResource(Res.string.add_manual_subscription),
                 subtitle = stringResource(Res.string.add_manual_subscription_subtitle),
                 icon = PkIcons.Input,
-                onClick = { isManualEntryOpen = true }
+                onClick = {
+                    onManualUrlChanged()
+                    isManualEntryOpen = true
+                }
             )
         }
 
-        PkSheetActionRow(
-            title = stringResource(Res.string.add_file),
-            subtitle = stringResource(Res.string.add_file_subtitle),
-            icon = PkIcons.FileOpen,
-            onClick = onImportFileClick
-        )
-
-        if (hasSubscriptions) {
-            PkSheetActionRow(
-                title = stringResource(Res.string.add_update_lists),
-                subtitle = stringResource(Res.string.add_update_lists_subtitle),
-                icon = Icons.Outlined.Refresh,
-                showChevron = false,
-                onClick = onUpdateSubscriptionsClick
-            )
+        if (showManualSubscriptionUrl && !showAdvanced) {
+            TextButton(onClick = { showAdvanced = true }) {
+                Text(stringResource(Res.string.apollo_import_more))
+            }
         }
 
-        if (showCustomLocation) {
+        if (!showManualSubscriptionUrl || showAdvanced) {
             PkSheetActionRow(
-                title = stringResource(Res.string.add_custom),
-                subtitle = stringResource(Res.string.add_custom_subtitle),
-                icon = Icons.Outlined.Add,
-                onClick = onAddCustomLocationClick
+                title = stringResource(Res.string.add_file),
+                subtitle = stringResource(Res.string.add_file_subtitle),
+                icon = PkIcons.FileOpen,
+                onClick = onImportFileClick
             )
+
+            if (hasSubscriptions) {
+                PkSheetActionRow(
+                    title = stringResource(Res.string.add_update_lists),
+                    subtitle = stringResource(Res.string.add_update_lists_subtitle),
+                    icon = Icons.Outlined.Refresh,
+                    showChevron = false,
+                    onClick = onUpdateSubscriptionsClick
+                )
+            }
+
+            if (showCustomLocation) {
+                PkSheetActionRow(
+                    title = stringResource(Res.string.add_custom),
+                    subtitle = stringResource(Res.string.add_custom_subtitle),
+                    icon = Icons.Outlined.Add,
+                    onClick = onAddCustomLocationClick
+                )
+            }
         }
         }
     }
+}
+
+@Composable
+private fun PasteImportRow(showManualSubscriptionUrl: Boolean, onPasteLinkClick: () -> Unit) {
+    PkSheetActionRow(
+        title = stringResource(if (showManualSubscriptionUrl) Res.string.apollo_import_paste
+            else Res.string.add_paste),
+        subtitle = stringResource(
+            if (showManualSubscriptionUrl) Res.string.apollo_import_paste_hint
+            else Res.string.add_paste_subtitle
+        ),
+        icon = PkIcons.Input,
+        accent = showManualSubscriptionUrl,
+        onClick = onPasteLinkClick
+    )
 }
 
 /**
@@ -287,12 +351,13 @@ fun PkSheetActionRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
+                modifier = Modifier.fillMaxWidth(),
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 ),
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.size(3.dp))

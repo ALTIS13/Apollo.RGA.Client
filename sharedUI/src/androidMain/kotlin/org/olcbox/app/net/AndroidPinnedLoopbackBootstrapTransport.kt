@@ -11,23 +11,35 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 
-/** Personal USB test only: ADB reverse exposes this fixed loopback port, never a remote Bridge. */
+/** Compatibility USB transport: exact DER pin plus platform IP SAN verification. */
 internal class AndroidPinnedLoopbackBootstrapTransport(
     pinnedCertificateSha256: String
+) : PersonalBootstrapHttpTransport by AndroidPersonalBootstrapTransport(
+    PersonalBootstrapEndpoint.usb(pinnedCertificateSha256)
+)
+
+/** Remote keeps platform CA/hostname validation; USB alone overrides certificate trust. */
+internal class AndroidPersonalBootstrapTransport(
+    private val endpoint: PersonalBootstrapEndpoint,
+    private val openConnection: (URL) -> HttpsURLConnection = { url ->
+        url.openConnection(Proxy.NO_PROXY) as HttpsURLConnection
+    }
 ) : PersonalBootstrapHttpTransport {
-    private val trustManager = ExactCertificateTrustManager(pinnedCertificateSha256)
-    private val socketFactory = SSLContext.getInstance("TLS").apply {
-        init(null, arrayOf(trustManager), SecureRandom())
-    }.socketFactory
+    private val usbSocketFactory = endpoint.usbCertificatePin?.let { pin ->
+        SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(ExactCertificateTrustManager(pin)), SecureRandom())
+        }.socketFactory
+    }
 
     override fun post(path: String, body: ByteArray): PersonalBootstrapHttpResponse? {
-        if (path !in PATHS || body.isEmpty() || body.size > MAX_REQUEST_BYTES) return null
+        val url = endpoint.urlFor(path) ?: return null
+        if (body.isEmpty() || body.size > MAX_REQUEST_BYTES) return null
         var connection: HttpsURLConnection? = null
         return try {
-            connection = (URL("https://127.0.0.1:18443$path")
-                .openConnection(Proxy.NO_PROXY) as HttpsURLConnection).apply {
-                // Keep platform hostname verification: the certificate must carry IP SAN 127.0.0.1.
-                sslSocketFactory = socketFactory
+            connection = openConnection(url).apply {
+                // Never override hostnameVerifier in either mode. Public CA trust
+                // stays untouched remotely; USB cert must carry IP SAN 127.0.0.1.
+                usbSocketFactory?.let { sslSocketFactory = it }
                 instanceFollowRedirects = false
                 connectTimeout = 3_000
                 readTimeout = 5_000
@@ -65,7 +77,6 @@ internal class AndroidPinnedLoopbackBootstrapTransport(
     }
 
     private companion object {
-        val PATHS = setOf("/v1/personal/link/begin", "/v1/personal/bootstrap")
         const val MAX_REQUEST_BYTES = 4_096
         const val MAX_RESPONSE_BYTES = 8_192
     }

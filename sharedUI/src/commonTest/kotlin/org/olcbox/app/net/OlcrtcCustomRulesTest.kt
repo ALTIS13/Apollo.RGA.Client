@@ -15,19 +15,19 @@ class OlcrtcCustomRulesTest {
     private fun rules(policy: Routing.Policy, direct: List<String> = emptyList(), tunnel: List<String> = emptyList()) =
         Routing.Rules("/data/rules", dns, policy, CustomRules.of(direct, tunnel))
 
-    @Test fun blockedOnlyRoomsCarryEverythingButTheUsersDirectRules() = runTest {
-        assertEquals(OlcrtcDirectRules.NONE, OlcrtcDirectRules.forRouting(rules(Routing.Policy.BlockedOnly)))
+    @Test fun blockedOnlyRoomsCarryEverythingButDirectRulesWithMandatoryExceptions() = runTest {
+        assertEquals("tunnel-domain:cc\ntunnel-domain:at\n", OlcrtcDirectRules.forRouting(rules(Routing.Policy.BlockedOnly)))
         assertEquals(
-            "domain:bank.example\n10.8.0.0/16\n",
+            "tunnel-domain:cc\ntunnel-domain:at\ndomain:bank.example\n10.8.0.0/16\n",
             OlcrtcDirectRules.forRouting(
                 rules(Routing.Policy.BlockedOnly, direct = listOf("bank.example", "10.8.0.0/16"), tunnel = listOf("x.com"))
             )
         )
     }
 
-    @Test fun globalWithDirectRulesHandsOnlyThose() = runTest {
+    @Test fun tunnelPolicyWithDirectRulesKeepsMandatoryExceptions() = runTest {
         assertEquals(
-            "domain:xn--e1afmkfd.xn--p1ai\n",
+            "tunnel-domain:cc\ntunnel-domain:at\ndomain:xn--e1afmkfd.xn--p1ai\n",
             OlcrtcDirectRules.forRouting(rules(Routing.Policy.Tunnel, direct = listOf("пример.рф")))
         )
     }
@@ -46,7 +46,7 @@ class OlcrtcCustomRulesTest {
 
     @Test fun noRulesOfTheUsersOwnLeaveARegionAsItWas() = runTest {
         val routing = Routing.Rules("/data/rules", dns, "ru")
-        assertEquals(OlcrtcDirectRules.text("ru"), OlcrtcDirectRules.forRouting(routing))
+        assertEquals("tunnel-domain:cc\ntunnel-domain:at\n" + OlcrtcDirectRules.text("ru"), OlcrtcDirectRules.forRouting(routing))
         assertTrue(OlcrtcDirectRules.text("ru").startsWith(XrayConfig.PRIVATE_RANGES.first()))
     }
 }

@@ -6,7 +6,10 @@ include $(CLEAR_VARS)
 LOCAL_PATH := $(ROOT_PATH)
 LOCAL_MODULE := olcbox_tun2socks
 LOCAL_SRC_FILES := olcbox_tun2socks_jni.c
-LOCAL_C_INCLUDES := $(ROOT_PATH)/hev-socks5-tunnel/src
+LOCAL_C_INCLUDES := $(ROOT_PATH)/hev-socks5-tunnel/src \
+    $(ROOT_PATH)/hev-socks5-tunnel/src/misc \
+    $(ROOT_PATH)/hev-socks5-tunnel/src/core/include \
+    $(ROOT_PATH)/hev-socks5-tunnel/third-part/hev-task-system/include
 LOCAL_SHARED_LIBRARIES := hev-socks5-tunnel
 LOCAL_LDLIBS := -llog
 LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384

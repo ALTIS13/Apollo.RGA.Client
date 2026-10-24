@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -53,6 +55,17 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     private val olcRtcConnectionChecker by lazy { OlcRtcConnectionChecker(appContext) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _connectionMode = MutableStateFlow(AndroidConnectionMode.Tun)
+    private var personalUpdateModeEpoch = 0L
+    private val personalUpdateNetworkRegistration = Any()
+    // Owned by this manager, not Service routing. All callback facts use the State monitor.
+    private var personalUpdateNetworkClosed = false
+    private var personalUpdateNetworkRevision = 0L
+    private var personalUpdateDefaultNetwork: android.net.Network? = null
+    private var personalUpdateDefaultCapabilities: org.olcbox.app.update.personal.PersonalUpdateOrdinaryCapabilities? = null
+    // Raw copy is diagnostic-only; it never decides whether authority stays current.
+    private var personalUpdateLastRawCapabilities: android.net.NetworkCapabilities? = null
+    private var personalUpdateDefaultProperties: android.net.LinkProperties? = null
+    private var personalUpdateNetworkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private val _proxySettings = MutableStateFlow(AndroidSocksProxySettings())
     private val _splitTunnelSettings = MutableStateFlow(AndroidSplitTunnelSettings())
     private val _dynamicThemeEnabled = MutableStateFlow(true)
@@ -63,6 +76,9 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     override val logs: StateFlow<List<String>> = OlcboxVpnState.logs
     override val status: StateFlow<VpnStatus> = OlcboxVpnState.status
     override val isConnected: StateFlow<Boolean> = OlcboxVpnState.isConnected
+    override val olcConnection: StateFlow<OlcConnectionProgress> =
+        if (appContext.packageName == "tech.gatealtas.rga") OlcboxVpnState.olcConnection
+        else MutableStateFlow(OlcConnectionProgress())
     override val personalTunnel: StateFlow<PersonalTunnelUiState> =
         if (appContext.packageName == "tech.gatealtas.rga.personal") {
             OlcboxVpnState.personalTunnel
@@ -78,6 +94,16 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     val installedApps: StateFlow<List<AndroidInstalledApp>> = _installedApps.asStateFlow()
 
     init {
+        scope.coroutineContext[Job]?.invokeOnCompletion { closePersonalUpdateNetworkMonitor() }
+        if (appContext.packageName in setOf("tech.gatealtas.rga.personal", "tech.gatealtas.rga") &&
+            context is androidx.lifecycle.LifecycleOwner) {
+            context.lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onDestroy(owner: androidx.lifecycle.LifecycleOwner) {
+                    closePersonalUpdateNetworkMonitor()
+                    owner.lifecycle.removeObserver(this)
+                }
+            })
+        }
         scope.launch {
             ensureProxySettings()
             appContext.vpnPrefDataStore.data
@@ -108,7 +134,7 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
                     )
                 }
                 .collect { settings ->
-                    _connectionMode.value = settings.mode
+                    setConnectionModeForUpdate(settings.mode)
                     _proxySettings.value = settings.proxy
                     _splitTunnelSettings.value = settings.splitTunnel
                     _dynamicThemeEnabled.value = settings.dynamicThemeEnabled
@@ -124,12 +150,17 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     }
 
     fun selectConnectionMode(mode: AndroidConnectionMode) {
-        _connectionMode.value = mode
+        setConnectionModeForUpdate(mode)
         scope.launch {
             appContext.vpnPrefDataStore.edit { preferences ->
                 preferences[KEY_ANDROID_CONNECTION_MODE] = mode.value
             }
         }
+    }
+
+    private fun setConnectionModeForUpdate(mode: AndroidConnectionMode) = synchronized(OlcboxVpnState) {
+        if (_connectionMode.value != mode) personalUpdateModeEpoch++
+        _connectionMode.value = mode
     }
 
     fun setDynamicThemeEnabled(enabled: Boolean) {
@@ -350,8 +381,220 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
         )
     }
 
-    override fun subscriptionFetchProxy(): SubscriptionFetchProxy? =
-        OlcboxVpnState.channelProxy.takeIf { status.value is VpnStatus.Connected }
+    override fun subscriptionFetchProxy(): SubscriptionFetchProxy? {
+        val packageName = appContext.packageName
+        var generalSelected = false
+        var generalCapture: org.olcbox.app.vpn.service.GeneralControlCapture? = null
+        val selected = synchronized(OlcboxVpnState) {
+            // Phase, capture and fallback are one snapshot. Missing capture never means direct.
+            if (packageName == "tech.gatealtas.rga" &&
+                OlcboxVpnState.generalTunnel.value.phase != org.olcbox.app.vpn.service.GeneralTunnelPhase.Inactive
+            ) {
+                generalSelected = true
+                generalCapture = OlcboxVpnState.generalControlCapture
+                null
+            } else {
+                val personal = personalTunnel.value
+                val currentStatus = status.value
+                if (packageName == "tech.gatealtas.rga.personal" && personal.phase != PersonalTunnelPhase.Inactive) {
+                    OlcboxVpnState.channelProxy.takeIf {
+                        currentStatus is VpnStatus.Connected && personal.phase == PersonalTunnelPhase.Working &&
+                            personal.activePath == PersonalActivePath.OlcRtc && it?.fence != null
+                    } ?: SubscriptionFetchProxy.blocked()
+                } else {
+                    val proxy = OlcboxVpnState.channelProxy.takeIf { currentStatus is VpnStatus.Connected }
+                    // Before GENERAL publishes its phase, a handoff/recovery is already in flight.
+                    // Ordinary HTTP is allowed without a tunnel only after actual Disconnected.
+                    if (packageName == "tech.gatealtas.rga" && currentStatus !is VpnStatus.Disconnected)
+                        proxy ?: SubscriptionFetchProxy.blocked() else proxy
+                }
+            }
+        }
+        // Capture validation may acquire Service; never call it while holding State.
+        return if (generalSelected) generalCapture?.subscriptionProxy() ?: SubscriptionFetchProxy.blocked() else selected
+    }
+
+    /** Select references under State only; never acquire a Service guard while holding it. */
+    fun personalUpdateFetchRoute(): org.olcbox.app.update.personal.PersonalUpdateFetchRoute =
+        updateFetchRoute(org.olcbox.app.update.personal.OwnServerUpdateProfile.Personal)
+
+    /** Public own-server updates borrow only the existing ordinary Network authority. No Olc grant. */
+    fun publicOwnServerUpdateFetchRoute(profile: org.olcbox.app.update.personal.OwnServerUpdateProfile.PublicOwnServer):
+        org.olcbox.app.update.personal.PersonalUpdateFetchRoute = updateFetchRoute(profile)
+
+    private fun updateFetchRoute(profile: org.olcbox.app.update.personal.OwnServerUpdateProfile):
+        org.olcbox.app.update.personal.PersonalUpdateFetchRoute {
+        if (profile is org.olcbox.app.update.personal.OwnServerUpdateProfile.PublicOwnServer && appContext.packageName == profile.packageName) {
+            val general = synchronized(OlcboxVpnState) {
+                OlcboxVpnState.generalTunnel.value.phase != org.olcbox.app.vpn.service.GeneralTunnelPhase.Inactive
+            }
+            if (general) {
+                val capture = synchronized(OlcboxVpnState) { OlcboxVpnState.generalControlCapture }
+                return if (Build.VERSION.SDK_INT in 31..37 && scope.isActive &&
+                    appContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0 &&
+                    capture?.current() == true) org.olcbox.app.update.personal.PersonalUpdateFetchRoute.GeneralSelected(
+                    org.olcbox.app.update.personal.GeneralUpdateFetchTicket(capture,profile))
+                else org.olcbox.app.update.personal.PersonalUpdateFetchRoute.Blocked(org.olcbox.app.update.personal.PersonalUpdateRouteBlock.NOT_READY)
+            }
+        }
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        // Registration is outside State. Callback/unregister locks never acquire a Service monitor.
+        val needsOrdinaryMonitor = synchronized(OlcboxVpnState) {
+            appContext.packageName == profile.packageName && OlcboxVpnState.personalTunnel.value.phase == PersonalTunnelPhase.Inactive
+        }
+        val ordinaryMonitorReady = needsOrdinaryMonitor && ensurePersonalUpdateNetworkMonitor(cm)
+        val network = cm.activeNetwork
+        val capabilities = org.olcbox.app.update.personal.personalUpdateOrdinaryCapabilities(network?.let(cm::getNetworkCapabilities))
+        val properties = network?.let(cm::getLinkProperties)?.let(::copyPersonalUpdateLinkProperties)
+        return synchronized(OlcboxVpnState) {
+            val blocked = org.olcbox.app.update.personal.PersonalUpdateFetchRoute.Blocked(
+                org.olcbox.app.update.personal.PersonalUpdateRouteBlock.NOT_READY)
+            if (appContext.packageName != profile.packageName || profile is org.olcbox.app.update.personal.OwnServerUpdateProfile.PublicOwnServer &&
+                (appContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 ||
+                    Build.VERSION.SDK_INT !in 31..37)) return@synchronized blocked
+            val personal = OlcboxVpnState.personalTunnel.value
+            val currentStatus = status.value
+            if (personal.phase != PersonalTunnelPhase.Inactive) {
+                if (profile is org.olcbox.app.update.personal.OwnServerUpdateProfile.PublicOwnServer) return@synchronized blocked
+                val proxy = OlcboxVpnState.channelProxy
+                val ticket = OlcboxVpnState.personalUpdateTicket
+                return@synchronized if (currentStatus is VpnStatus.Connected &&
+                    personal.phase == PersonalTunnelPhase.Working && personal.activePath == PersonalActivePath.OlcRtc &&
+                    proxy?.fence != null && ticket != null) org.olcbox.app.update.personal.PersonalUpdateFetchRoute.Selected(ticket) else blocked
+            }
+            if ((currentStatus !is VpnStatus.Connected && currentStatus !is VpnStatus.Disconnected) ||
+                !ordinaryMonitorReady || !scope.isActive || personalUpdateNetworkClosed ||
+                network == null || capabilities == null || properties == null ||
+                personalUpdateDefaultNetwork != network || personalUpdateDefaultCapabilities != capabilities ||
+                personalUpdateDefaultProperties != properties) return@synchronized blocked
+            if (currentStatus is VpnStatus.Connected && (OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc ||
+                OlcboxVpnState.channelProxy == null || OlcboxVpnState.channelProxy?.fence != null ||
+                OlcboxVpnState.personalUpdateTicket != null) || currentStatus is VpnStatus.Disconnected &&
+                (OlcboxVpnState.channelProxy != null || OlcboxVpnState.personalUpdateTicket != null)) return@synchronized blocked
+            val epoch = OlcboxVpnState.personalPhaseEpoch()
+            val channel = OlcboxVpnState.channelProxy
+            val location = OlcboxVpnState.activeLocation
+            val mode = connectionMode.value
+            val modeEpoch = personalUpdateModeEpoch
+            val networkRevision = personalUpdateNetworkRevision
+            val since = OlcboxVpnState.connectedSince.value
+            var retired = false
+            fun current(): Boolean {
+                if (retired) return false
+                val unchanged = OlcboxVpnState.personalTunnel.value.phase == PersonalTunnelPhase.Inactive &&
+                scope.isActive && !personalUpdateNetworkClosed && personalUpdateNetworkCallback != null &&
+                personalUpdateNetworkRevision == networkRevision && personalUpdateDefaultNetwork == network &&
+                OlcboxVpnState.personalPhaseEpoch() == epoch && status.value == currentStatus &&
+                OlcboxVpnState.channelProxy === channel && OlcboxVpnState.activeLocation === location &&
+                connectionMode.value == mode && personalUpdateModeEpoch == modeEpoch && OlcboxVpnState.connectedSince.value == since &&
+                cm.activeNetwork == network && org.olcbox.app.update.personal.personalUpdateOrdinaryCapabilities(cm.getNetworkCapabilities(network)) == capabilities &&
+                cm.getLinkProperties(network) == properties
+                if (!unchanged) retired = true
+                return unchanged
+            }
+            org.olcbox.app.update.personal.PersonalUpdateFetchRoute.Ordinary(network,
+                { synchronized(OlcboxVpnState) { current() } }, { action -> synchronized(OlcboxVpnState) {
+                    if (!current()) false else { action(); true }
+                } }, profile = profile)
+        }
+    }
+
+    private fun ensurePersonalUpdateNetworkMonitor(cm: android.net.ConnectivityManager): Boolean =
+        synchronized(personalUpdateNetworkRegistration) registration@ {
+            if (Build.VERSION.SDK_INT !in 31..37 || !scope.isActive) return@registration false
+            val existing = synchronized(OlcboxVpnState) {
+                when { personalUpdateNetworkClosed -> -1; personalUpdateNetworkCallback != null -> 1; else -> 0 }
+            }
+            if (existing < 0) return@registration false
+            if (existing > 0) return@registration true
+            val initial = cm.activeNetwork
+            val rawCaps = initial?.let(cm::getNetworkCapabilities)?.let { android.net.NetworkCapabilities(it) }
+            val caps = org.olcbox.app.update.personal.personalUpdateOrdinaryCapabilities(rawCaps)
+            val link = initial?.let(cm::getLinkProperties)?.let(::copyPersonalUpdateLinkProperties)
+            val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) = synchronized(OlcboxVpnState) {
+                    if (personalUpdateNetworkCallback !== this || personalUpdateNetworkClosed) return@synchronized
+                    if (personalUpdateDefaultNetwork != network) {
+                        personalUpdateNetworkRevision++
+                        personalUpdateDefaultNetwork = network
+                        personalUpdateDefaultCapabilities = null; personalUpdateLastRawCapabilities = null; personalUpdateDefaultProperties = null
+                    }
+                }
+                override fun onLost(network: android.net.Network) = synchronized(OlcboxVpnState) {
+                    if (personalUpdateNetworkCallback !== this || personalUpdateNetworkClosed || personalUpdateDefaultNetwork != network) return@synchronized
+                    personalUpdateNetworkRevision++
+                    personalUpdateDefaultNetwork = null
+                    personalUpdateDefaultCapabilities = null; personalUpdateLastRawCapabilities = null; personalUpdateDefaultProperties = null
+                }
+                override fun onCapabilitiesChanged(network: android.net.Network, capabilities: android.net.NetworkCapabilities) = synchronized(OlcboxVpnState) {
+                    if (personalUpdateNetworkCallback !== this || personalUpdateNetworkClosed || personalUpdateDefaultNetwork != network) return@synchronized
+                    val copied = org.olcbox.app.update.personal.personalUpdateOrdinaryCapabilities(capabilities)
+                    if (personalUpdateDefaultCapabilities != copied) {
+                        personalUpdateNetworkRevision++; personalUpdateDefaultCapabilities = copied
+                    } else if (appContext.packageName == "tech.gatealtas.rga.personal" &&
+                        appContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                        personalUpdateLastRawCapabilities?.let { previous ->
+                            val signal = previous.signalStrength != capabilities.signalStrength
+                            val bandwidth = previous.linkUpstreamBandwidthKbps != capabilities.linkUpstreamBandwidthKbps ||
+                                previous.linkDownstreamBandwidthKbps != capabilities.linkDownstreamBandwidthKbps
+                            val transportInfo = previous.transportInfo != capabilities.transportInfo
+                            if (signal || bandwidth || transportInfo) android.util.Log.d("RgaPersonalUpdate",
+                                "ORDINARY_TELEMETRY_IGNORED signal=$signal bandwidth=$bandwidth transportInfo=$transportInfo")
+                        }
+                    }
+                    personalUpdateLastRawCapabilities = android.net.NetworkCapabilities(capabilities)
+                }
+                override fun onLinkPropertiesChanged(network: android.net.Network, properties: android.net.LinkProperties) = synchronized(OlcboxVpnState) {
+                    if (personalUpdateNetworkCallback !== this || personalUpdateNetworkClosed || personalUpdateDefaultNetwork != network) return@synchronized
+                    val copied = copyPersonalUpdateLinkProperties(properties)
+                    if (personalUpdateDefaultProperties != copied) {
+                        personalUpdateNetworkRevision++; personalUpdateDefaultProperties = copied
+                    }
+                }
+            }
+            val installed = synchronized(OlcboxVpnState) {
+                if (personalUpdateNetworkClosed || !scope.isActive) false else {
+                    personalUpdateNetworkRevision++
+                    personalUpdateDefaultNetwork = initial
+                    personalUpdateDefaultCapabilities = caps; personalUpdateLastRawCapabilities = rawCaps; personalUpdateDefaultProperties = link
+                    personalUpdateNetworkCallback = callback
+                    true
+                }
+            }
+            if (!installed) return@registration false
+            try { cm.registerDefaultNetworkCallback(callback); true }
+            catch (_: Exception) {
+                synchronized(OlcboxVpnState) {
+                    if (personalUpdateNetworkCallback === callback) {
+                        personalUpdateNetworkCallback = null; personalUpdateNetworkRevision++
+                    }
+                }
+                false
+            }
+        }
+
+    private fun closePersonalUpdateNetworkMonitor() = synchronized(personalUpdateNetworkRegistration) {
+        val callback = synchronized(OlcboxVpnState) {
+            personalUpdateNetworkClosed = true; personalUpdateNetworkRevision++
+            personalUpdateNetworkCallback.also {
+                personalUpdateNetworkCallback = null; personalUpdateDefaultNetwork = null
+                personalUpdateDefaultCapabilities = null; personalUpdateLastRawCapabilities = null; personalUpdateDefaultProperties = null
+            }
+        }
+        callback?.let {
+            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            runCatching { cm.unregisterNetworkCallback(it) }
+        }
+        Unit
+    }
+
+    private fun copyPersonalUpdateLinkProperties(original: android.net.LinkProperties): android.net.LinkProperties {
+        val parcel = android.os.Parcel.obtain()
+        return try {
+            original.writeToParcel(parcel, 0); parcel.setDataPosition(0)
+            android.net.LinkProperties.CREATOR.createFromParcel(parcel)
+        } finally { parcel.recycle() }
+    }
 
     override suspend fun diagnosticsLog(): String = withContext(Dispatchers.IO) { buildString {
         val verbose = locationsDataSource.loadLocationBundle()?.routing?.verboseDebugLogs == true

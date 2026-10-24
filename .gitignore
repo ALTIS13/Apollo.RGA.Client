@@ -15,6 +15,7 @@ captures
 .externalNativeBuild
 .cxx
 local.properties
+.ops-private/
 xcuserdata/
 Pods/
 *.jks

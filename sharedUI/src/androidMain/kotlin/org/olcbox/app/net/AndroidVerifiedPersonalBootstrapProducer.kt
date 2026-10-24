@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.olcbox.app.GeneratedAppInfo
 
-/** HTTP is deliberately behind a narrow interface so only a pinned TLS transport can be used. */
+/** HTTP is behind a narrow interface; endpoints and TLS modes are build-owned. */
 internal fun interface PersonalBootstrapHttpTransport {
     fun post(path: String, body: ByteArray): PersonalBootstrapHttpResponse?
 }
@@ -123,19 +123,23 @@ internal class AndroidVerifiedPersonalBootstrapProducer(
         const val MAX_REQUEST_BYTES = 4_096
         const val MAX_RESPONSE_BYTES = 8_192
 
-        /** No personal Bridge path exists in the ordinary package or without an exact pin. */
-        fun forPersonalUsbTest(context: Context): AndroidVerifiedPersonalBootstrapProducer? {
+        /** Ordinary packages cannot activate either personal transport. */
+        fun forPersonalTest(context: Context): AndroidVerifiedPersonalBootstrapProducer? {
             val app = context.applicationContext
-            if (app.packageName != "tech.gatealtas.rga.personal" ||
-                AndroidRuntimeLocationPolicy.forApp(app) != RuntimeLocationPolicy.ExperimentalDebug
-            ) return null
-            val pin = GeneratedAppInfo.PERSONAL_BRIDGE_CERT_SHA256
-            if (!Regex("[0-9a-f]{64}").matches(pin)) return null
+            val endpoint = PersonalBootstrapEndpointPolicy.select(
+                app.packageName,
+                AndroidRuntimeLocationPolicy.forApp(app) == RuntimeLocationPolicy.ExperimentalDebug,
+                GeneratedAppInfo.PERSONAL_BRIDGE_REMOTE_ORIGIN,
+                GeneratedAppInfo.PERSONAL_BRIDGE_CERT_SHA256
+            ) ?: return null
             return try {
-                AndroidVerifiedPersonalBootstrapProducer(AndroidPinnedLoopbackBootstrapTransport(pin))
+                AndroidVerifiedPersonalBootstrapProducer(AndroidPersonalBootstrapTransport(endpoint))
             } catch (_: Exception) {
                 null
             }
         }
+
+        /** Preserve the existing cache caller; build policy now selects USB or remote explicitly. */
+        fun forPersonalUsbTest(context: Context): AndroidVerifiedPersonalBootstrapProducer? = forPersonalTest(context)
     }
 }

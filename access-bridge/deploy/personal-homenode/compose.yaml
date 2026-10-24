@@ -1,0 +1,135 @@
+name: rga-personal-homenode
+services:
+  personal-node:
+    image: ${PERSONAL_NODE_IMAGE:?Set the private immutable node image tag}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        RUNTIME_BASE: ${RUNTIME_BASE:?Set an Alpine image pinned by digest}
+        NODE_SHA256: ${NODE_SHA256:?Set the verified Linux artifact SHA-256}
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      RGA_PERSONAL_NODE_CONFIG: /run/personal/node.json
+      RGA_PERSONAL_PANEL_CREDENTIALS_FILE: /run/personal/panel-credentials.json
+      GOMAXPROCS: "2"
+    volumes:
+      - type: bind
+        source: ${PERSONAL_CONFIG_DIR:?Set protected absolute config directory}
+        target: /run/personal
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+    # Carrier signaling/media may leave the HomeNode via its RU uplink.
+    # User destination dials require the explicit fail-closed SOCKS config.
+    networks: [qa-internal, carrier-control, ru-egress]
+    # The existing HomeNode Caddy is a host service, not a container. Publish
+    # only on host loopback; Caddy verifies the upstream TLS certificate.
+    ports: ["127.0.0.1:18443:18443"]
+    expose: ["18443"]
+    depends_on:
+      qa-db:
+        condition: service_healthy
+      rga-egress:
+        condition: service_started
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
+    cpus: 2.0
+    mem_limit: 512m
+    pids_limit: 128
+    healthcheck:
+      # A malformed unauthenticated body must be rejected. This proves only
+      # local pinned TLS + bounded handler availability, NOT provider readiness.
+      test: [CMD-SHELL, "code=$$(curl --silent --max-time 3 --cacert /run/personal/tls.crt --output /dev/null --write-out '%{http_code}' --request POST --header 'Content-Type: application/json' --data '{}' https://127.0.0.1:18443/v1/personal/link/begin) && [ \"$$code\" = 400 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}
+  rga-egress:
+    image: ${GATEWAY_IMAGE:?Set the private immutable gateway image tag}
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+      args:
+        RUNTIME_BASE: ${RUNTIME_BASE:?Set an Alpine image pinned by digest}
+    user: "10002:10002"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - type: bind
+        source: ${GATEWAY_CONFIG_DIR:?Set protected gateway directory}
+        target: /srv/apollo-rga-personal/gateway
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,uid=10002,gid=10002,mode=0700
+    networks: [carrier-control, ru-egress]
+    expose: ["1080"]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    cpus: 0.5
+    mem_limit: 64m
+    pids_limit: 32
+    logging:
+      driver: json-file
+      options: {max-size: "2m", max-file: "2"}
+  qa-db:
+    # Preserve the existing personal QA dump's PG18 major version. This is not
+    # the production Remnawave database. PG18's declared volume moved upward.
+    image: ${PG_IMAGE:?Set a PostgreSQL 18 image pinned by digest}
+    command: [postgres, -c, shared_buffers=32MB, -c, max_connections=16]
+    shm_size: 64m
+    environment:
+      POSTGRES_DB: rga_personal_qa
+      # This initializer owns schema/restore. Runtime receives a separate
+      # NOSUPERUSER role granted only table/sequence access after restore.
+      POSTGRES_USER: rga_qa_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/qa-db-password
+    volumes:
+      - qa-postgres:/var/lib/postgresql
+      - type: bind
+        source: ${PG_PASSWORD_FILE:?Set protected absolute password file}
+        target: /run/secrets/qa-db-password
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [qa-internal]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
+    cpus: 1.0
+    mem_limit: 256m
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, pg_isready, -U, rga_qa_admin, -d, rga_personal_qa]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}
+networks:
+  # No host networking, public bootstrap ports, or automatic Coolify labels.
+  qa-internal:
+    internal: true
+  carrier-control:
+    driver: bridge
+  ru-egress:
+    internal: true
+volumes:
+  qa-postgres:

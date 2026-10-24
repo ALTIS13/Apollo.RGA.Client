@@ -74,11 +74,11 @@ class OlcrtcDirectRulesTest {
     @Test fun routingPicksTheRegion() = runTest {
         assertEquals(OlcrtcDirectRules.NONE, OlcrtcDirectRules.forRouting(Routing.Global))
         assertEquals(
-            OlcrtcDirectRules.text("cn"),
+            "tunnel-domain:cc\ntunnel-domain:at\n" + OlcrtcDirectRules.text("cn"),
             OlcrtcDirectRules.forRouting(Routing.Rules("/data/rules", DirectDns.Servers(emptyList()), "cn"))
         )
         assertEquals(
-            OlcrtcDirectRules.text(),
+            "tunnel-domain:cc\ntunnel-domain:at\n" + OlcrtcDirectRules.text(),
             OlcrtcDirectRules.forRouting(Routing.BypassRussia(RuleSets.IOS_RELATIVE_DIR, DirectDns.Placeholder))
         )
     }

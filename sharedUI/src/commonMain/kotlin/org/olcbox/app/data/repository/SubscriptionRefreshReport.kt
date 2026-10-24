@@ -5,6 +5,8 @@ package org.olcbox.app.data.repository
  * phrase it without the datasource owning user-facing copy.
  */
 enum class SubscriptionRefreshError {
+    /** The selected session changed before a guarded refresh could be committed. */
+    SessionChanged,
     /** Remnawave explicitly refused this device through an HWID response header. */
     DeviceDenied,
 
@@ -29,6 +31,8 @@ data class SubscriptionRefreshFailure(
 ) {
     /** One line for a toast/snackbar. */
     fun message(): String = when (error) {
+        SubscriptionRefreshError.SessionChanged ->
+            "Connection changed. Refresh the server list again."
         SubscriptionRefreshError.DeviceDenied ->
             "This device is not allowed to use the subscription — contact support or retry after device access changes"
         SubscriptionRefreshError.Rejected ->

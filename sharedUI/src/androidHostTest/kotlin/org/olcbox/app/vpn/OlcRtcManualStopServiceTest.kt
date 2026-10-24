@@ -281,11 +281,12 @@ class OlcRtcManualStopServiceTest {
             OlcboxVpnService::class.java.getDeclaredMethod(
                 "startMobile", LocationConfig::class.java, Network::class.java,
                 Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
-                Routing::class.java, String::class.java, kotlin.coroutines.Continuation::class.java
+                Routing::class.java, String::class.java, kotlin.jvm.functions.Function1::class.java,
+                kotlin.coroutines.Continuation::class.java
             ).apply { isAccessible = true }.invoke(
                 service,
                 LocationConfig(id = "test-room", key = "test-key", bypassProvider = "telemost", transport = "vp8channel"),
-                network, 0L, false, Routing.Global, "test-claims", continuation
+                network, 0L, false, Routing.Global, "test-claims", null, continuation
             )
         }
 

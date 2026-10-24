@@ -1,12 +1,23 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
 import java.util.Properties
 import java.io.FileInputStream
+import java.security.AlgorithmParameters
+import java.security.KeyFactory
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 
 plugins {
     alias(libs.plugins.compose.compiler)
@@ -33,6 +44,11 @@ val olcboxVersion = providers.gradleProperty("olcbox.version").orElse("1.0.0")
 val olcboxVersionCode = providers.gradleProperty("olcbox.versionCode")
     .map { it.toInt() }
     .orElse(1)
+// Opt-in personal QA package beside both the signed release and normal debug app.
+// This marker is installation isolation only; Bridge still requires A063 PoP.
+val rgaPersonalTest = providers.gradleProperty("rgaPersonalTest")
+    .map { it.toBooleanStrict() }
+    .getOrElse(false)
 val defaultAndroidAbiFilters = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 val androidAbiFilters = providers.gradleProperty("olcbox.android.abiFilters")
     .map { value ->
@@ -50,6 +66,10 @@ android {
     namespace = "org.olcbox.app"
     compileSdk = 37
     ndkVersion = "28.2.13676358"
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         minSdk = 23
@@ -100,8 +120,8 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
-            if (hasReleaseKeystore) {
+            applicationIdSuffix = if (rgaPersonalTest) ".personal" else ".debug"
+            if (hasReleaseKeystore && !rgaPersonalTest) {
                 signingConfig = signingConfigs.getByName("release")
             }
 
@@ -158,6 +178,108 @@ android {
     }
 }
 
+// Android-only, opt-in resources. No shared GeneratedAppInfo or global resValues.
+abstract class GeneratePersonalOtaResourcesTask : DefaultTask() {
+    @get:Input abstract val publicSpki: Property<String>
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+    @get:OutputFile abstract val outputManifest: RegularFileProperty
+
+    @TaskAction fun generate() {
+        val pin = publicSpki.get()
+        val enabled = pin.isNotEmpty()
+        val values = outputDirectory.file("values/personal_ota.xml").get().asFile
+        values.parentFile.mkdirs()
+        values.writeText("""<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="personal_ota_enabled">$enabled</bool>
+    <string name="personal_ota_compiled_variant" translatable="false">${if (enabled) "githubDebug" else ""}</string>
+    <string name="personal_ota_public_spki" translatable="false">$pin</string>
+</resources>
+""")
+        val manifest = outputManifest.get().asFile
+        manifest.parentFile.mkdirs()
+        manifest.writeText("""<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+${if (enabled) "    <uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" />" else ""}
+</manifest>
+""")
+    }
+}
+
+fun validPersonalOtaSpki(encoded: String): Boolean = try {
+    if (encoded.length !in 1..512) false else {
+        val bytes = Base64.getDecoder().decode(encoded)
+        val key = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(bytes)) as? ECPublicKey
+        val expected = AlgorithmParameters.getInstance("EC").apply { init(ECGenParameterSpec("secp256r1")) }
+            .getParameterSpec(ECParameterSpec::class.java)
+        key != null && Base64.getEncoder().encodeToString(bytes) == encoded && bytes.contentEquals(key.encoded) &&
+            key.params.curve == expected.curve && key.params.generator == expected.generator &&
+            key.params.order == expected.order && key.params.cofactor == expected.cofactor
+    }
+} catch (_: Exception) { false }
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("debug").withFlavor("store", "github")) { variant ->
+    val requestedPin = if (rgaPersonalTest) providers.gradleProperty("rgaPersonalOtaSpki").getOrElse("") else ""
+    val pin = requestedPin.takeIf(::validPersonalOtaSpki).orEmpty()
+    val resourcesTask = tasks.register<GeneratePersonalOtaResourcesTask>("generateGithubDebugPersonalOtaResources") {
+        publicSpki.set(pin)
+        outputDirectory.set(layout.buildDirectory.dir("generated/personalOta/githubDebug/res"))
+        outputManifest.set(layout.buildDirectory.file("generated/personalOta/githubDebug/AndroidManifest.xml"))
+    }
+    variant.sources.res?.addGeneratedSourceDirectory(resourcesTask, GeneratePersonalOtaResourcesTask::outputDirectory)
+    variant.sources.manifests.addGeneratedManifestFile(resourcesTask, GeneratePersonalOtaResourcesTask::outputManifest)
+}
+
+// Separate own-server release opt-in. Missing/invalid public bindings produce no updater or permission.
+// No signing material is read here and the upstream store_self_update switch stays false.
+abstract class GeneratePublicOwnServerOtaResourcesTask : DefaultTask() {
+    @get:Input abstract val publicSpki: Property<String>
+    @get:Input abstract val releaseSignerSha256: Property<String>
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+    @get:OutputFile abstract val outputManifest: RegularFileProperty
+    @TaskAction fun generate() {
+        val pin = publicSpki.get()
+        val signer = releaseSignerSha256.get()
+        val enabled = pin.isNotEmpty() && signer.isNotEmpty()
+        val values = outputDirectory.file("values/public_own_server_ota.xml").get().asFile
+        values.parentFile.mkdirs()
+        values.writeText("""<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="public_own_server_ota_enabled">$enabled</bool>
+    <string name="public_own_server_ota_compiled_variant" translatable="false">${if (enabled) "githubRelease" else ""}</string>
+    <string name="public_own_server_ota_public_spki" translatable="false">$pin</string>
+    <string name="public_own_server_ota_release_signer_sha256" translatable="false">$signer</string>
+</resources>
+""")
+        val manifest = outputManifest.get().asFile
+        manifest.parentFile.mkdirs()
+        manifest.writeText("""<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+${if (enabled) """    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <application>
+        <meta-data android:name="tech.gatealtas.rga.OWN_SERVER_UPDATE_CHANNEL" android:value="own-server-stable" />
+    </application>""" else ""}
+</manifest>
+""")
+    }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("release").withFlavor("store", "github")) { variant ->
+    val requestedPin = providers.gradleProperty("rgaPublicOwnServerOtaSpki").getOrElse("")
+    val requestedSigner = providers.gradleProperty("rgaPublicOwnServerReleaseSignerSha256").getOrElse("")
+    val bound = validPersonalOtaSpki(requestedPin) && Regex("[0-9a-f]{64}").matches(requestedSigner) &&
+        requestedSigner != "11cfb810016a9f39d75cc517e9f3a8c731e6d0b4e9156e5872c6138cadd3a017" &&
+        androidAbiFilters == listOf("arm64-v8a")
+    val resourcesTask = tasks.register<GeneratePublicOwnServerOtaResourcesTask>("generateGithubReleasePublicOwnServerOtaResources") {
+        publicSpki.set(if (bound) requestedPin else "")
+        releaseSignerSha256.set(if (bound) requestedSigner else "")
+        outputDirectory.set(layout.buildDirectory.dir("generated/publicOwnServerOta/githubRelease/res"))
+        outputManifest.set(layout.buildDirectory.file("generated/publicOwnServerOta/githubRelease/AndroidManifest.xml"))
+    }
+    variant.sources.res?.addGeneratedSourceDirectory(resourcesTask, GeneratePublicOwnServerOtaResourcesTask::outputDirectory)
+    variant.sources.manifests.addGeneratedManifestFile(resourcesTask, GeneratePublicOwnServerOtaResourcesTask::outputManifest)
+}
+
 // In AGP 9.0+ Kotlin settings for Android are configured like this:
 kotlin {
     compilerOptions {
@@ -170,7 +292,9 @@ dependencies {
     implementation("androidx.startup:startup-runtime:1.1.1")
     // The gomobile binding is an isolated experimental transport. Ordinary
     // release variants must neither build nor package it.
-    debugImplementation(project(":sharedUI:olcrtc-bin"))
+    if (!providers.gradleProperty("rgaGeneralRuntime").orElse("false").get().toBooleanStrict()) {
+        debugImplementation(project(":sharedUI:olcrtc-bin"))
+    }
     implementation(libs.androidx.activityCompose)
     implementation(libs.androidx.datastore.preferences)
 
@@ -178,8 +302,12 @@ dependencies {
     // the app does — extracted into nativeLibraryDir and exec'd on a real Android.
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    // Only the real selected-path subscription acceptance test uses this API.
+    androidTestImplementation(libs.ktor.client.core)
     // Instrumentation runs against debug; pin the optional binding's liveness.
-    androidTestImplementation(project(":sharedUI:olcrtc-bin"))
+    if (!providers.gradleProperty("rgaGeneralRuntime").orElse("false").get().toBooleanStrict()) {
+        androidTestImplementation(project(":sharedUI:olcrtc-bin"))
+    }
 }
 
 // The release workflow stages these executables before Gradle runs. Local APK

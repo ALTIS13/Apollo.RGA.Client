@@ -10,7 +10,10 @@ internal data class PhysicalNetworkSnapshot(
     val usable: Boolean,
     val validated: Boolean,
     val captive: Boolean,
-    val dnsServers: List<String>?
+    val dnsServers: List<String>?,
+    // Observation revision also changes when Android revalidates the same path.
+    // Keep the full LinkProperties revision separately for already-open sockets.
+    val linkRevision: Long? = null
 ) {
     val isProbeReady: Boolean
         get() = transport == UpstreamTransport.Cellular && usable && !captive && !dnsServers.isNullOrEmpty()
@@ -75,7 +78,8 @@ internal class PhysicalNetworkSnapshotLedger {
         entry.linkRevision = linkRevision
         return previous.copy(
             revision = previous.revision + 1,
-            dnsServers = ArrayList(dnsServers)
+            dnsServers = ArrayList(dnsServers),
+            linkRevision = linkRevision
         ).also { entry.snapshot = it }
     }
 

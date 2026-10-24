@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="personal_ota_enabled">false</bool>
+    <string name="personal_ota_compiled_variant" translatable="false"></string>
+    <string name="personal_ota_public_spki" translatable="false"></string>
+</resources>

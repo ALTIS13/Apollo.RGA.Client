@@ -38,6 +38,8 @@
 #include "hev-socks5-session-udp.h"
 
 #include "hev-socks5-tunnel.h"
+#include "rga-tun-flow-proof.h"
+#include "rga-tun-stop.h"
 
 static int run;
 static int tun_fd = -1;
@@ -83,6 +85,11 @@ netif_output_handler (struct netif *netif, struct pbuf *p)
 
     stat_rx_packets++;
     stat_rx_bytes += s;
+    if (rga_tun_flow_is_armed ()) {
+        unsigned char proof_header[120];
+        size_t copied = pbuf_copy_partial (p, proof_header, sizeof (proof_header), 0);
+        rga_tun_flow_observe (proof_header, copied, (size_t)s, 0);
+    }
 
     return ERR_OK;
 }
@@ -312,6 +319,11 @@ lwip_io_task_entry (void *data)
 
         stat_tx_packets++;
         stat_tx_bytes += buf->tot_len;
+        if (rga_tun_flow_is_armed ()) {
+            unsigned char proof_header[120];
+            size_t copied = pbuf_copy_partial (buf, proof_header, sizeof (proof_header), 0);
+            rga_tun_flow_observe (proof_header, copied, buf->tot_len, 1);
+        }
 
         hev_task_mutex_lock (&mutex);
         if (netif.input (buf, &netif) != ERR_OK)
@@ -506,6 +518,9 @@ event_task_init (void)
         return -1;
     }
 
+    if (!rga_tun_stop_publish (event_fds[1]))
+        return -1;
+
     return 0;
 }
 
@@ -522,6 +537,7 @@ event_task_fini (void)
         event_fds[0] = -1;
     }
     if (event_fds[1] >= 0) {
+        rga_tun_stop_unpublish (event_fds[1]);
         close (event_fds[1]);
         event_fds[1] = -1;
     }
@@ -574,7 +590,6 @@ lwip_timer_task_fini (void)
 static int
 mapped_dns_init (void)
 {
-    HevMappedDNS *dns;
     int cache_size;
     int network;
     int netmask;
@@ -583,28 +598,13 @@ mapped_dns_init (void)
     netmask = hev_config_get_mapdns_netmask ();
     cache_size = hev_config_get_mapdns_cache_size ();
 
-    if (!cache_size)
-        return 0;
-
-    dns = hev_mapped_dns_new (network, netmask, cache_size);
-    if (!dns)
-        return -1;
-
-    hev_mapped_dns_put (dns);
-
-    return 0;
+    return hev_mapped_dns_attach (network, netmask, cache_size);
 }
 
 static void
 mapped_dns_fini (void)
 {
-    HevMappedDNS *dns;
-
-    dns = hev_mapped_dns_get ();
-    if (dns) {
-        hev_object_unref (HEV_OBJECT (dns));
-        hev_mapped_dns_put (NULL);
-    }
+    hev_mapped_dns_detach ();
 }
 
 int

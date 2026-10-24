@@ -22,6 +22,8 @@ import org.olcbox.app.ui.theme.AppTheme
 import org.olcbox.app.net.AndroidRuntimeLocationPolicy
 import org.olcbox.app.net.AndroidExternalImportIntentPolicy
 import org.olcbox.app.update.AppUpdateService
+import org.olcbox.app.update.personal.AndroidPersonalUpdateRuntimeFactory
+import org.olcbox.app.update.personal.AndroidPublicOwnServerUpdateRuntimeFactory
 import org.olcbox.app.vpn.AndroidVpnManager
 
 class AppActivity : ComponentActivity() {
@@ -66,6 +68,23 @@ class AppActivity : ComponentActivity() {
         } else {
             null
         }
+        val personalUpdateFactory = AndroidPersonalUpdateRuntimeFactory.create(
+            context = this,
+            enabled = resources.getBoolean(R.bool.personal_ota_enabled),
+            compiledVariant = resources.getString(R.string.personal_ota_compiled_variant),
+            pinnedSpkiBase64 = resources.getString(R.string.personal_ota_public_spki),
+            routeSupplier = vpnManager::personalUpdateFetchRoute
+        )
+
+        val publicUpdateFactory = AndroidPublicOwnServerUpdateRuntimeFactory.create(
+            context = this,
+            enabled = resources.getBoolean(R.bool.public_own_server_ota_enabled),
+            compiledVariant = resources.getString(R.string.public_own_server_ota_compiled_variant),
+            pinnedSpkiBase64 = resources.getString(R.string.public_own_server_ota_public_spki),
+            releaseSignerSha256 = resources.getString(R.string.public_own_server_ota_release_signer_sha256),
+            debuggableBuild = BuildConfig.DEBUG,
+            routeSupplier = vpnManager::publicOwnServerUpdateFetchRoute
+        )
 
         val viewModel = HomeScreenViewModel(
             vpnManager = vpnManager,
@@ -86,6 +105,7 @@ class AppActivity : ComponentActivity() {
                         locationViewModel = locationViewModel,
                         vpnManager = vpnManager,
                         appUpdateService = updateService,
+                        personalUpdateFactory = personalUpdateFactory ?: publicUpdateFactory,
                         externalImportConfirmation = externalImportConfirmation
                     )
                 }

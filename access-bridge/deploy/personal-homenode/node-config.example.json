@@ -1,0 +1,23 @@
+{
+  "postgres_dsn": "postgres://rga_personal:__URL_ENCODED_PASSWORD__@qa-db:5432/rga_personal_qa?sslmode=disable",
+  "panel_origin": "https://panel.example.invalid",
+  "panel_admin_token": "__SERVER_ONLY_TOKEN__",
+  "panel_auth_kind": "api_token",
+  "panel_instance": "__EXACT_EXISTING_INSTANCE__",
+  "user_id": 0,
+  "installation_id": "__EXACT_BOUND_INSTALLATION__",
+  "installation_public_key_sha256": "__64_LOWERCASE_HEX__",
+  "room_id": "__EXISTING_BARE_ROOM_ID__",
+  "country": "__PROVEN_EGRESS_COUNTRY__",
+  "key_hex": "__64_LOWERCASE_HEX_ROOM_KEY__",
+  "lease_ttl_seconds": 300,
+  "max_snapshot_age_seconds": 30,
+  "bootstrap_tls_cert_file": "/run/personal/tls.crt",
+  "bootstrap_tls_key_file": "/run/personal/tls.key",
+  "bootstrap_listen_address": "0.0.0.0:18443",
+  "require_egress_proxy": true,
+  "egress_socks_address": "rga-egress",
+  "egress_socks_port": 1080,
+  "egress_socks_user": "__SERVER_ONLY_SOCKS_USER__",
+  "egress_socks_password": "__SERVER_ONLY_SOCKS_PASSWORD__"
+}
