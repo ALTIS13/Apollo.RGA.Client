@@ -39,7 +39,7 @@ On Unix, use `./gradlew` in place of `.\gradlew.bat`. Read test-result XML; `UP-
 .\gradlew.bat --no-daemon :androidApp:connectedDebugAndroidTest -Polcbox.android.abiFilters=x86_64
 ```
 
-Access Bridge checks:
+Access Bridge checks, with `GOWORK` pointing to a transient workspace containing both `access-bridge` and the materialized managed OlcRTC source:
 
 ```bash
 cd access-bridge
@@ -47,7 +47,7 @@ go test -count=1 ./...
 go vet ./...
 ```
 
-For a pinned personal-node build, follow `access-bridge/cmd/rga-personal-node/build-verified.ps1`; it requires a clean checkout at the pin in `scripts/olcrtc-managed-patch.json`. HomeNode input validation and Linux Docker checks are documented in `access-bridge/deploy/personal-homenode/README.md`. Do not label unavailable SDK, native, device, Linux Docker, or deployment checks as passes.
+Materialize that source with `scripts/materialize-olcrtc-managed.py` from a clean checkout at the authoritative pin; do not add a tracked `replace`. For a pinned personal-node build, follow `access-bridge/cmd/rga-personal-node/build-verified.ps1`; it requires a clean checkout at the pin in `scripts/olcrtc-managed-patch.json`. HomeNode input validation and Linux Docker checks are documented in `access-bridge/deploy/personal-homenode/README.md`. Do not label unavailable SDK, native, device, Linux Docker, or deployment checks as passes.
 
 ## Unfinished acceptance work
 
