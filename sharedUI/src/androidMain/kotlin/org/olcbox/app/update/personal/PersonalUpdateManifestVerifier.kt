@@ -27,7 +27,8 @@ object PersonalUpdateManifestVerifier {
         "companionVersionCode", "companionSha256", "companionCertSha256")
 
     fun verify(envelope: ByteArray, pinnedSpki: ByteArray, baseline: PersonalUpdateBaseline,
-        highWater: PersonalUpdateHighWater, nowEpochSeconds: Long): PersonalUpdateVerification {
+        highWater: PersonalUpdateHighWater, nowEpochSeconds: Long,
+        profile: OwnServerUpdateProfile = OwnServerUpdateProfile.Personal): PersonalUpdateVerification {
         if (envelope.size > 8192) return failure(PersonalUpdateFailure.OVERSIZE)
         if (envelope.any { it.toInt() !in 32..126 }) return failure(PersonalUpdateFailure.INVALID_ENVELOPE)
         val match = envelopePattern.matchEntire(envelope.toString(Charsets.US_ASCII))
@@ -41,26 +42,32 @@ object PersonalUpdateManifestVerifier {
         } catch (_: GeneralSecurityException) { false }
         if (!validSignature) return failure(PersonalUpdateFailure.INVALID_SIGNATURE)
         // Nothing in the payload is interpreted until the pinned-key signature passes.
-        val manifest = parse(payload) ?: return failure(PersonalUpdateFailure.INVALID_SCHEMA)
+        val manifest = (if (profile is OwnServerUpdateProfile.PublicOwnServer) parsePublic(payload) else parse(payload))
+            ?: return failure(PersonalUpdateFailure.INVALID_SCHEMA)
         if (nowEpochSeconds < 0 || manifest.expiresAt <= nowEpochSeconds ||
             manifest.issuedAt > nowEpochSeconds && manifest.issuedAt - nowEpochSeconds > 300 ||
             manifest.expiresAt <= manifest.issuedAt || manifest.expiresAt - manifest.issuedAt > 604800
         ) return failure(PersonalUpdateFailure.INVALID_TIME)
         if (manifest.versionCode <= baseline.versionCode) return failure(PersonalUpdateFailure.DOWNGRADE)
-        if (manifest.packageName != PACKAGE || baseline.packageName != PACKAGE ||
+        if (manifest.packageName != profile.packageName || baseline.packageName != profile.packageName ||
             manifest.apkCertSha256 != baseline.apkCertSha256
+        ) return failure(PersonalUpdateFailure.BASELINE_MISMATCH)
+        if (profile is OwnServerUpdateProfile.PublicOwnServer &&
+            (manifest.channel != profile.channel || baseline.channel != profile.channel ||
+                baseline.sdk !in 31..37 || manifest.apkCertSha256 != profile.releaseSignerSha256 ||
+                baseline.apkCertSha256 != profile.releaseSignerSha256)
         ) return failure(PersonalUpdateFailure.BASELINE_MISMATCH)
         if (manifest.minSdk < 23 || manifest.minSdk > baseline.sdk || manifest.abi != "arm64-v8a" ||
             manifest.abi !in baseline.supportedAbis
         ) return failure(PersonalUpdateFailure.INCOMPATIBLE_DEVICE)
-        if (manifest.apkPath != "/updates/personal/v1/${manifest.versionCode}/apollo-rga-personal.apk") {
+        if (manifest.apkPath != profile.apkPath(manifest.versionCode)) {
             return failure(PersonalUpdateFailure.INVALID_PATH)
         }
-        if (manifest.companionPackage != COMPANION_PACKAGE || baseline.companionPackage != COMPANION_PACKAGE ||
+        if (profile === OwnServerUpdateProfile.Personal && (manifest.companionPackage != COMPANION_PACKAGE || baseline.companionPackage != COMPANION_PACKAGE ||
             manifest.companionVersionCode != baseline.companionVersionCode ||
             manifest.companionSha256 != baseline.companionSha256 ||
             manifest.companionCertSha256 != baseline.companionCertSha256
-        ) return failure(PersonalUpdateFailure.COMPANION_MISMATCH)
+        )) return failure(PersonalUpdateFailure.COMPANION_MISMATCH)
         val payloadHash = MessageDigest.getInstance("SHA-256").digest(payload).joinToString("") { byte ->
             val value = byte.toInt() and 255
             "0123456789abcdef"[value shr 4].toString() + "0123456789abcdef"[value and 15]
@@ -91,6 +98,29 @@ object PersonalUpdateManifestVerifier {
                 it.params.cofactor == expected.cofactor
         }
     } catch (_: GeneralSecurityException) { null }
+
+    private fun parsePublic(payload: ByteArray): PersonalUpdateManifest? {
+        if (payload.any { it.toInt() !in 0..127 }) return null
+        val lines = payload.toString(Charsets.US_ASCII).split('\n')
+        val publicFields = fields.take(12) + "channel"
+        if (lines.size != 15 || lines[0] != "APOLLO-RGA-PUBLIC-OTA/1" || lines.last() != "") return null
+        val values = publicFields.mapIndexed { index, field ->
+            val line = lines[index + 1]
+            if (!line.startsWith("$field=")) return null
+            line.substring(field.length + 1)
+        }
+        fun number(index: Int) = values[index].takeIf(decimalPattern::matches)?.toLongOrNull()
+        val sequence = number(0)?.takeIf { it > 0 } ?: return null
+        val issuedAt = number(1) ?: return null
+        val expiresAt = number(2) ?: return null
+        val versionCode = number(4)?.takeIf { it > 0 } ?: return null
+        if (!Regex("[A-Za-z0-9.+_-]{1,64}").matches(values[5])) return null
+        val minSdk = number(6)?.takeIf { it <= Int.MAX_VALUE }?.toInt() ?: return null
+        val apkBytes = number(9)?.takeIf { it in 1..268435456 } ?: return null
+        if (listOf(10, 11).any { !hexPattern.matches(values[it]) }) return null
+        return PersonalUpdateManifest(sequence, issuedAt, expiresAt, values[3], versionCode, values[5],
+            minSdk, values[7], values[8], apkBytes, values[10], values[11], "", 0, "", "", values[12])
+    }
 
     private fun parse(payload: ByteArray): PersonalUpdateManifest? {
         if (payload.any { it.toInt() !in 0..127 }) return null

@@ -7,12 +7,14 @@ data class PersonalUpdateManifest(
     val apkSha256: String, val apkCertSha256: String,
     val companionPackage: String, val companionVersionCode: Long,
     val companionSha256: String, val companionCertSha256: String,
+    val channel: String = "personal",
 )
 
 data class PersonalUpdateBaseline(
     val packageName: String, val versionCode: Long, val apkCertSha256: String,
     val sdk: Int, val supportedAbis: Set<String>, val companionPackage: String,
     val companionVersionCode: Long, val companionSha256: String, val companionCertSha256: String,
+    val channel: String = "personal", val installedApkSha256: String? = null,
 )
 
 data class PersonalUpdateHighWater(val sequence: Long, val payloadSha256: String?)

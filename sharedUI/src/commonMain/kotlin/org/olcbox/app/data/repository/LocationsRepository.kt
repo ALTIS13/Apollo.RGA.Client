@@ -94,9 +94,36 @@ interface LocationsRepository {
     suspend fun setOnboardingSeen(atMillis: Long?)
 }
 
+/** In-memory permission for one selected-path fetch; never persist or log its closures. */
+class SubscriptionFetchFence(
+    val allowsUrl: (String) -> Boolean,
+    val current: () -> Boolean,
+    /** Runs the non-suspending persistence action under the selected session's monitor. */
+    val commit: ((() -> Unit) -> Boolean)? = null
+)
+
 data class SubscriptionFetchProxy(
     val host: String,
     val port: Int,
     val username: String = "",
-    val password: String = ""
-)
+    val password: String = "",
+    val fence: SubscriptionFetchFence? = null,
+    val ownedFetch: SubscriptionOwnedFetch? = null
+) {
+    companion object {
+        /** Non-null sentinel: a personal handoff must never fall back to default HTTP. */
+        fun blocked(): SubscriptionFetchProxy = SubscriptionFetchProxy(
+            host = "127.0.0.1",
+            port = 1,
+            fence = SubscriptionFetchFence(allowsUrl = { false }, current = { false })
+        )
+    }
+}
+
+/** Optional SAME-session fetch. Returning/throwing never permits Ktor/default HTTP fallback. */
+interface SubscriptionOwnedFetch {
+    suspend fun fetch(exactUrl: String, hwid: String, userAgent: String): SubscriptionOwnedResponse
+}
+class SubscriptionOwnedResponse(val status: Int, val headers: Map<String, List<String>>, val body: String) {
+    override fun toString() = "SubscriptionOwnedResponse([redacted])"
+}

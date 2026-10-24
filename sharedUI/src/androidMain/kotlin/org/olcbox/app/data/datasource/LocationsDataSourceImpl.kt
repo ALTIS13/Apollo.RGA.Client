@@ -7,11 +7,14 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.Json
 import org.olcbox.app.data.ACTIVE_LOCATION_CONFIG_FILE_NAME
 import org.olcbox.app.data.LEGACY_LOCATIONS_BUNDLE_FILE_NAME
 import org.olcbox.app.data.LOCATIONS_BUNDLE_FILE_NAME
 import org.olcbox.app.data.model.LocationBundleV4
+import org.olcbox.app.data.repository.SubscriptionFetchFence
 import org.olcbox.app.vpn.data.KEY_IS_VPN_CONFIG_READY
 import org.olcbox.app.vpn.data.KEY_VPN_CONFIG_PATH
 import org.olcbox.app.vpn.data.vpnPrefDataStore
@@ -55,6 +58,30 @@ class LocationsDataSourceImpl(
             json.encodeToString(LocationBundleV4.serializer(), normalized)
         )
         updateActiveLocationConfig(normalized)
+    }
+
+    /** Linearize the authoritative master write against the selected session's Stop. */
+    override suspend fun saveLocationBundleFenced(
+        bundle: LocationBundleV4, fence: SubscriptionFetchFence,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val commit = fence.commit ?: return@withContext false
+        val normalized = bundle.normalized()
+        val content = json.encodeToString(LocationBundleV4.serializer(), normalized)
+        // These operations may suspend. Admission is rechecked after them, inside
+        // the Service-owned non-suspending commit hook, never just before dispatch.
+        context.vpnPrefDataStore.edit { it[KEY_IS_VPN_CONFIG_READY] = false }
+        coroutineContext.ensureActive()
+        val saveContext = coroutineContext
+        if (!commit {
+            // Waiting for the Service monitor is not cancellable; check again
+            // after acquiring it and before the first authoritative disk write.
+            saveContext.ensureActive()
+            writeAtomic(File(context.filesDir, LOCATIONS_BUNDLE_FILE_NAME), content)
+        }) return@withContext false
+        // Derived config repair follows a master commit which already linearized.
+        // It is not authority for subscription admission or the running session.
+        updateActiveLocationConfig(normalized)
+        true
     }
 
     override suspend fun loadLegacyLocations(): List<Pair<String, String>> = withContext(Dispatchers.IO) {

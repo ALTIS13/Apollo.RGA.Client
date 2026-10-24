@@ -91,6 +91,7 @@ import org.olcbox.app.ui.SubscriptionPresenter
 import org.olcbox.app.update.currentUpdatePlatform
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.nowMillis
+import org.olcbox.app.vpn.PersonalTunnelPhase
 
 /**
  * The board, and the two pinned things that frame it.
@@ -169,6 +170,9 @@ fun HomeScreen(
 ) {
     var isLogsSheetOpen by remember { mutableStateOf(false) }
     var isAddSheetOpen by remember { mutableStateOf(false) }
+    var manualImportError by remember { mutableStateOf<String?>(null) }
+    var manualImportInProgress by remember { mutableStateOf(false) }
+    var manualImportAttempt by remember { mutableStateOf(0) }
     var isRefreshingSubscriptions by remember { mutableStateOf(false) }
     var refreshingSubscriptionUrl by remember { mutableStateOf<String?>(null) }
     var refreshErrors by remember { mutableStateOf<Map<String, ManualRefreshFailure>>(emptyMap()) }
@@ -184,6 +188,8 @@ fun HomeScreen(
 
     val isAndroid = remember { currentUpdatePlatform().os == "android" }
     val state by viewModel.state.collectAsState()
+    val personalTunnel by viewModel.personalTunnel.collectAsState()
+    val olcConnection by viewModel.olcConnection.collectAsState()
     val connectedSince by viewModel.connectedSince.collectAsState()
     val channelLatency by viewModel.channelLatency.collectAsState()
     val subscriptionSettings by viewModel.subscriptionSettings.collectAsState()
@@ -598,6 +604,8 @@ fun HomeScreen(
 
     fun handlePrimaryAction() {
         when {
+            isAndroid && olcConnection.active -> viewModel.stopPersonalVpn()
+            isAndroid && personalTunnel.phase != PersonalTunnelPhase.Inactive -> viewModel.stopPersonalVpn()
             requiresSetup -> isAddSheetOpen = true
             requiresVpnDisclosure(isAndroid, vpnDisclosureAccepted, apolloVpnDisclosureAccepted == true,
                 state.isVpnConnected, state.isVpnLoading) -> showVpnDisclosure = true
@@ -606,6 +614,7 @@ fun HomeScreen(
     }
 
     fun selectLocation(id: String) {
+        if (isAndroid && olcConnection.active) return
         viewModel.cancelAutomaticSelection()
         val wasConnected = state.isVpnConnected
         val target = locations.firstOrNull { it.storageId == id }
@@ -668,6 +677,8 @@ fun HomeScreen(
             ),
             isConnected = state.isVpnConnected,
             isConnecting = state.isVpnLoading,
+            personalTunnel = personalTunnel,
+            olcConnection = olcConnection,
             canStartVpn = state.canStartVpn,
             notice = when {
                 state.failure != null -> ApolloConnectionNotice.FAILED
@@ -676,12 +687,16 @@ fun HomeScreen(
                 else -> ApolloConnectionNotice.NONE
             },
             onDismissNotice = viewModel::dismissFailure,
-            isRefreshing = isRefreshingSubscriptions,
+            isRefreshing = isRefreshingSubscriptions || (refreshingSubscriptionUrl != null &&
+                refreshingSubscriptionUrl == selectedItem?.subscriptionUrl),
             showSettings = showAppSettingsButton,
             ambientMotionEnabled = ambientMotionEnabled,
             routeMotion = routeMotion,
             onAction = ::handlePrimaryAction,
-            onRefresh = ::refreshSubscriptions,
+            onRefresh = {
+                selectedItem?.subscriptionUrl?.trim()?.takeIf(String::isNotBlank)
+                    ?.let(::refreshSubscription) ?: refreshSubscriptions()
+            },
             onAdd = { isAddSheetOpen = true },
             onSettings = onAppSettingsClick,
             onLocationSelected = ::selectLocation,
@@ -856,7 +871,12 @@ fun HomeScreen(
         AddConfigurationSheet(
             canScanQr = canScanQr,
             hasSubscriptions = hasSubscriptions,
-            onDismiss = { isAddSheetOpen = false },
+            onDismiss = {
+                manualImportAttempt++
+                manualImportInProgress = false
+                manualImportError = null
+                isAddSheetOpen = false
+            },
             onScanQrClick = {
                 isAddSheetOpen = false
                 showCameraRationale = true
@@ -869,19 +889,35 @@ fun HomeScreen(
                 )
             },
             onManualSubscriptionUrl = { url ->
-                isAddSheetOpen = false
-                viewModel.onImportManualSubscriptionUrl(
-                    url,
-                    onComplete = {
-                        locationViewModel.loadLocations {
-                            viewModel.loadCurrentConfig {
-                                scope.launch { snackbarHostState.showSnackbar(getString(Res.string.server_list_added)) }
+                if (!manualImportInProgress) {
+                    val attempt = ++manualImportAttempt
+                    manualImportError = null
+                    manualImportInProgress = true
+                    viewModel.onImportManualSubscriptionUrl(
+                        url,
+                        onComplete = {
+                            if (attempt == manualImportAttempt) {
+                                manualImportInProgress = false
+                                isAddSheetOpen = false
+                            }
+                            locationViewModel.loadLocations {
+                                viewModel.loadCurrentConfig {
+                                    scope.launch { snackbarHostState.showSnackbar(getString(Res.string.server_list_added)) }
+                                }
+                            }
+                        },
+                        onError = { message ->
+                            if (attempt == manualImportAttempt) {
+                                manualImportInProgress = false
+                                manualImportError = message
                             }
                         }
-                    },
-                    onError = { message -> scope.launch { snackbarHostState.showSnackbar(message) } }
-                )
+                    )
+                }
             },
+            manualImportError = manualImportError,
+            manualImportInProgress = manualImportInProgress,
+            onManualUrlChanged = { manualImportError = null },
             onImportFileClick = {
                 isAddSheetOpen = false
                 onImportFileRequested()

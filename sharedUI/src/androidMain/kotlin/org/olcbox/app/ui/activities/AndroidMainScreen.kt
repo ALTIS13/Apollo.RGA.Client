@@ -33,6 +33,8 @@ import multiplatform_app.sharedui.generated.resources.update_downloading
 import multiplatform_app.sharedui.generated.resources.update_installing
 import multiplatform_app.sharedui.generated.resources.update_service_unavailable
 import multiplatform_app.sharedui.generated.resources.update_up_to_date
+import multiplatform_app.sharedui.generated.resources.personal_ota_summary
+import multiplatform_app.sharedui.generated.resources.public_own_server_ota_summary
 import org.jetbrains.compose.resources.getString
 import android.app.Activity
 import android.content.Intent
@@ -52,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -61,6 +64,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
+import org.olcbox.app.update.personal.AndroidOwnServerUpdateRuntimeFactory
+import org.olcbox.app.update.personal.PersonalUpdateAction
+import org.olcbox.app.update.personal.PersonalUpdateController
+import org.olcbox.app.update.personal.PersonalUpdateLifecycleWork
+import org.olcbox.app.update.personal.PersonalUpdateInstallNotice
+import org.olcbox.app.update.personal.PersonalInstallResult
+import org.olcbox.app.update.personal.personalUpdateUiModel
 import org.olcbox.app.admin.AdminState
 import org.olcbox.app.data.share.ConfigShareService
 import org.olcbox.app.update.AndroidUpdateSettingsStore
@@ -91,6 +101,7 @@ fun AndroidMainScreen(
     locationViewModel: LocationViewModel,
     vpnManager: AndroidVpnManager,
     appUpdateService: AppUpdateService? = null,
+    personalUpdateFactory: AndroidOwnServerUpdateRuntimeFactory? = null,
     /** Updated synchronously by the Activity for every incoming intent. */
     externalImportConfirmation: ExternalImportConfirmationState
 ) {
@@ -124,17 +135,6 @@ fun AndroidMainScreen(
     var appResumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> appResumed = true
-                Lifecycle.Event.ON_PAUSE -> appResumed = false
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
     // A TV has no camera to scan with and no clipboard worth the name: it takes a
     // server list from a phone on the same network instead.
     val television = remember(context) { context.isTelevision() }
@@ -142,6 +142,83 @@ fun AndroidMainScreen(
     var phoneImportOpen by remember { mutableStateOf(false) }
     var routerExportUrl by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val personalController by produceState<PersonalUpdateController?>(null, personalUpdateFactory) {
+        value = personalUpdateFactory?.createController()
+    }
+    var personalBusy by remember(personalController) { mutableStateOf(false) }
+    var personalInstallNotice by remember(personalController) { mutableStateOf(PersonalUpdateInstallNotice.NONE) }
+    var personalPermissionIntent by remember(personalController) { mutableStateOf<Intent?>(null) }
+    val personalLifecycleWork = remember(lifecycleOwner, personalController, scope) {
+        PersonalUpdateLifecycleWork(scope) { personalController?.foregroundCheck(true) }
+    }
+    DisposableEffect(lifecycleOwner, personalLifecycleWork) {
+        val observer = LifecycleEventObserver { _, event ->
+            // Retire authority synchronously, before any Compose state/recomposition.
+            personalLifecycleWork.onLifecycleEvent(event)
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> appResumed = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP, Lifecycle.Event.ON_DESTROY -> appResumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            personalLifecycleWork.onLifecycleEvent(Lifecycle.Event.ON_RESUME)
+            appResumed = true
+        } else {
+            personalLifecycleWork.pause()
+            appResumed = false
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            personalLifecycleWork.pause()
+        }
+    }
+    fun personalOwnerAction(action: PersonalUpdateAction) {
+        val controller = personalController ?: return
+        if (!personalLifecycleWork.isResumed || personalBusy) return
+        val ui = personalUpdateUiModel(controller.state.value, personalInstallNotice)
+        if (action != ui.primary && action != ui.secondary) return
+        if (action == PersonalUpdateAction.OPEN_SETTINGS) {
+            val intent = personalPermissionIntent ?: return
+            // This explicit action only opens settings. Return has no install callback.
+            personalPermissionIntent = null
+            personalInstallNotice = PersonalUpdateInstallNotice.PERMISSION_RETURNED
+            if (runCatching { context.startActivity(intent) }.isFailure) {
+                personalInstallNotice = PersonalUpdateInstallNotice.REFUSED
+            }
+            return
+        }
+        personalBusy = true
+        val accepted = personalLifecycleWork.launchManual {
+            try {
+                when (action) {
+                    PersonalUpdateAction.CHECK -> {
+                        personalInstallNotice = PersonalUpdateInstallNotice.NONE
+                        personalPermissionIntent = null
+                        controller.manualCheck()
+                    }
+                    PersonalUpdateAction.DOWNLOAD -> {
+                        personalInstallNotice = PersonalUpdateInstallNotice.NONE
+                        controller.download()
+                    }
+                    PersonalUpdateAction.INSTALL -> when (val result = controller.install(ownerAction = true)) {
+                        is PersonalInstallResult.PermissionRequired -> {
+                            personalPermissionIntent = result.settingsIntent
+                            personalInstallNotice = PersonalUpdateInstallNotice.PERMISSION_REQUIRED
+                        }
+                        is PersonalInstallResult.Refused -> personalInstallNotice = PersonalUpdateInstallNotice.REFUSED
+                        PersonalInstallResult.HandedOff -> {
+                            personalPermissionIntent = null
+                            personalInstallNotice = PersonalUpdateInstallNotice.NONE
+                        }
+                    }
+                    PersonalUpdateAction.OPEN_SETTINGS -> Unit
+                }
+            } finally { personalBusy = false }
+        }
+        if (accepted == null) personalBusy = false
+    }
     val connectionMode by vpnManager.connectionMode.collectAsState()
     val proxySettings by vpnManager.proxySettings.collectAsState()
     val splitTunnelSettings by vpnManager.splitTunnelSettings.collectAsState()
@@ -548,7 +625,17 @@ fun AndroidMainScreen(
             splitTunnelSettings = splitTunnelSettings,
             installedApps = installedApps,
             logs = logs,
-            showUpdates = appUpdateService != null,
+            showUpdates = appUpdateService != null || personalController != null,
+            personalUpdatesSummary = if (personalController != null) stringResource(
+                if (personalUpdateFactory?.publicOwnServer == true) Res.string.public_own_server_ota_summary else Res.string.personal_ota_summary) else null,
+            personalUpdatesContent = personalController?.let { controller ->
+                { onBack ->
+                    val personalState by controller.state.collectAsState()
+                    AndroidPersonalUpdateSettingsScreen(personalState, personalInstallNotice,
+                        enabled = appResumed && !personalBusy, onBack = onBack,
+                        onAction = ::personalOwnerAction, publicOwnServer = personalUpdateFactory?.publicOwnServer == true)
+                }
+            },
             updateSettings = updateSettings,
             updateStatusText = updateStatusText,
             updateDownloadProgress = updateDownloadProgress,

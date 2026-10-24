@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" tools:node="remove" />
+
+    <application android:usesCleartextTraffic="false">
+        <!-- Installed only with the personal androidTest APK; no launcher component. -->
+        <service
+            android:name="org.olcbox.app.PersonalTunProbeService"
+            android:exported="true"
+            android:permission="tech.gatealtas.rga.personal.permission.PERSONAL_TUN_PROBE" />
+        <service
+            android:name="org.olcbox.app.PersonalManagedUdpProbeService"
+            android:exported="true"
+            android:permission="tech.gatealtas.rga.personal.permission.PERSONAL_TUN_PROBE" />
+        <service
+            android:name="org.olcbox.app.PersonalRuParityProbeService"
+            android:exported="true"
+            android:permission="tech.gatealtas.rga.personal.permission.PERSONAL_TUN_PROBE" />
+        <service
+            android:name="org.olcbox.app.PersonalRuParityBaselineService"
+            android:process=":ru_parity_baseline"
+            android:exported="true"
+            android:permission="tech.gatealtas.rga.personal.permission.PERSONAL_TUN_PROBE" />
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$BootstrapActivity"
+            tools:node="remove" />
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyActivity"
+            tools:node="remove" />
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyFloatingActivity"
+            tools:node="remove" />
+    </application>
+
+</manifest>

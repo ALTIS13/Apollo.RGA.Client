@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.security.MessageDigest
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.Property
@@ -18,6 +19,30 @@ plugins {
 
 val olcboxVersion = providers.gradleProperty("olcbox.version").orElse("1.0.0")
 val olcboxVersionValue = olcboxVersion.get()
+
+// Explicit managed ABI selection: never fetch/build a binding or select an old debug AAR.
+val rgaGeneralRuntime = providers.gradleProperty("rgaGeneralRuntime").orElse("false").get().toBooleanStrict()
+val rgaGeneralRuntimeAar = if (rgaGeneralRuntime) {
+    val selected = providers.gradleProperty("rgaGeneralRuntimeAar").orNull
+        ?: throw GradleException("GENERAL AAR explicit file required")
+    val expected = file("D:/CodexBuilds/Apollo.RGA/mtslink-20261024/build-aar-reviewed/olcrtc-managed-v2.aar").canonicalFile
+    val input = file(selected).canonicalFile
+    fun verify() {
+        if (input != expected || !input.isFile || input.length() != 12160323L) throw GradleException("GENERAL AAR denied")
+        val digest = MessageDigest.getInstance("SHA-256")
+        input.inputStream().use { stream ->
+            val buffer = ByteArray(65536)
+            while (true) { val n = stream.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+        }
+        if (digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) } !=
+            "2d061e6270af0a8f7cd844416a7f964ab6369057d9f2c02cd3bbe2faac6db7ad") throw GradleException("GENERAL AAR denied")
+    }
+    verify() // Configuration rejects wrong inputs before compiler/dependency effects.
+    tasks.matching { it.name == "compileAndroidMain" || it.name == "compileAndroidHostTest" }.configureEach {
+        doFirst { verify() }
+    }
+    input
+} else null
 
 // Which build a user is looking at. The version cannot say: the patch number is
 // the CI run number, so a nightly and a local Xcode archive both call themselves
@@ -81,6 +106,17 @@ val olcboxCryptKeyV1 = providers.environmentVariable("OLCBOX_CRYPT_KEY_V1")
     .orElse(localBuildProperty("olcbox.cryptKeyV1").orEmpty())
 val olcboxAdminPassSha256 = providers.environmentVariable("OLCBOX_ADMIN_PASS_SHA256")
     .orElse(localBuildProperty("olcbox.adminPassSha256").orEmpty())
+// Public certificate fingerprint for the A063 USB-only HTTPS bridge. Empty in
+// ordinary builds; no bearer, room key or private key is a build input.
+val rgaPersonalBridgeCertSha256 = providers.environmentVariable("RGA_PERSONAL_BRIDGE_CERT_SHA256")
+    .orElse(localBuildProperty("rga.personalBridgeCertSha256").orEmpty())
+// Remote activation is explicit and personal-build-only; ordinary generation stays empty.
+val rgaPersonalBridgeRemoteOrigin = providers.provider {
+    if (providers.gradleProperty("rgaPersonalTest").orNull == "true") {
+        providers.environmentVariable("RGA_PERSONAL_BRIDGE_REMOTE_ORIGIN")
+            .orElse(providers.gradleProperty("rgaPersonalBridgeRemoteOrigin")).orElse("").get()
+    } else ""
+}
 val generatedAppInfoDir = layout.buildDirectory.dir("generated/source/olcboxAppInfo/commonMain")
 
 val olcrtcRepoPath = providers.environmentVariable("OLCRTC_REPO")
@@ -105,6 +141,12 @@ abstract class GenerateAppInfoTask : DefaultTask() {
     @get:Input
     abstract val adminPassSha256: Property<String>
 
+    @get:Input
+    abstract val personalBridgeCertSha256: Property<String>
+
+    @get:Input
+    abstract val personalBridgeRemoteOrigin: Property<String>
+
     /** True for an Xcode Release build — an archive headed for the App Store. */
     @get:Input
     abstract val shippingBuild: Property<Boolean>
@@ -114,6 +156,13 @@ abstract class GenerateAppInfoTask : DefaultTask() {
 
     @TaskAction
     fun generate() {
+        val remoteOrigin = personalBridgeRemoteOrigin.get()
+        require(remoteOrigin.isEmpty() || remoteOrigin == "https://rga.apollot.ru") {
+            "Personal bootstrap remote origin is not approved"
+        }
+        require(remoteOrigin.isEmpty() || personalBridgeCertSha256.get().isEmpty()) {
+            "Personal bootstrap remote and USB inputs are contradictory"
+        }
         // Never the values: one is a secret, and the other is a hash of one. The
         // point is only that a build which quietly disabled a feature says so.
         logger.lifecycle(
@@ -168,6 +217,8 @@ abstract class GenerateAppInfoTask : DefaultTask() {
                 const val BUILD: String = "${esc(buildId.get())}"
                 const val CRYPT_KEY_V1: String = "${esc(cryptKeyV1.get())}"
                 const val ADMIN_PASS_SHA256: String = "${esc(adminPassSha256.get())}"
+                const val PERSONAL_BRIDGE_CERT_SHA256: String = "${esc(personalBridgeCertSha256.get())}"
+                const val PERSONAL_BRIDGE_REMOTE_ORIGIN: String = "${esc(remoteOrigin)}"
             }
             """.trimIndent() + "\n"
         )
@@ -186,6 +237,8 @@ val generateAppInfo by tasks.registering(GenerateAppInfoTask::class) {
     buildId.set(olcboxBuildIdValue)
     cryptKeyV1.set(olcboxCryptKeyV1)
     adminPassSha256.set(olcboxAdminPassSha256)
+    personalBridgeCertSha256.set(rgaPersonalBridgeCertSha256)
+    personalBridgeRemoteOrigin.set(rgaPersonalBridgeRemoteOrigin)
     shippingBuild.set(xcodeIsReleaseBuild)
     outputDir.set(generatedAppInfoDir)
 }
@@ -303,6 +356,7 @@ kotlin {
         }
         jvmMain.get().dependsOn(jvmAndroidMain)
         androidMain.get().dependsOn(jvmAndroidMain)
+        if (rgaGeneralRuntime) androidMain.get().kotlin.srcDir("src/androidGeneral/kotlin")
 
         commonMain.dependencies {
             api(libs.compose.runtime)
@@ -345,6 +399,7 @@ kotlin {
         } }
 
         androidMain.dependencies {
+            if (rgaGeneralRuntimeAar != null) api(files(rgaGeneralRuntimeAar))
             implementation("app.rive:rive-android:11.9.2")
             implementation(libs.androidx.activityCompose)
             implementation(libs.androidx.core)

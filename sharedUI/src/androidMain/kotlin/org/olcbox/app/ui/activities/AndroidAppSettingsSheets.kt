@@ -270,6 +270,8 @@ internal fun AppSettingsSheet(
      * the App Store build already behaves through ApplicationSettingsSheet.
      */
     showUpdates: Boolean = true,
+    personalUpdatesSummary: String? = null,
+    personalUpdatesContent: (@Composable (onBack: () -> Unit) -> Unit)? = null,
     subscriptions: List<SubscriptionShareItem>,
     subscriptionSettings: SubscriptionSettings = SubscriptionSettings(),
     onSubscriptionSettingsChanged: (SubscriptionSettings) -> Unit = {},
@@ -376,6 +378,7 @@ internal fun AppSettingsSheet(
                         selectedMode = selectedMode,
                         updateSettings = updateSettings,
                         showUpdates = showUpdates,
+                        personalUpdatesSummary = personalUpdatesSummary,
                         subscriptionsCount = subscriptions.size,
                         routingSettings = routingSettings,
                         ambientAnimationsEnabled = ambientAnimationsEnabled,
@@ -479,7 +482,9 @@ internal fun AppSettingsSheet(
                         onDeleteClick = onSubscriptionDeleteClick
                     )
 
-                    AppSettingsRoute.Updates -> UpdatesSettingsContent(
+                    AppSettingsRoute.Updates -> if (personalUpdatesContent != null) {
+                        personalUpdatesContent { route = AppSettingsRoute.Hub }
+                    } else UpdatesSettingsContent(
                         settings = updateSettings,
                         statusText = updateStatusText,
                         downloadProgress = updateDownloadProgress,
@@ -503,6 +508,7 @@ private fun AppSettingsHubContent(
     selectedMode: AndroidConnectionMode,
     updateSettings: AppUpdateSettings,
     showUpdates: Boolean,
+    personalUpdatesSummary: String?,
     subscriptionsCount: Int,
     subscriptionSettings: SubscriptionSettings,
     routingSettings: RoutingSettings,
@@ -609,7 +615,7 @@ private fun AppSettingsHubContent(
                     HorizontalDivider(modifier = Modifier.padding(start = 45.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     SettingsNavigationRow(
                         title = stringResource(Res.string.update_settings),
-                        value = stringResource(Res.string.settings_app_updates_value, updateSettings.intervalHours),
+                        value = personalUpdatesSummary ?: stringResource(Res.string.settings_app_updates_value, updateSettings.intervalHours),
                         icon = Icons.Outlined.Refresh,
                         enabled = true,
                         grouped = true,

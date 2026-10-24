@@ -22,7 +22,8 @@ sealed interface PersonalBaselineRead {
     data object Refused : PersonalBaselineRead
 }
 internal data class PersonalApkMetadata(val packageName: String, val versionCode: Long,
-    val certSha256: String, val minSdk: Int, val abis: Set<String>, val source: File? = null)
+    val certSha256: String, val minSdk: Int, val abis: Set<String>, val source: File? = null,
+    val channel: String? = null)
 internal interface PersonalApkMetadataReader {
     fun installed(packageName: String): PersonalApkMetadata?
     fun archive(file: File): PersonalApkMetadata?
@@ -30,13 +31,17 @@ internal interface PersonalApkMetadataReader {
 class AndroidPersonalApkVerifier internal constructor(
     cacheDir: File, private val reader: PersonalApkMetadataReader,
     private val sdk: Int, private val abis: Set<String>, private val now: () -> Long,
+    private val profile: OwnServerUpdateProfile,
 ) {
+    internal constructor(cacheDir: File, reader: PersonalApkMetadataReader, sdk: Int,
+        abis: Set<String>, now: () -> Long) : this(cacheDir, reader, sdk, abis, now, OwnServerUpdateProfile.Personal)
     // Normalize the producer root, never caller-supplied APK paths; owned() stays strict.
     private val cacheDir = cacheDir.canonicalFile
 
-    constructor(context: Context) : this(File(context.applicationContext.cacheDir, "updates/personal"),
-        PackageManagerMetadataReader(context.applicationContext.packageManager), Build.VERSION.SDK_INT,
-        Build.SUPPORTED_ABIS.toSet(), { System.currentTimeMillis() / 1000 })
+    constructor(context: Context, profile: OwnServerUpdateProfile = OwnServerUpdateProfile.Personal) :
+        this(File(context.applicationContext.cacheDir, profile.cacheName),
+            PackageManagerMetadataReader(context.applicationContext.packageManager, profile), Build.VERSION.SDK_INT,
+            Build.SUPPORTED_ABIS.toSet(), { System.currentTimeMillis() / 1000 }, profile)
 
     private val downloads = mutableSetOf<String>()
     private val tokens = Collections.newSetFromMap(IdentityHashMap<VerifiedPersonalApk, Boolean>())
@@ -46,18 +51,29 @@ class AndroidPersonalApkVerifier internal constructor(
     private data class SourceStamp(val path: String, val size: Long, val modified: Long)
     private fun stamp(file: File) = SourceStamp(file.canonicalPath, file.length(), file.lastModified())
 
-    fun readBaseline(): PersonalBaselineRead = try {
-        if (sdk < 24) return PersonalBaselineRead.Refused
-        val main = reader.installed(PACKAGE) ?: return PersonalBaselineRead.Refused
-        val companion = reader.installed(COMPANION) ?: return PersonalBaselineRead.Refused
-        val source = companion.source ?: return PersonalBaselineRead.Refused
-        if (main.packageName != PACKAGE || main.versionCode < 1 || main.certSha256 != CERT ||
-            companion.packageName != COMPANION || companion.versionCode != 0L || companion.certSha256 != CERT ||
-            !source.isFile || source.length() !in 1..MAX_BYTES || "arm64-v8a" !in abis
-        ) return PersonalBaselineRead.Refused
-        PersonalBaselineRead.Ready(PersonalUpdateBaseline(main.packageName, main.versionCode, main.certSha256,
-            sdk, abis.toSet(), companion.packageName, companion.versionCode, sha256(source), companion.certSha256))
-    } catch (_: Exception) { PersonalBaselineRead.Refused }
+    fun readBaseline(): PersonalBaselineRead {
+        return try {
+            if (sdk < 24) return PersonalBaselineRead.Refused
+            val main = reader.installed(profile.packageName) ?: return PersonalBaselineRead.Refused
+            if (profile is OwnServerUpdateProfile.PublicOwnServer) {
+                val source = main.source ?: return PersonalBaselineRead.Refused
+                if (sdk !in 31..37 || main.packageName != profile.packageName || main.versionCode < 1 ||
+                    main.certSha256 != profile.releaseSignerSha256 || main.channel != profile.channel ||
+                    !source.isFile || source.length() !in 1..MAX_BYTES || "arm64-v8a" !in abis)
+                    return PersonalBaselineRead.Refused
+                return PersonalBaselineRead.Ready(PersonalUpdateBaseline(main.packageName, main.versionCode,
+                    main.certSha256, sdk, abis.toSet(), "", 0, "", "", profile.channel, sha256(source)))
+            }
+            val companion = reader.installed(COMPANION) ?: return PersonalBaselineRead.Refused
+            val source = companion.source ?: return PersonalBaselineRead.Refused
+            if (main.packageName != PACKAGE || main.versionCode < 1 || main.certSha256 != CERT ||
+                companion.packageName != COMPANION || companion.versionCode != 0L || companion.certSha256 != CERT ||
+                !source.isFile || source.length() !in 1..MAX_BYTES || "arm64-v8a" !in abis
+            ) return PersonalBaselineRead.Refused
+            PersonalBaselineRead.Ready(PersonalUpdateBaseline(main.packageName, main.versionCode, main.certSha256,
+                sdk, abis.toSet(), companion.packageName, companion.versionCode, sha256(source), companion.certSha256))
+        } catch (_: Exception) { PersonalBaselineRead.Refused }
+    }
 
     @Synchronized fun newDownloadFile(): File {
         check(cacheDir.mkdirs() || cacheDir.isDirectory) { "Personal update cache unavailable" }
@@ -105,7 +121,8 @@ class AndroidPersonalApkVerifier internal constructor(
             if (!bytesMatch(frozen, verifiedManifest.manifest)) return refused(PersonalApkRefusal.FILE)
             failureStage = Diagnostic.EXCEPTION_FINAL_BASELINE
             if (!currentBaseline(baseline)) return refused(PersonalApkRefusal.BASELINE)
-            val companionSource = reader.installed(COMPANION)?.source ?: return refused(PersonalApkRefusal.BASELINE)
+            val companionSource = reader.installed(if (profile === OwnServerUpdateProfile.Personal) COMPANION
+                else profile.packageName)?.source ?: return refused(PersonalApkRefusal.BASELINE)
             failureStage = Diagnostic.EXCEPTION_STAMP
             val token = Frozen(frozen, verifiedManifest, baseline, stamp(frozen), stamp(companionSource))
             tokens += token
@@ -138,12 +155,18 @@ class AndroidPersonalApkVerifier internal constructor(
         if (token == null || token !in tokens || file != token.file || !owned(file) ||
             !file.isFile || file.canWrite() || stamp(file) != token.fileStamp || !validTime(token.verified.manifest)) false
         else {
-            val main = reader.installed(PACKAGE)
+            val main = reader.installed(profile.packageName)
+            if (profile is OwnServerUpdateProfile.PublicOwnServer) {
+                main?.packageName == token.baseline.packageName && main.versionCode == token.baseline.versionCode &&
+                    main.certSha256 == profile.releaseSignerSha256 && main.certSha256 == token.baseline.apkCertSha256 &&
+                    main.channel == profile.channel && main.source?.let { it.isFile && stamp(it) == token.companionStamp } == true
+            } else {
             val companion = reader.installed(COMPANION)
             main?.packageName == token.baseline.packageName && main.versionCode == token.baseline.versionCode &&
                 main.certSha256 == token.baseline.apkCertSha256 && companion?.packageName == token.baseline.companionPackage &&
                 companion.versionCode == token.baseline.companionVersionCode && companion.certSha256 == token.baseline.companionCertSha256 &&
                 companion.source?.let { it.isFile && stamp(it) == token.companionStamp } == true
+            }
         }
     } catch (_: Exception) { false }
 
@@ -168,16 +191,19 @@ class AndroidPersonalApkVerifier internal constructor(
     }
     private fun metadataMatch(file: File, m: PersonalUpdateManifest, b: PersonalUpdateBaseline): Boolean {
         val archive = reader.archive(file) ?: run { diagnostic(Diagnostic.ARCHIVE_NULL); return false }
-        return metadataCheck(m.packageName == PACKAGE && archive.packageName == m.packageName, Diagnostic.PACKAGE) &&
+        return metadataCheck(m.packageName == profile.packageName && archive.packageName == m.packageName, Diagnostic.PACKAGE) &&
+            metadataCheck(profile !is OwnServerUpdateProfile.PublicOwnServer ||
+                m.channel == profile.channel && archive.channel == profile.channel && b.channel == profile.channel &&
+                m.apkCertSha256 == profile.releaseSignerSha256, Diagnostic.CERT) &&
             metadataCheck(archive.versionCode == m.versionCode && m.versionCode > b.versionCode, Diagnostic.VERSION) &&
             metadataCheck(m.apkCertSha256 == b.apkCertSha256 && archive.certSha256 == m.apkCertSha256, Diagnostic.CERT) &&
             metadataCheck(archive.minSdk == m.minSdk && m.minSdk in 23..sdk, Diagnostic.MIN_SDK) &&
             metadataCheck(m.abi == "arm64-v8a" && archive.abis == setOf(m.abi), Diagnostic.ABI) &&
             metadataCheck(zipAbis(file) == setOf(m.abi), Diagnostic.ZIP_ABI) &&
             metadataCheck(m.abi in abis, Diagnostic.ABI) &&
-            metadataCheck(m.apkPath == "/updates/personal/v1/${m.versionCode}/apollo-rga-personal.apk", Diagnostic.PATH) &&
-            metadataCheck(
-            m.companionPackage == b.companionPackage && m.companionVersionCode == b.companionVersionCode &&
+            metadataCheck(m.apkPath == profile.apkPath(m.versionCode), Diagnostic.PATH) &&
+            metadataCheck(profile is OwnServerUpdateProfile.PublicOwnServer && profile.acceptsManifest(m) ||
+            profile === OwnServerUpdateProfile.Personal && m.companionPackage == b.companionPackage && m.companionVersionCode == b.companionVersionCode &&
             m.companionSha256 == b.companionSha256 && m.companionCertSha256 == b.companionCertSha256, Diagnostic.COMPANION)
     }
     private enum class Diagnostic {
@@ -206,7 +232,7 @@ class AndroidPersonalApkVerifier internal constructor(
         return PersonalApkVerification.Refused(reason)
     }
 
-    private class PackageManagerMetadataReader(val manager: PackageManager) : PersonalApkMetadataReader {
+    private class PackageManagerMetadataReader(val manager: PackageManager, val profile: OwnServerUpdateProfile) : PersonalApkMetadataReader {
         override fun installed(packageName: String): PersonalApkMetadata? {
             val info = manager.getPackageInfo(packageName, flags())
             // v1 intentionally does not accept split packages or signer rotation/multiple signers.
@@ -220,7 +246,8 @@ class AndroidPersonalApkVerifier internal constructor(
             return metadata(info)?.copy(abis = zipAbis(file))
         }
         @Suppress("DEPRECATION")
-        private fun flags(): Int = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        private fun flags(): Int = (if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES) or
+            (if (profile is OwnServerUpdateProfile.PublicOwnServer) PackageManager.GET_META_DATA else 0)
         @Suppress("DEPRECATION")
         private fun metadata(info: PackageInfo): PersonalApkMetadata? {
             if (Build.VERSION.SDK_INT < 24) { diagnostic(Diagnostic.METADATA_SDK); return null }
@@ -235,7 +262,9 @@ class AndroidPersonalApkVerifier internal constructor(
             val application = info.applicationInfo ?: run { diagnostic(Diagnostic.APPLICATION_INFO_NULL); return null }
             return PersonalApkMetadata(info.packageName, version,
                 hex(MessageDigest.getInstance("SHA-256").digest(signatures.single().toByteArray())),
-                application.minSdkVersion, emptySet())
+                application.minSdkVersion, emptySet(), channel =
+                    if (profile is OwnServerUpdateProfile.PublicOwnServer)
+                        application.metaData?.getString(OwnServerUpdateProfile.CHANNEL_METADATA) else null)
         }
     }
     companion object {

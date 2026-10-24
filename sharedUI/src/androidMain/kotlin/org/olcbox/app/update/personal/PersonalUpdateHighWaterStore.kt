@@ -14,7 +14,9 @@ sealed interface PersonalHighWaterRead {
     data object IoFailure : PersonalHighWaterRead
 }
 enum class PersonalHighWaterCommit { STORED, UNCHANGED, DENIED, ROLLBACK, CONFLICT, CORRUPT, IO_FAILURE }
-class PersonalUpdateHighWaterStore(private val file: File) {
+class PersonalUpdateHighWaterStore(private val file: File,
+    private val profile: OwnServerUpdateProfile = OwnServerUpdateProfile.Personal) {
+    private val record = Regex(Regex.escape(profile.highWaterHeader) + "\n([1-9][0-9]*)\n([0-9a-f]{64})\n")
     private val atomicFile = AtomicFile(file)
     fun read(): PersonalHighWaterRead = synchronized(lock) { readLocked() }
 
@@ -52,7 +54,7 @@ class PersonalUpdateHighWaterStore(private val file: File) {
                     check(!performed) { "Invalid update commit fence" }
                     cancellation.ensureActive()
                     stream = atomicFile.startWrite()
-                    stream!!.write("APOLLO-RGA-PERSONAL-HIGH-WATER/1\n${next.sequence}\n${next.payloadSha256}\n".toByteArray(Charsets.US_ASCII))
+                    stream!!.write("${profile.highWaterHeader}\n${next.sequence}\n${next.payloadSha256}\n".toByteArray(Charsets.US_ASCII))
                     stream!!.fd.sync()
                     cancellation.ensureActive()
                     atomicFile.finishWrite(stream)
@@ -88,6 +90,6 @@ class PersonalUpdateHighWaterStore(private val file: File) {
         // Includes reopen/multiple store instances: AtomicFile itself provides no thread exclusion.
         private val lock = Any()
         private val hash = Regex("[0-9a-f]{64}")
-        private val record = Regex("APOLLO-RGA-PERSONAL-HIGH-WATER/1\n([1-9][0-9]*)\n([0-9a-f]{64})\n")
+        // Each immutable profile has a distinct record grammar and private file.
     }
 }

@@ -189,7 +189,9 @@ public final class PersonalTunProbeService extends Service {
             SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
                     .createSocket(attempt.socket, HOST, PORT, true);
             if (!sockets.publish(attempt.token, tls)) { diagnostic(Stage.GO_STALE); return; }
-            tls.setSoTimeout(IO_TIMEOUT_MS);
+            // Selected bulk traffic can delay remote TLS/reads on the shared transport.
+            // Bound wrapper reads at 15 s; the caller's enclosing IPC deadline remains 20 s.
+            tls.setSoTimeout(TLS_IO_TIMEOUT_MS);
             SSLParameters parameters = tls.getSSLParameters();
             parameters.setEndpointIdentificationAlgorithm("HTTPS");
             parameters.setServerNames(Collections.singletonList(new SNIHostName(HOST)));
@@ -398,6 +400,7 @@ public final class PersonalTunProbeService extends Service {
     private static final String KEY_LOCAL_PORT = "localPort", KEY_HTTP_STATUS = "httpStatus";
     private static final String KEY_EGRESS_MATCHED = "egressMatched", KEY_LOCAL_IPV4 = "localIpv4", KEY_FAILURE = "failure";
     private static final int IO_TIMEOUT_MS = 5_000;
+    private static final int TLS_IO_TIMEOUT_MS = 15_000;
     private static final long ATTEMPT_TIMEOUT_MS = 25_000L;
     private static final int MAX_LINE = 1024, MAX_HEADERS = 4096, MAX_BODY = 1024;
     private static final Pattern NONCE_PATTERN = Pattern.compile("[0-9a-f]{32}");

@@ -19,10 +19,15 @@ error. The verifier repair is proven on A063. The companion closure repair is
 source-reviewed, production-owner regression7/0, and Android-compiled; its native
 acceptance remains open. No gate is relaxed: manually replace companion0 in place
 with the same signer and a newly frozen exact hash before the first true OTA.
-Published candidates3/4 are immutable, withdrawn from offers and never installed.
-The first real OTA candidate is now5/sequence3, declaring the repaired helper's
-exact installed hash. This is a dependency bootstrap repair, not automatic pair
-updating. A063 is released at the user's request, subscription retained, VPN off,
+Published candidates3/4/5/6 are immutable, withdrawn from offers and never installed.
+Realme also exposed an over-sensitive ordinary-network telemetry fence and strict
+producer-path ownership failure. Telemetry normalization retained semantic guards;
+canonicalizing only the private producer root retained strict caller rejection.
+Realme Ready6/hash evidence proves the latter fix, but6 is deliberately not installed
+because it lacks that fix for its own next update. The first installation candidate
+is now7/sequence5, declaring the repaired helper's exact installed hash and including
+both fixes. This is a dependency bootstrap repair, not automatic pair updating.
+A063 is released at the user's request, subscription retained, VPN off,
 WiFi/font/USB-awake restored. Finish ordinary checks on Realme when connected;
 selected OlcRTC/install/retention proof waits for explicit A063 return. No general
 release, quota or production Remnawave changes are authorized by this checkpoint.

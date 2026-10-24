@@ -26,15 +26,23 @@ object OlcrtcDirectRules {
     /**
      * What the engine is handed for [routing]: none under Global; under a bypass its
      * region's rules with the user's own ([text] with custom rules); otherwise only
-     * the user's direct rules. The engine takes "these go direct" and nothing else,
-     * so under BlockedOnly a room carries everything but those — the rooms stay
+     * the user's direct rules. The managed Android engine also takes mandatory
+     * `tunnel-domain:` exceptions, which win over every positive name rule.
+     * Legacy text() callers retain the original positive-only syntax. Under
+     * BlockedOnly a room carries everything but allowed direct rules — rooms stay
      * outside that mode by design.
      */
     suspend fun forRouting(routing: Routing): String = when (routing) {
         Routing.Global -> NONE
-        is Routing.RuleBased -> when (val policy = routing.policy) {
-            is Routing.Policy.Bypass -> text(XrayGeodata.lists(policy.region), routing.custom)
-            Routing.Policy.Tunnel, Routing.Policy.BlockedOnly -> customOnly(routing.custom)
+        is Routing.RuleBased -> {
+            // Android's managed native parser applies these before any positive
+            // regional/custom rule. Keep text() legacy-compatible for iOS.
+            val mandatory = (listOf("cc", "at") + routing.mandatoryTunnelSuffixes).distinct()
+                .joinToString("\n", postfix = "\n") { "tunnel-domain:$it" }
+            mandatory + when (val policy = routing.policy) {
+                is Routing.Policy.Bypass -> text(XrayGeodata.lists(policy.region), routing.custom)
+                Routing.Policy.Tunnel, Routing.Policy.BlockedOnly -> customOnly(routing.custom)
+            }
         }
     }
 

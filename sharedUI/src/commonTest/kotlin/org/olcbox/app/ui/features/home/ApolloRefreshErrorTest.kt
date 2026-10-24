@@ -10,6 +10,24 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ApolloRefreshErrorTest {
+    @Test fun changedSessionHasItsOwnActionableMessageRatherThanNetworkFailure() {
+        val session = SubscriptionRefreshFailure("https://example.test/private-test-token", SubscriptionRefreshError.SessionChanged)
+        val network = session.copy(error = SubscriptionRefreshError.Unreachable)
+        assertEquals("Connection changed. Refresh the server list again.", session.message())
+        assertFalse(session.message() == network.message())
+    }
+
+    @Test fun changedSessionReportNeverReflectsSubscriptionUrlOrToken() {
+        val url = "https://example.test/private-test-token"
+        val report = SubscriptionRefreshReport(failures = listOf(
+            SubscriptionRefreshFailure(url, SubscriptionRefreshError.SessionChanged, 599)
+        ))
+        for (message in listOf(report.singleMessage(), report.bulkMessage(), report.failures.single().message())) {
+            assertFalse(message.contains(url))
+            assertFalse(message.contains("private-test-token"))
+            assertFalse(message.contains("599"))
+        }
+    }
     @Test fun manualFailureSurvivesUnchangedSnapshotButClearsAfterSuccessfulAutoRefresh() {
         val failure = ManualRefreshFailure(SubscriptionRefreshError.Unreachable, lastSuccessfulRefreshAt = 100L)
         assertEquals(SubscriptionRefreshError.Unreachable, failure.currentError(lastSuccessfulRefreshAt = 100L))

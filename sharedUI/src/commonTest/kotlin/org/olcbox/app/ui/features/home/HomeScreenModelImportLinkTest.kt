@@ -73,6 +73,17 @@ class HomeScreenModelImportLinkTest {
     private val realityLink = "vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443" +
         "?security=reality&encryption=none&pbk=PUBKEY&sid=ab12&fp=chrome&sni=www.example.com&flow=xtls-rprx-vision&type=tcp#DE"
 
+    @Test fun personalStopFromErrorRetriesStopInsteadOfStarting() = runTest {
+        val vpn = IdleVpnManager()
+        val vm = viewModel(vpn)
+        vpn.status.value = VpnStatus.Error("synthetic stop failure")
+
+        vm.stopPersonalVpn()
+
+        assertEquals(1, vpn.stops)
+        assertEquals(0, vpn.starts)
+    }
+
     @Test fun viewModelDoesNotTreatLegacyDisclosureAsApolloAcknowledgement() = runTest {
         source.stored = LocationBundleV4(vpnDisclosureAcceptedAt = 1_000L)
         val vm = viewModel()

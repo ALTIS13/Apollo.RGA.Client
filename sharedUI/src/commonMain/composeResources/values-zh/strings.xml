@@ -287,6 +287,7 @@
     <string name="refresh_server_list">更新服务器列表</string>
     <string name="refresh_unchanged">服务器列表没有变化</string>
     <string name="refresh_unreachable">无法连接服务器列表主机——请检查网络连接</string>
+    <string name="refresh_session_changed">连接已更改。请重新更新服务器列表。</string>
     <string name="refresh_updated">服务器列表已更新</string>
     <string name="regenerate_password">重新生成密码</string>
     <string name="region_blocked_only">仅被封锁的</string>
@@ -511,11 +512,11 @@
     <string name="apollo_connected">已连接</string>
     <string name="apollo_connecting">正在连接…</string>
     <string name="apollo_reconnecting">正在重新连接…</string>
-    <string name="apollo_link_idle">RGA // OFFLINE · 通道未激活</string>
-    <string name="apollo_link_connecting">RGA // CONNECTING · 正在建立通道</string>
-    <string name="apollo_link_connected">RGA // ONLINE · 通道已激活</string>
-    <string name="apollo_link_reconnecting">RGA // RECOVERING · 正在恢复通道</string>
-    <string name="apollo_link_failed">RGA // INTERRUPTED · 连接已中断</string>
+    <string name="apollo_link_idle">RGA // OFFLINE</string>
+    <string name="apollo_link_connecting">RGA // CONNECTING</string>
+    <string name="apollo_link_connected">RGA // ONLINE</string>
+    <string name="apollo_link_reconnecting">RGA // RECOVERING</string>
+    <string name="apollo_link_failed">RGA // INTERRUPTED</string>
     <string name="apollo_disconnected">未连接</string>
     <string name="apollo_connect">连接</string>
     <string name="apollo_disconnect">断开连接</string>
@@ -528,6 +529,11 @@
     <string name="apollo_background_notice">连接信息已更改。请查看当前状态。</string>
     <string name="apollo_refresh">刷新订阅</string>
     <string name="apollo_add">添加订阅</string>
+    <string name="apollo_import_more">其他方式</string>
+    <string name="apollo_import_subtitle">使用您现有的订阅链接。</string>
+    <string name="apollo_import_paste">粘贴已复制的链接</string>
+    <string name="apollo_import_paste_hint">从剪贴板</string>
+    <string name="apollo_import_scan_hint">订阅页面上的二维码</string>
     <string name="apollo_settings">设置</string>
     <string name="apollo_destinations">选择连接</string>
     <string name="apollo_single_connection_note">整个设备一次只使用一个选定的连接。</string>
@@ -594,4 +600,26 @@
     <plurals name="removed_locations">
         <item quantity="other">已移除 %1$d 个节点</item>
     </plurals>
+    <!-- Personal signed OTA: separate from the disabled legacy updater. -->
+    <string name="personal_ota_summary">已签名的个人更新</string>
+    <string name="personal_ota_intro">检查兼容且已签名的更新，然后由您决定下载和安装。订阅不会改变。</string>
+    <string name="personal_ota_idle">尚未检查更新。</string>
+    <string name="personal_ota_checking">正在检查兼容更新…</string>
+    <string name="personal_ota_available">经过验证的更新可供下载。</string>
+    <string name="personal_ota_downloading">正在下载并验证更新…</string>
+    <string name="personal_ota_ready">更新已验证并准备就绪。Android 将请您确认安装。</string>
+    <string name="personal_ota_session_changed">连接已改变，更新已取消。连接稳定后请重新检查。</string>
+    <string name="personal_ota_unavailable">当前连接无法获取更新。现有应用和订阅没有改变。</string>
+    <string name="personal_ota_network_refused">无法完成更新检查或下载。请稍后重试；现有应用没有改变。</string>
+    <string name="personal_ota_compatibility_refused">无法确认已安装应用与配套服务的兼容性。请保留此版本并使用经过验证的手动更新。</string>
+    <string name="personal_ota_not_confirmed">尚未确认有兼容更新。当前版本没有改变。</string>
+    <string name="personal_ota_not_newer">提供的版本不比已安装的版本更新。应用没有改变。</string>
+    <string name="personal_ota_handed_off">请求已交给 Android。此处未确认安装成功；请在系统安装程序中完成或拒绝安装。</string>
+    <string name="personal_ota_permission_required">Android 需要允许此应用安装软件。仅在您希望继续时打开设置。</string>
+    <string name="personal_ota_permission_returned">从设置返回不会安装更新。请再次点按安装以继续，或离开此页面。</string>
+    <string name="personal_ota_install_refused">Android 无法开始安装。现有应用没有改变。您可以重试。</string>
+    <string name="personal_ota_vpn_warning">安装更新可能重启应用和 VPN。请在可以接受连接中断时开始。</string>
+    <string name="personal_ota_install_action">安装更新</string>
+    <string name="personal_ota_settings_action">打开安装权限设置</string>
+    <string name="personal_ota_candidate_version">更新版本：%1$s</string>
 </resources>

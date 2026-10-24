@@ -2,19 +2,32 @@ package org.olcbox.app.ui.features.home
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.v2.runComposeUiTest
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.olcbox.app.data.model.LocationConfig
@@ -24,6 +37,9 @@ import org.olcbox.app.net.LocationKind
 import org.olcbox.app.ui.SubscriptionDisplayState
 import org.olcbox.app.ui.SubscriptionPresentation
 import org.olcbox.app.ui.features.locations.LocationItem
+import org.olcbox.app.vpn.PersonalActivePath
+import org.olcbox.app.vpn.PersonalTunnelPhase
+import org.olcbox.app.vpn.PersonalTunnelUiState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -58,6 +74,151 @@ class ApolloHomeContentTest {
         expiresAtEpochMs = null,
         refreshError = null
     )
+
+    @Test fun firstLaunchOffersOneWorkingImportActionInsteadOfDisabledConnection() = runComposeUiTest {
+        var imports = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = emptyList(), selectedLocationId = null,
+                    subscription = active.copy(state = SubscriptionDisplayState.UNKNOWN),
+                    isConnected = false, isConnecting = false, canStartVpn = false,
+                    isRefreshing = false, showSettings = false,
+                    onAction = {}, onRefresh = {}, onAdd = { imports++ }, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+
+        onNodeWithTag("apollo-action").assertIsEnabled()
+            .assertContentDescriptionEquals("Add subscription")
+            .performClick()
+        assertEquals(1, imports)
+        onNodeWithText("Subscription status unknown").assertDoesNotExist()
+        onAllNodesWithText("Add subscription").assertCountEquals(1)
+        onAllNodesWithContentDescription("Add subscription").assertCountEquals(1)
+        onNodeWithText("Choose a connection").assertDoesNotExist()
+    }
+
+    @Test fun connectionCodeRemainsReadableAtLargeFontScale() = runComposeUiTest {
+        setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.3f)) {
+                MaterialTheme {
+                    Box(Modifier.width(360.dp).height(800.dp)) {
+                        ApolloHomeContent(
+                            locations = listOf(dutchWeb), selectedLocationId = dutchWeb.storageId,
+                            subscription = active, isConnected = false, isConnecting = false,
+                            canStartVpn = true, isRefreshing = false, showSettings = false,
+                            onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                            onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                        )
+                    }
+                }
+            }
+        }
+
+        val layouts = mutableListOf<TextLayoutResult>()
+        val heroBounds = onNodeWithTag("apollo-hero").fetchSemanticsNode().boundsInRoot
+        onNodeWithText("RGA // OFFLINE", substring = true)
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertTrue(layouts.isNotEmpty() && layouts.none { it.hasVisualOverflow },
+            "connection code must not ellipsize on a 360dp phone at 1.3× font scale: " +
+                "hero=$heroBounds, " + layouts.joinToString { "text=${it.layoutInput.text}, size=${it.size}, lines=${it.lineCount}, overflow=${it.hasVisualOverflow}" })
+    }
+
+    @Test fun firstLaunchImportLabelRemainsReadableAtAccessibilityFontScale() = runComposeUiTest {
+        setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 2f)) {
+                MaterialTheme {
+                    Box(Modifier.width(360.dp).height(800.dp)) {
+                        ApolloHomeContent(
+                            locations = emptyList(), selectedLocationId = null,
+                            subscription = active.copy(state = SubscriptionDisplayState.UNKNOWN),
+                            isConnected = false, isConnecting = false, canStartVpn = false,
+                            isRefreshing = false, showSettings = false,
+                            onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                            onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                        )
+                    }
+                }
+            }
+        }
+
+        val layouts = mutableListOf<TextLayoutResult>()
+        onNodeWithText("Add subscription", useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertTrue(layouts.isNotEmpty() && layouts.none { it.hasVisualOverflow },
+            "the primary import action must not ellipsize at 2× accessibility font scale")
+    }
+
+    @Test fun personalCheckingKeepsStopAvailableWithoutClaimingConnection() = runComposeUiTest {
+        var stops = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = emptyList(), selectedLocationId = null,
+                    subscription = active.copy(state = SubscriptionDisplayState.EXPIRED),
+                    isConnected = true, isConnecting = true, canStartVpn = false,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(PersonalTunnelPhase.Checking, PersonalActivePath.OlcRtc),
+                    onAction = { stops++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Проверяем").assertExists()
+        onNodeWithText("Работает").assertDoesNotExist()
+        onNodeWithTag("apollo-active-path").assertTextEquals("Активный путь: OlcRTC")
+        onNodeWithTag("apollo-action").performClick()
+        assertEquals(1, stops)
+    }
+
+    @Test fun personalSwitchingAndUnavailableBothOfferStopWithoutSelectedLocation() = runComposeUiTest {
+        val phase = mutableStateOf(PersonalTunnelPhase.Switching)
+        var stops = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = emptyList(), selectedLocationId = null,
+                    subscription = active.copy(state = SubscriptionDisplayState.DEVICE_DENIED),
+                    isConnected = false, isConnecting = false, canStartVpn = false,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(phase.value, PersonalActivePath.Unknown),
+                    onAction = { stops++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Переключаемся").assertExists()
+        onNodeWithTag("apollo-action").performClick()
+        runOnIdle { phase.value = PersonalTunnelPhase.Unavailable }
+        onNodeWithText("Недоступен").assertExists()
+        onNodeWithTag("apollo-action").performClick()
+        assertEquals(2, stops)
+    }
+
+    @Test fun personalWorkingRequiresTheExplicitPhaseNotGenericVpnFlags() = runComposeUiTest {
+        val phase = mutableStateOf(PersonalTunnelPhase.Checking)
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active,
+                    isConnected = true, isConnecting = false, canStartVpn = true,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(phase.value, PersonalActivePath.OlcRtc),
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Проверяем").assertExists()
+        onNodeWithText("Работает").assertDoesNotExist()
+        onNodeWithTag("apollo-action-flag", useUnmergedTree = true).assertDoesNotExist()
+        runOnIdle { phase.value = PersonalTunnelPhase.Working }
+        onNodeWithText("Работает").assertExists()
+        onNodeWithTag("apollo-action").assertTextEquals("Остановить")
+    }
 
     @Test fun heroThenSubscriptionThenCountryGroupsWithHumanModesAndExplicitSelection() = runComposeUiTest {
         setContent {
@@ -108,7 +269,7 @@ class ApolloHomeContentTest {
         }
         onAllNodesWithText("🇫🇮 Finland").assertCountEquals(1)
         onNodeWithText("Subscription active").assertExists()
-        onNodeWithText("RGA // OFFLINE · CHANNEL INACTIVE").assertExists()
+        onNodeWithText("RGA // OFFLINE").assertExists()
         onNodeWithText("→", useUnmergedTree = true).assertDoesNotExist()
         onNodeWithText("Route not verified").assertExists()
         onNodeWithText("Connect").performClick()
@@ -581,7 +742,7 @@ class ApolloHomeContentTest {
             }
         }
         onNodeWithText("Reconnecting…").assertExists()
-        onNodeWithText("RGA // RECOVERING · RESTORING CHANNEL").assertExists()
+        onNodeWithText("RGA // RECOVERING").assertExists()
         onAllNodesWithText("Disconnect").assertCountEquals(1)
         assertEquals(ApolloHeroPhase.CONNECTING, observedPhase)
     }

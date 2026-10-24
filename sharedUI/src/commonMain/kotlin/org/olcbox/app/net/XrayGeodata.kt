@@ -8,13 +8,11 @@ import multiplatform_app.sharedui.generated.resources.Res
  * `keyword:`, `regexp:` for names; `a.b.c.d/n` for addresses). The olcRTC
  * engine reads the same text ([OlcrtcDirectRules]).
  *
- * The Russian three are the lists [RuleSets] bundles for sing-box — v2fly's
- * `geosite:category-ru`, `geosite:tld-ru` and `geoip:ru` — and what Xray
- * inlines on iOS. The Iranian (`category-ir`, `geoip:ir`) and Chinese (`cn`,
- * `tld-cn`, `geoip:cn`) ones are for the olcRTC engine on Android. All are
- * trimmed out of v2fly's own releases by `tools/xray-geodata.sh`, which
- * records what it fetched in `tools/xray-geodata.lock`. [XrayGeodataTest]
- * refuses a bundle whose bytes do not hash to the values pinned here.
+ * Domain lists retain the selected v2fly/SagerNet inputs. Country IP lists
+ * use DB-IP IP-to-Country Lite October 2026 (CC BY 4.0), represented as exact
+ * IPv4 CIDRs, matching [RuleSets]' country coverage for IPv4. All source hashes,
+ * transformation and attribution are in the release notice/source packet.
+ * [XrayGeodataTest] rejects resource bytes that differ from the pins here.
  *
  * Inline rather than `geosite.dat`/`geoip.dat` next to the core, which is how
  * Xray usually reads them: the core finds those files through the
@@ -40,7 +38,7 @@ object XrayGeodata {
     )
     val GEOIP_RU = File(
         name = "geoip-ru.txt",
-        sha256 = "124350e02f701693ca81709e2e9fccac1bf7681122b2a0ac373517f40ffe55ea"
+        sha256 = "ee51d3bef4cff7f5f28ceed4090975c6a4770a68805cb93ad8dba875f371d0a4"
     )
     val GEOSITE_CATEGORY_IR = File(
         name = "geosite-category-ir.txt",
@@ -48,7 +46,7 @@ object XrayGeodata {
     )
     val GEOIP_IR = File(
         name = "geoip-ir.txt",
-        sha256 = "dff619714e5970d8b175cd10365d5cb93180bb12fd13453c9e367001840e0afe"
+        sha256 = "cd74287a4e20eb18ed4216f543c07d7db2e4b1d4498aa30f78b864171c14a38b"
     )
     val GEOSITE_CN = File(
         name = "geosite-cn.txt",
@@ -60,7 +58,7 @@ object XrayGeodata {
     )
     val GEOIP_CN = File(
         name = "geoip-cn.txt",
-        sha256 = "419111c68a2cbbf94236126bc4cd2fd30ac43274b6b65a640e0d2a6f0e05f014"
+        sha256 = "52e3f19517d919eb5a6e3e5ddd32c70a3f01b4f26c115814b7a4910376874ab7"
     )
 
     /** Everything the Russian route rules match on. */

@@ -50,7 +50,9 @@ internal class BoundPhysicalNetworkProbe(
         val controls = listOf(
             Control(URL("https://www.gstatic.com/generate_204"), 204..204),
             Control(URL("https://www.cloudflare.com/cdn-cgi/trace"), 200..200),
-            Control(URL("https://ya.ru/"), 200..299)
+            // An HTTPS redirect proves the domestic origin answered; do not follow it.
+            Control(URL("https://ya.ru/"), 200..399),
+            Control(URL("https://telemost.yandex.ru/"), 200..399)
         )
         val calls = controls.map { control ->
             val started = AtomicBoolean(false)
@@ -86,7 +88,11 @@ internal class BoundPhysicalNetworkProbe(
                 completedAtMs = clockMs(),
                 foreignA = outcomes[0],
                 foreignB = outcomes[1],
-                domestic = outcomes[2]
+                domestic = when {
+                    outcomes.drop(2).any { it == ProbeOutcome.Answered } -> ProbeOutcome.Answered
+                    outcomes.drop(2).all { it == ProbeOutcome.Failed } -> ProbeOutcome.Failed
+                    else -> ProbeOutcome.Unknown
+                }
             )
         } finally {
             calls.forEach { call ->
@@ -134,7 +140,7 @@ internal class BoundPhysicalNetworkProbe(
     }
 
     private companion object {
-        val executor = Executors.newFixedThreadPool(3) { runnable ->
+        val executor = Executors.newFixedThreadPool(4) { runnable ->
             Thread(runnable, "rga-physical-probe").apply { isDaemon = true }
         }
     }

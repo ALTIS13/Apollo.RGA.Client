@@ -34,18 +34,18 @@ class BoundPhysicalNetworkProbeTest {
 
     @Before fun resetShadow() = ProbeOpenRecord.reset()
 
-    @Test fun usesSameNetworkAndNoProxyForThreeHttpsControls() = runBlocking {
+    @Test fun usesSameNetworkAndNoProxyForFourHttpsControls() = runBlocking {
         val connections = successfulConnections()
         ProbeOpenRecord.connections = connections
 
         val result = BoundPhysicalNetworkProbe(clockMs = { 8_000 }).collect(network, 1, 17, 2)
 
-        assertEquals(setOf("www.gstatic.com", "www.cloudflare.com", "ya.ru"), ProbeOpenRecord.urls.map { it.host }.toSet())
-        assertEquals(3, ProbeOpenRecord.urls.size)
+        assertEquals(setOf("www.gstatic.com", "www.cloudflare.com", "ya.ru", "telemost.yandex.ru"), ProbeOpenRecord.urls.map { it.host }.toSet())
+        assertEquals(4, ProbeOpenRecord.urls.size)
         assertTrue(ProbeOpenRecord.proxies.all { it == Proxy.NO_PROXY })
         assertEquals(DirectProbeRound(1, 17, 2, 8_000, Answered, Answered, Answered), result)
         assertEquals(0, connections.values.sumOf { it.bodyReads.get() })
-        assertEquals(3, connections.values.count { it.disconnected })
+        assertEquals(4, connections.values.count { it.disconnected })
     }
 
     @Test fun rejectsRedirectChallengeAndTlsErrorAsUnknown() = runBlocking {
@@ -53,6 +53,7 @@ class BoundPhysicalNetworkProbeTest {
             put("www.gstatic.com", FakeConnection("www.gstatic.com", 302))
             put("www.cloudflare.com", FakeConnection("www.cloudflare.com", 403))
             put("ya.ru", FakeConnection("ya.ru", failure = SSLException("untrusted certificate")))
+            put("telemost.yandex.ru", FakeConnection("telemost.yandex.ru", failure = SSLException("untrusted certificate")))
         }
         val probe = BoundPhysicalNetworkProbe(opener = { supplied, url ->
             assertTrue(supplied === network)
@@ -66,6 +67,28 @@ class BoundPhysicalNetworkProbeTest {
         assertEquals(Unknown, result.domestic)
         assertTrue(connections.values.all { it.disconnected && !it.instanceFollowRedirects })
         assertEquals(0, connections.values.sumOf { it.bodyReads.get() })
+    }
+
+    @Test fun verifiedDomesticRedirectCountsAsReachableWithoutFollowingIt() = runBlocking {
+        val connections = successfulConnections().toMutableMap().apply {
+            put("ya.ru", FakeConnection("ya.ru", 302))
+            put("telemost.yandex.ru", FakeConnection("telemost.yandex.ru", failure = SSLException("untrusted certificate")))
+        }
+        val probe = BoundPhysicalNetworkProbe(opener = { _, url -> connections.getValue(url.host) }, clockMs = { 8_000 })
+
+        val result = probe.collect(network, 1, 17, 2)
+
+        assertEquals(Answered, result.domestic)
+        assertTrue(connections.values.all { !it.instanceFollowRedirects })
+    }
+
+    @Test fun telemostRemainsPositiveControlWhenYaIsUnavailable() = runBlocking {
+        val connections = successfulConnections().toMutableMap().apply {
+            put("ya.ru", FakeConnection("ya.ru", failure = SocketTimeoutException("timeout")))
+        }
+        val probe = BoundPhysicalNetworkProbe(opener = { _, url -> connections.getValue(url.host) }, clockMs = { 8_000 })
+
+        assertEquals(Answered, probe.collect(network, 1, 17, 2).domestic)
     }
 
     @Test fun timesOutAndClosesConnectionsWithoutReadingBodies() = runBlocking {
@@ -99,7 +122,7 @@ class BoundPhysicalNetworkProbeTest {
         val result = probe.collect(network, generation = 9, networkId = 31, revision = 7)
 
         assertEquals(DirectProbeRound(9, 31, 7, 12_345, Answered, Answered, Answered), result)
-        assertEquals(3, seen.size)
+        assertEquals(4, seen.size)
         assertTrue(seen.all { it === network })
         assertFalse(connections.values.any { it.bodyReads.get() != 0 })
     }
@@ -128,7 +151,8 @@ class BoundPhysicalNetworkProbeTest {
     private fun successfulConnections() = mapOf(
         "www.gstatic.com" to FakeConnection("www.gstatic.com", 204),
         "www.cloudflare.com" to FakeConnection("www.cloudflare.com", 200),
-        "ya.ru" to FakeConnection("ya.ru", 200)
+        "ya.ru" to FakeConnection("ya.ru", 200),
+        "telemost.yandex.ru" to FakeConnection("telemost.yandex.ru", 200)
     )
 }
 

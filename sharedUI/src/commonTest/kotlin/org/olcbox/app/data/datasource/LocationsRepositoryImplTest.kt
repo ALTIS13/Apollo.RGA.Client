@@ -5,6 +5,8 @@ import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.jsonObject
 import kotlinx.coroutines.test.runTest
 import org.olcbox.app.CurrentAppInfo
@@ -25,6 +27,8 @@ import org.olcbox.app.net.HttpPartnerLinkResolver
 import org.olcbox.app.net.RuntimeLocationPolicy
 import org.olcbox.app.net.SubscriptionTunnelAccess
 import org.olcbox.app.data.repository.SubscriptionRefreshError
+import org.olcbox.app.data.repository.SubscriptionFetchFence
+import org.olcbox.app.data.repository.SubscriptionFetchProxy
 import kotlin.test.assertFalse
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -2448,16 +2452,275 @@ class LocationsRepositoryImplTest {
         assertEquals(stored.size, stored.map { it.storageId }.toSet().size, "no two lines share an id")
     }
 
+    @Test
+    fun fencedImportRejectsBlockedAndWrongUrlBeforeCreatingAnHttpClient() = runTest {
+        val url = "https://example.test/sub"
+        var directRequests = 0
+        var proxyClients = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine {
+                directRequests++
+                respond(XrayJsonSubscriptionFixtures.body)
+            }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                proxyClients++
+                HttpClient(MockEngine { error("A fenced rejection reached HTTP") })
+            }
+        )
+
+        assertFalse(repo.importText(url, SubscriptionFetchProxy.blocked()))
+        val wrongUrl = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == "https://allowed.test/sub" }, current = { true }
+        ))
+        assertFalse(repo.importText(url, wrongUrl))
+        assertEquals(0, proxyClients)
+        assertEquals(0, directRequests)
+        assertNull(source.stored)
+    }
+
+    @Test
+    fun fencedRefreshRejectsWrongStoredUrlWithoutNetworkOrBundleChange() = runTest {
+        val url = "https://example.test/sub"
+        var directRequests = 0
+        var proxyClients = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine {
+                directRequests++
+                respond(XrayJsonSubscriptionFixtures.body)
+            }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                proxyClients++
+                HttpClient(MockEngine { error("A mismatched URL reached HTTP") })
+            }
+        )
+        assertTrue(repo.importText(url)) // Legacy null fence still downloads the list.
+        val before = assertNotNull(source.stored)
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == "https://allowed.test/sub" }, current = { true }
+        ))
+
+        val report = repo.refreshSubscription(url, proxy)
+
+        assertEquals(0, report.updatedCount)
+        assertEquals(SubscriptionRefreshError.SessionChanged, report.failures.single().error)
+        assertEquals(0, proxyClients)
+        assertEquals(1, directRequests)
+        assertEquals(before, source.stored)
+    }
+
+    @Test
+    fun fencedImportDropsResponseWhenSessionChangesDuringGet() = runTest {
+        val url = "https://example.test/sub"
+        var current = true
+        var proxyRequests = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine { error("Fenced import used default HTTP") }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                HttpClient(MockEngine {
+                    proxyRequests++
+                    current = false
+                    respond(XrayJsonSubscriptionFixtures.body)
+                })
+            }
+        )
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == url }, current = { current }
+        ))
+
+        assertFalse(repo.importText(url, proxy))
+        assertEquals(1, proxyRequests)
+        assertNull(source.stored)
+    }
+
+    @Test
+    fun fencedRefreshDropsStaleProfileAndBodyWithoutChangingLastKnownBundle() = runTest {
+        val url = "https://example.test/sub"
+        var current = true
+        var proxyRequests = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine { respond(XrayJsonSubscriptionFixtures.body) }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            nowEpochMs = { 2_000_000L },
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                HttpClient(MockEngine {
+                    proxyRequests++
+                    current = false
+                    respond(XrayJsonSubscriptionFixtures.body, headers = headersOf(
+                        "subscription-userinfo", "upload=6; download=5; total=10; expire=3000"
+                    ))
+                })
+            }
+        )
+        assertTrue(repo.importText(url))
+        val before = assertNotNull(source.stored)
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == url }, current = { current }
+        ))
+
+        val report = repo.refreshSubscription(url, proxy)
+
+        assertEquals(1, proxyRequests)
+        assertEquals(0, report.updatedCount)
+        assertEquals(SubscriptionRefreshError.SessionChanged, report.failures.single().error)
+        assertEquals(before, source.stored)
+    }
+
+    @Test
+    fun liveExactUrlFenceImportsAndRefreshesXrayJsonOnlyThroughSelectedProxy() = runTest {
+        val url = "https://example.test/sub"
+        var defaultRequests = 0
+        val proxiedUrls = mutableListOf<String>()
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine {
+                defaultRequests++
+                error("Selected-path fetch used default HTTP")
+            }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                HttpClient(MockEngine { request ->
+                    proxiedUrls += request.url.toString()
+                    respond(XrayJsonSubscriptionFixtures.body)
+                })
+            }
+        )
+        val commitLock = Any()
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == url },
+            current = { synchronized(commitLock) { true } },
+            commit = { write -> synchronized(commitLock) { write(); true } }
+        ))
+
+        assertTrue(repo.importText(url, proxy))
+        val imported = assertNotNull(source.stored)
+        assertEquals(2, imported.locations.size)
+        assertTrue(imported.locations.all { it.location.xrayConfig != null && it.subscriptionUrl == url })
+        assertEquals(1, repo.refreshSubscription(url, proxy).updatedCount)
+        assertEquals(2, assertNotNull(source.stored).locations.size)
+        assertEquals(listOf(url, url), proxiedUrls)
+        assertEquals(0, defaultRequests)
+    }
+
+    @Test
+    fun throwingFenceFailsClosedBeforeRefreshNetworkAndPreservesBundle() = runTest {
+        val url = "https://example.test/sub"
+        var defaultRequests = 0
+        var proxyClients = 0
+        val source = FakeLocationsDataSource()
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine {
+                defaultRequests++
+                respond(XrayJsonSubscriptionFixtures.body)
+            }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                proxyClients++
+                HttpClient(MockEngine { error("Throwing fence reached HTTP") })
+            }
+        )
+        assertTrue(repo.importText(url))
+        val before = assertNotNull(source.stored)
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == url }, current = { throw IllegalStateException("guard failed") }
+        ))
+
+        val report = repo.refreshSubscription(url, proxy)
+
+        assertEquals(0, report.updatedCount)
+        assertEquals(SubscriptionRefreshError.SessionChanged, report.failures.single().error)
+        assertEquals(0, proxyClients)
+        assertEquals(1, defaultRequests)
+        assertEquals(before, source.stored)
+    }
+
+    @Test
+    fun fencedRefreshCannotCommitAfterSessionStopsWhilePersistenceIsSuspended() = runTest {
+        val url = "https://example.test/sub"
+        val source = FakeLocationsDataSource()
+        val rotatedBody = XrayJsonSubscriptionFixtures.body.replace("Synthetic exit A", "Rotated exit A")
+        val repo = LocationsRepositoryImpl(
+            dataSource = source,
+            httpClient = HttpClient(MockEngine { respond(XrayJsonSubscriptionFixtures.body) }),
+            deviceIdentityProvider = StaticIdentityProvider("test-hwid"),
+            nowEpochMs = { 2_000_000L },
+            runtimePolicy = RuntimeLocationPolicy.ExperimentalDebug,
+            proxyHttpClientFactory = {
+                HttpClient(MockEngine {
+                    respond(rotatedBody, headers = headersOf(
+                        "subscription-userinfo", "upload=6; download=5; total=10; expire=3000"
+                    ))
+                })
+            }
+        )
+        assertTrue(repo.importText(url))
+        val before = assertNotNull(source.stored)
+        assertFalse(before.locations.any { it.name == "Rotated exit A" })
+
+        val entered = CompletableDeferred<Unit>()
+        val resumeSave = CompletableDeferred<Unit>()
+        source.beforeFencedSave = {
+            entered.complete(Unit)
+            resumeSave.await()
+        }
+        val sessionLock = Any()
+        var current = true
+        val proxy = SubscriptionFetchProxy("127.0.0.1", 1080, fence = SubscriptionFetchFence(
+            allowsUrl = { it == url },
+            current = { synchronized(sessionLock) { current } },
+            commit = { write -> synchronized(sessionLock) {
+                if (!current) false else { write(); true }
+            } }
+        ))
+
+        val refresh = async { repo.refreshSubscription(url, proxy) }
+        entered.await()
+        synchronized(sessionLock) { current = false } // Stop retires the selected session.
+        resumeSave.complete(Unit)
+        val report = refresh.await()
+
+        assertEquals(0, report.updatedCount)
+        assertEquals(SubscriptionRefreshError.SessionChanged, report.failures.single().error)
+        assertEquals(before, source.stored)
+    }
+
     private class FakeLocationsDataSource(
         var stored: LocationBundleV4? = null,
         private val legacy: List<Pair<String, String>> = emptyList(),
         private val legacyActive: String? = null
     ) : LocationsDataSource {
 
+        var beforeFencedSave: suspend () -> Unit = {}
+
         override suspend fun loadLocationBundle(): LocationBundleV4? = stored
 
         override suspend fun saveLocationBundle(bundle: LocationBundleV4) {
             stored = bundle
+        }
+
+        override suspend fun saveLocationBundleFenced(
+            bundle: LocationBundleV4, fence: SubscriptionFetchFence
+        ): Boolean {
+            beforeFencedSave()
+            return fence.commit?.invoke { stored = bundle } ?: false
         }
 
         override suspend fun loadLegacyLocations(): List<Pair<String, String>> = legacy

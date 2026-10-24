@@ -9,6 +9,7 @@ import multiplatform_app.sharedui.generated.resources.refresh_empty
 import multiplatform_app.sharedui.generated.resources.refresh_device_denied
 import multiplatform_app.sharedui.generated.resources.refresh_rejected
 import multiplatform_app.sharedui.generated.resources.refresh_server_error
+import multiplatform_app.sharedui.generated.resources.refresh_session_changed
 import multiplatform_app.sharedui.generated.resources.refresh_unchanged
 import multiplatform_app.sharedui.generated.resources.refresh_unreachable
 import multiplatform_app.sharedui.generated.resources.refresh_updated
@@ -49,6 +50,7 @@ suspend fun SubscriptionRefreshReport.localizedBulkMessage(): String = when {
 suspend fun SubscriptionRefreshFailure.localizedMessage(): String {
     val status = statusCode?.let { " ($it)" }.orEmpty()
     return when (error) {
+        SubscriptionRefreshError.SessionChanged -> getString(Res.string.refresh_session_changed)
         SubscriptionRefreshError.DeviceDenied -> getString(Res.string.refresh_device_denied)
         SubscriptionRefreshError.Rejected -> getString(Res.string.refresh_rejected, status)
         SubscriptionRefreshError.ServerError -> getString(Res.string.refresh_server_error, status)

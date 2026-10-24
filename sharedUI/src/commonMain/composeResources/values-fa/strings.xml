@@ -287,6 +287,7 @@
     <string name="refresh_server_list">به‌روزرسانی فهرست سرورها</string>
     <string name="refresh_unchanged">فهرست سرورها تغییری نکرد</string>
     <string name="refresh_unreachable">دسترسی به میزبان فهرست سرورها ممکن نشد — اتصال خود را بررسی کنید</string>
+    <string name="refresh_session_changed">اتصال تغییر کرد. فهرست سرورها را دوباره به‌روزرسانی کنید.</string>
     <string name="refresh_updated">فهرست سرورها به‌روز شد</string>
     <string name="regenerate_password">ساخت دوبارهٔ گذرواژه</string>
     <string name="region_blocked_only">فقط مسدودها</string>
@@ -511,11 +512,11 @@
     <string name="apollo_connected">متصل</string>
     <string name="apollo_connecting">در حال اتصال…</string>
     <string name="apollo_reconnecting">در حال اتصال مجدد…</string>
-    <string name="apollo_link_idle">RGA // OFFLINE · کانال غیرفعال</string>
-    <string name="apollo_link_connecting">RGA // CONNECTING · در حال برقراری کانال</string>
-    <string name="apollo_link_connected">RGA // ONLINE · کانال فعال</string>
-    <string name="apollo_link_reconnecting">RGA // RECOVERING · در حال بازیابی کانال</string>
-    <string name="apollo_link_failed">RGA // INTERRUPTED · اتصال قطع شده است</string>
+    <string name="apollo_link_idle">RGA // OFFLINE</string>
+    <string name="apollo_link_connecting">RGA // CONNECTING</string>
+    <string name="apollo_link_connected">RGA // ONLINE</string>
+    <string name="apollo_link_reconnecting">RGA // RECOVERING</string>
+    <string name="apollo_link_failed">RGA // INTERRUPTED</string>
     <string name="apollo_disconnected">قطع اتصال</string>
     <string name="apollo_connect">اتصال</string>
     <string name="apollo_disconnect">قطع اتصال</string>
@@ -528,6 +529,11 @@
     <string name="apollo_background_notice">اطلاعات اتصال تغییر کرد. وضعیت فعلی را بررسی کنید.</string>
     <string name="apollo_refresh">به‌روزرسانی اشتراک</string>
     <string name="apollo_add">افزودن اشتراک</string>
+    <string name="apollo_import_more">روش‌های دیگر</string>
+    <string name="apollo_import_subtitle">از پیوند اشتراک فعلی خود استفاده کنید.</string>
+    <string name="apollo_import_paste">جای‌گذاری پیوند کپی‌شده</string>
+    <string name="apollo_import_paste_hint">از حافظهٔ موقت</string>
+    <string name="apollo_import_scan_hint">کد QR صفحهٔ اشتراک شما</string>
     <string name="apollo_settings">تنظیمات</string>
     <string name="apollo_destinations">اتصال را انتخاب کنید</string>
     <string name="apollo_single_connection_note">یک اتصال انتخاب‌شده برای کل دستگاه استفاده می‌شود.</string>
@@ -600,4 +606,26 @@
         <item quantity="one">%1$d مکان حذف شد</item>
         <item quantity="other">%1$d مکان حذف شد</item>
     </plurals>
+    <!-- Personal signed OTA: separate from the disabled legacy updater. -->
+    <string name="personal_ota_summary">به‌روزرسانی‌های شخصی امضاشده</string>
+    <string name="personal_ota_intro">به‌روزرسانی امضاشده و سازگار را بررسی کنید و سپس به انتخاب خود آن را دانلود و نصب کنید. اشتراک شما تغییر نمی‌کند.</string>
+    <string name="personal_ota_idle">هنوز به‌روزرسانی بررسی نشده است.</string>
+    <string name="personal_ota_checking">در حال بررسی به‌روزرسانی سازگار…</string>
+    <string name="personal_ota_available">به‌روزرسانی تأییدشده برای دانلود آماده است.</string>
+    <string name="personal_ota_downloading">در حال دانلود و تأیید به‌روزرسانی…</string>
+    <string name="personal_ota_ready">به‌روزرسانی تأییدشده و آماده است. Android تأیید نصب را از شما می‌خواهد.</string>
+    <string name="personal_ota_session_changed">اتصال تغییر کرد و به‌روزرسانی لغو شد. پس از پایدار شدن اتصال دوباره بررسی کنید.</string>
+    <string name="personal_ota_unavailable">به‌روزرسانی در این اتصال در دسترس نیست. برنامه و اشتراک فعلی تغییر نکرده‌اند.</string>
+    <string name="personal_ota_network_refused">بررسی یا دانلود به‌روزرسانی کامل نشد. بعداً دوباره تلاش کنید؛ برنامه فعلی تغییر نکرده است.</string>
+    <string name="personal_ota_compatibility_refused">سازگاری برنامه نصب‌شده و برنامه همراه تأیید نشد. این نسخه را نگه دارید و از به‌روزرسانی دستی تأییدشده استفاده کنید.</string>
+    <string name="personal_ota_not_confirmed">به‌روزرسانی سازگار تأیید نشده است. نسخه فعلی تغییر نکرده است.</string>
+    <string name="personal_ota_not_newer">نسخه پیشنهادی جدیدتر از نسخه نصب‌شده نیست. برنامه تغییر نکرده است.</string>
+    <string name="personal_ota_handed_off">درخواست به Android تحویل داده شد. نصب در اینجا تأیید نشده است؛ آن را در نصب‌کننده سیستم تکمیل یا رد کنید.</string>
+    <string name="personal_ota_permission_required">Android به مجوز نصب از این برنامه نیاز دارد. فقط اگر می‌خواهید ادامه دهید تنظیمات را باز کنید.</string>
+    <string name="personal_ota_permission_returned">بازگشت از تنظیمات به‌روزرسانی را نصب نمی‌کند. برای ادامه دوباره نصب را بزنید یا از این صفحه خارج شوید.</string>
+    <string name="personal_ota_install_refused">Android نتوانست نصب را آغاز کند. برنامه فعلی تغییر نکرده است. می‌توانید دوباره تلاش کنید.</string>
+    <string name="personal_ota_vpn_warning">نصب به‌روزرسانی ممکن است برنامه و VPN را راه‌اندازی مجدد کند. زمانی شروع کنید که برای وقفه اتصال آماده هستید.</string>
+    <string name="personal_ota_install_action">نصب به‌روزرسانی</string>
+    <string name="personal_ota_settings_action">باز کردن تنظیمات مجوز نصب</string>
+    <string name="personal_ota_candidate_version">نسخه به‌روزرسانی: %1$s</string>
 </resources>
