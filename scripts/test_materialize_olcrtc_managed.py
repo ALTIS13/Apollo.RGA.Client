@@ -11,12 +11,82 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import importlib.util
 
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
 BASE_SHA = "8d97e32e0b1af0a727d6e785c4c467f37543aa4d"
 MATERIALIZER = SCRIPTS / "materialize-olcrtc-managed.py"
+
+
+class ManagedClientManifestTests(unittest.TestCase):
+    def test_mts_backport_is_mandatory_and_digest_checked(self) -> None:
+        spec = importlib.util.spec_from_file_location("mts_manifest_under_test", MATERIALIZER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="rga-mts-manifest-") as temp:
+            root = Path(temp)
+            manifest = {"base_sha": BASE_SHA}
+            for name in ("patch", "overlay_patch", "client_patch", "provider_patch", "mts_patch"):
+                path = root / (name + ".patch")
+                path.write_bytes((name + "\n").encode())
+                manifest[name + "_path"] = path.name
+                manifest[name + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            target = root / "olcrtc-managed-patch.json"
+            target.write_text(json.dumps(manifest), encoding="utf-8")
+            _, patches = module.load_manifest(root)
+            self.assertEqual(len(patches), 5, "MTS patch silently omitted")
+            (root / "mts_patch.patch").write_bytes(b"changed after pin")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
+            target.write_text(json.dumps({k:v for k,v in manifest.items() if not k.startswith("mts_")}), encoding="utf-8")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
+    def test_provider_backport_is_mandatory_and_digest_checked(self) -> None:
+        spec = importlib.util.spec_from_file_location("provider_manifest_under_test", MATERIALIZER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="rga-provider-manifest-") as temp:
+            root = Path(temp)
+            manifest = {"base_sha": BASE_SHA}
+            for name in ("patch", "overlay_patch", "client_patch", "provider_patch", "mts_patch"):
+                path = root / (name + ".patch")
+                path.write_bytes((name + "\n").encode())
+                manifest[name + "_path"] = path.name
+                manifest[name + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            target = root / "olcrtc-managed-patch.json"
+            target.write_text(json.dumps(manifest), encoding="utf-8")
+            _, patches = module.load_manifest(root)
+            self.assertEqual(len(patches), 5, "provider patch was silently omitted")
+            (root / "provider_patch.patch").write_bytes(b"changed after pin")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
+            target.write_text(json.dumps({k:v for k,v in manifest.items() if not k.startswith("provider_")}), encoding="utf-8")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
+    def test_client_patch_is_mandatory_and_digest_checked(self) -> None:
+        spec = importlib.util.spec_from_file_location("managed_manifest_under_test", MATERIALIZER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="rga-client-manifest-") as temp:
+            root = Path(temp)
+            manifest = {"base_sha": BASE_SHA}
+            for name in ("patch", "overlay_patch", "client_patch", "provider_patch", "mts_patch"):
+                path = root / (name + ".patch")
+                path.write_bytes((name + "\n").encode())
+                manifest[name + "_path"] = path.name
+                manifest[name + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            target = root / "olcrtc-managed-patch.json"
+            target.write_text(json.dumps(manifest), encoding="utf-8")
+            _, patches = module.load_manifest(root)
+            self.assertEqual(len(patches), 5, "client callback patch was silently omitted")
+            (root / "client_patch.patch").write_bytes(b"changed after pin")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
+            target.write_text(json.dumps({k:v for k,v in manifest.items() if not k.startswith("client_")}), encoding="utf-8")
+            with self.assertRaises(module.MaterializeError):
+                module.load_manifest(root)
 
 
 def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -50,6 +120,10 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         self.assertEqual(run("git", "-C", str(output), "rev-parse", "HEAD").stdout.strip(), BASE_SHA)
         changed = run("git", "-C", str(output), "diff", "--name-only")
         self.assertIn("internal/handshake/handshake.go", changed.stdout)
+        self.assertIn("mobile/config.go", changed.stdout)
+        self.assertTrue((output / "internal/engine/vkcalls/managed_owner.go").is_file())
+        self.assertTrue((output / "internal/engine/mtslink/mtslink.go").is_file())
+        self.assertTrue((output / "internal/transport/vp8channel/carrier.go").is_file())
         self.assertEqual(run("git", "-C", str(output), "diff", "--check").returncode, 0)
         again = self.materialize(output, self.root / "second")
         self.assertNotEqual(again.returncode, 0)
@@ -87,6 +161,10 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         patch = SCRIPTS / manifest["patch_path"]
         copied_patch = scripts / manifest["patch_path"]
         shutil.copy2(patch, copied_patch)
+        shutil.copy2(SCRIPTS / manifest["overlay_patch_path"], scripts / manifest["overlay_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["client_patch_path"], scripts / manifest["client_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["provider_patch_path"], scripts / manifest["provider_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["mts_patch_path"], scripts / manifest["mts_patch_path"])
         with copied_patch.open("ab") as file:
             file.write(b"\n")
         output = self.root / "bad-digest-output"
@@ -103,6 +181,10 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         shutil.copy2(SCRIPTS / "olcrtc-managed-patch.json", scripts / "olcrtc-managed-patch.json")
         manifest = json.loads((scripts / "olcrtc-managed-patch.json").read_text(encoding="utf-8"))
         shutil.copy2(SCRIPTS / manifest["patch_path"], scripts / manifest["patch_path"])
+        shutil.copy2(SCRIPTS / manifest["overlay_patch_path"], scripts / manifest["overlay_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["client_patch_path"], scripts / manifest["client_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["provider_patch_path"], scripts / manifest["provider_patch_path"])
+        shutil.copy2(SCRIPTS / manifest["mts_patch_path"], scripts / manifest["mts_patch_path"])
         pins = (SCRIPTS / "cores-pins.sh").read_text(encoding="utf-8")
         self.assertIn(BASE_SHA[:12], pins)
         (scripts / "cores-pins.sh").write_text(
@@ -119,8 +201,9 @@ class ManagedPatchCarrierTests(unittest.TestCase):
         target = repository / "scripts" / "patches"
         target.mkdir(parents=True)
         manifest = json.loads((SCRIPTS / "olcrtc-managed-patch.json").read_text(encoding="utf-8"))
-        patch = SCRIPTS / manifest["patch_path"]
-        shutil.copy2(patch, target / patch.name)
+        for path_key in ("patch_path", "overlay_patch_path", "client_patch_path", "provider_patch_path", "mts_patch_path"):
+            patch = SCRIPTS / manifest[path_key]
+            shutil.copy2(patch, target / patch.name)
         attributes = REPO / ".gitattributes"
         if attributes.exists():
             shutil.copy2(attributes, repository / ".gitattributes")
@@ -137,8 +220,10 @@ class ManagedPatchCarrierTests(unittest.TestCase):
             "--no-hardlinks", str(repository), str(checked_out)
         )
         self.assertEqual(cloned.returncode, 0, cloned.stderr)
-        actual = hashlib.sha256((checked_out / "scripts" / "patches" / patch.name).read_bytes()).hexdigest()
-        self.assertEqual(actual, manifest["patch_sha256"])
+        for path_key, hash_key in (("patch_path", "patch_sha256"), ("overlay_patch_path", "overlay_patch_sha256"), ("client_patch_path", "client_patch_sha256"), ("provider_patch_path", "provider_patch_sha256"), ("mts_patch_path", "mts_patch_sha256")):
+            patch = Path(manifest[path_key])
+            actual = hashlib.sha256((checked_out / "scripts" / patch).read_bytes()).hexdigest()
+            self.assertEqual(actual, manifest[hash_key])
 
     def test_existing_output_remains_untouched(self) -> None:
         output = self.root / "existing-output"

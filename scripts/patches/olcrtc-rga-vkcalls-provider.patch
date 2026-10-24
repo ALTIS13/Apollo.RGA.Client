@@ -1,0 +1,5243 @@
+diff --git a/internal/auth/vkcalls/managed_diagnostic.go b/internal/auth/vkcalls/managed_diagnostic.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/vkcalls/managed_diagnostic.go
+@@ -0,0 +1,130 @@
++package vkcalls
++
++import (
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++	"net"
++)
++
++// startupFailure carries only a closed projection across the mobile error
++// boundary. Provider bodies, endpoints and error strings are never formatted.
++type startupFailure struct {
++	stage, class string
++	code         int
++	cause        error
++}
++
++func (e *startupFailure) Error() string {
++	return fmt.Sprintf("vkcalls: RGA_VK_STARTUP stage=%s class=%s code=%d", e.stage, e.class, e.code)
++}
++func (e *startupFailure) Unwrap() error { return e.cause }
++
++// WithStartupStage locates the first failing native operation. Nested engine
++// wrappers cannot overwrite an earlier located provider failure.
++func WithStartupStage(stage string, err error) error {
++	if err == nil {
++		return nil
++	}
++	switch stage {
++	case stageAnonToken:
++		stage = "AUTH_ANON"
++	case stagePreview:
++		stage = "AUTH_PREVIEW"
++	case stageCallToken:
++		stage = "AUTH_CALL_TOKEN"
++	case stageLogin:
++		stage = "AUTH_SDK_LOGIN"
++	case stageJoin:
++		stage = "AUTH_JOIN"
++	case "SIGNAL_DIAL", "SIGNAL_JOIN", "SIGNAL_ALLOCATE", "SIGNAL_SETTINGS", "MEDIA_OFFER", "MEDIA_SETTINGS", "NEGOTIATION":
++	default:
++		stage = "UNKNOWN"
++	}
++	var located *startupFailure
++	if errors.As(err, &located) {
++		if located.stage != "UNKNOWN" {
++			return err
++		}
++		return &startupFailure{stage, located.class, located.code, err}
++	}
++	class, code := requestClass(err), 0
++	var api *GuestAPIError
++	if errors.As(err, &api) {
++		class = "RESPONSE"
++		if api.Code > 0 && api.Code <= 99999 {
++			class = "PROVIDER_CODE"
++			code = api.Code
++		}
++	}
++	if class == "REQUEST" {
++		switch stage {
++		case "SIGNAL_DIAL", "SIGNAL_JOIN", "SIGNAL_ALLOCATE", "SIGNAL_SETTINGS":
++			class = "SIGNALING"
++		case "MEDIA_OFFER", "MEDIA_SETTINGS", "NEGOTIATION":
++			class = "NEGOTIATION"
++		}
++	}
++	return &startupFailure{stage, class, code, err}
++}
++
++// RequestFailure classifies before replacing a possibly private net/url error.
++// Only public sentinels remain as causes for errors.Is compatibility.
++func RequestFailure(err error) error {
++	if err == nil {
++		return nil
++	}
++	cause := ErrRequestFailed
++	if errors.Is(err, context.Canceled) {
++		cause = context.Canceled
++	} else if errors.Is(err, context.DeadlineExceeded) {
++		cause = context.DeadlineExceeded
++	} else if errors.Is(err, protect.ErrProtectorRejected) {
++		cause = protect.ErrProtectorRejected
++	}
++	return &startupFailure{"UNKNOWN", requestClass(err), 0, cause}
++}
++
++func HTTPFailure(status int) error {
++	if status < 100 || status > 599 {
++		status = 0
++	}
++	return &startupFailure{"UNKNOWN", "HTTP_STATUS", status, ErrRequestFailed}
++}
++
++func requestClass(err error) string {
++	if errors.Is(err, context.Canceled) {
++		return "CANCELLED"
++	}
++	if errors.Is(err, context.DeadlineExceeded) {
++		return "TIMEOUT"
++	}
++	if errors.Is(err, protect.ErrProtectorRejected) {
++		return "PROTECT_REJECTED"
++	}
++	var dns *net.DNSError
++	if errors.As(err, &dns) {
++		return "DNS"
++	}
++	var cert *tls.CertificateVerificationError
++	var header tls.RecordHeaderError
++	var alert tls.AlertError
++	var authority x509.UnknownAuthorityError
++	var invalid x509.CertificateInvalidError
++	var host x509.HostnameError
++	if errors.As(err, &cert) || errors.As(err, &header) || errors.As(err, &alert) || errors.As(err, &authority) || errors.As(err, &invalid) || errors.As(err, &host) {
++		return "TLS"
++	}
++	var network net.Error
++	if errors.As(err, &network) && network.Timeout() {
++		return "TIMEOUT"
++	}
++	var op *net.OpError
++	if errors.As(err, &op) {
++		return "DIAL"
++	}
++	return "REQUEST"
++}
+diff --git a/internal/auth/vkcalls/managed_diagnostic_test.go b/internal/auth/vkcalls/managed_diagnostic_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/vkcalls/managed_diagnostic_test.go
+@@ -0,0 +1,95 @@
++package vkcalls
++
++import (
++	"context"
++	"errors"
++	"github.com/openlibrecommunity/olcrtc/internal/auth"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"strings"
++	"testing"
++)
++
++type managedFailureTransport func(*http.Request) (*http.Response, error)
++
++type managedTimeoutReader struct{}
++
++func (managedTimeoutReader) Read([]byte) (int, error) {
++	return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
++}
++
++func (f managedFailureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++// Collapsing a real DNS error before its caller stage makes a carrier outage
++// indistinguishable from a provider API rejection on the handset.
++func TestManagedVKFailureKeepsStageAndDNSClassWithoutPrivateTarget(t *testing.T) {
++	client := &http.Client{Transport: managedFailureTransport(func(*http.Request) (*http.Response, error) {
++		return nil, &url.Error{Op: "Post", URL: "https://private.invalid/room-secret", Err: &net.DNSError{Name: "private.invalid", Err: "no such host"}}
++	})}
++	err := (Provider{APIBase: "https://private.invalid"}).vkCall(context.Background(), client, stagePreview, map[string]string{}, &struct{}{})
++	if err == nil || err.Error() != "vkcalls: RGA_VK_STARTUP stage=AUTH_PREVIEW class=DNS code=0" {
++		t.Fatal("caller-visible failure lost the stage/DNS boundary")
++	}
++	if strings.Contains(err.Error(), "private.invalid") || strings.Contains(err.Error(), "room-secret") {
++		t.Fatal("private target escaped")
++	}
++}
++
++func TestManagedVKFailureKeepsProviderCodeAndHTTPBoundary(t *testing.T) {
++	for _, tc := range []struct {
++		status     int
++		body, want string
++	}{
++		{200, `{"error":{"error_code":14,"error_msg":"private-room-secret"}}`, "vkcalls: RGA_VK_STARTUP stage=AUTH_ANON class=PROVIDER_CODE code=14"},
++		{503, "private-room-secret", "vkcalls: RGA_VK_STARTUP stage=AUTH_ANON class=HTTP_STATUS code=503"},
++		{200, "private-room-secret", "vkcalls: RGA_VK_STARTUP stage=AUTH_ANON class=RESPONSE code=0"},
++	} {
++		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++			w.WriteHeader(tc.status)
++			_, _ = w.Write([]byte(tc.body))
++		}))
++		err := (Provider{APIBase: server.URL}).vkCall(context.Background(), server.Client(), stageAnonToken, map[string]string{}, &struct{}{})
++		server.Close()
++		if err == nil || err.Error() != tc.want {
++			t.Fatal("caller-visible failure lost API/HTTP/response distinction")
++		}
++		if strings.Contains(err.Error(), "private-room-secret") {
++			t.Fatal("provider body escaped")
++		}
++	}
++}
++
++func TestManagedVKFailurePreservesCancellationIdentity(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	err := (Provider{APIBase: "https://private.invalid"}).vkCall(ctx, &http.Client{}, stageCallToken, map[string]string{}, &struct{}{})
++	if !errors.Is(err, context.Canceled) {
++		t.Fatal("lost cancellation identity")
++	}
++	if err.Error() != "vkcalls: RGA_VK_STARTUP stage=AUTH_CALL_TOKEN class=CANCELLED code=0" {
++		t.Fatal("cancelled stage lost")
++	}
++}
++
++func TestManagedVKFailureLocatesPostDecodeMissingField(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"response":{}}`)) }))
++	defer server.Close()
++	_, err := (Provider{APIBase: server.URL}).Issue(context.Background(), auth.Config{RoomURL: "https://vk.ru/call/join/isolated-test"})
++	if err == nil || err.Error() != "vkcalls: RGA_VK_STARTUP stage=AUTH_ANON class=RESPONSE code=0" {
++		t.Fatal("post-decode failure lost its completed-request boundary")
++	}
++}
++
++func TestManagedVKFailureKeepsBodyReadTimeoutClass(t *testing.T) {
++	client := &http.Client{Transport: managedFailureTransport(func(*http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(managedTimeoutReader{})}, nil
++	})}
++	err := (Provider{APIBase: "https://private.invalid"}).vkCall(context.Background(), client, stagePreview, map[string]string{}, &struct{}{})
++	if err == nil || err.Error() != "vkcalls: RGA_VK_STARTUP stage=AUTH_PREVIEW class=TIMEOUT code=0" {
++		t.Fatal("body read timeout became an unlocated request error")
++	}
++}
+diff --git a/internal/auth/vkcalls/managed_privacy_test.go b/internal/auth/vkcalls/managed_privacy_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/vkcalls/managed_privacy_test.go
+@@ -0,0 +1,32 @@
++package vkcalls
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestManagedProviderErrorsNeverRetainProviderContent(t *testing.T) {
++	const secret = "test-room-secret-never-log"
++	err := decodeAPI([]byte(`{"error":{"error_code":14,"error_msg":"`+secret+`"}}`), stagePreview, &struct{}{})
++	var api *GuestAPIError
++	if !errors.As(err, &api) || api.Code != 14 {
++		t.Fatal("lost typed provider rejection")
++	}
++	if strings.Contains(err.Error(), secret) || strings.Contains(api.Kind, secret) {
++		t.Fatal("provider API error retained raw body")
++	}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503); _, _ = w.Write([]byte(secret)) }))
++	defer server.Close()
++	_, err = (Provider{}).raw(context.Background(), server.Client(), server.URL, nil)
++	if err == nil || strings.Contains(err.Error(), secret) {
++		t.Fatal("HTTP error retained response body")
++	}
++	_, err = canonicalLink("https://" + secret + "@%zz/call/join/room")
++	if err == nil || strings.Contains(err.Error(), secret) {
++		t.Fatal("URL parse error retained locator")
++	}
++}
+diff --git a/internal/auth/vkcalls/vkcalls.go b/internal/auth/vkcalls/vkcalls.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/vkcalls/vkcalls.go
+@@ -0,0 +1,570 @@
++// Package vkcalls implements the guest auth provider for VK Calls rooms.
++//
++// The provider walks the five-step anonymous chain observed in the spike
++// (docs/spikes/vkcalls/, spec section 4): bootstrap anonym token, call
++// preview, per-call anonym token, SDK anonymous login, join by link. It
++// never uses or stores an account credential; Config.Token is rejected as
++// unsupported for Issue and is only read by RoomCreator (calls.start).
++//
++// The returned auth.Credentials follow the v1 contract of spec section 7.2:
++// URL carries the signaling endpoint, Token the join token, and Extra the
++// schema-tagged fields (room URL, ICE servers JSON, participant/peer ids,
++// device index, client type, p2p flag). Bootstrap secrets (anonymous token,
++// secret, session keys, device UUIDs) are consumed by the flow and not
++// returned.
++package vkcalls
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/auth"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++)
++
++const (
++	apiVersion     = "5.276"
++	sdkAppKey      = "CGMMEJLGDIHBABABA"
++	sdkClientVer   = "1.0.1"
++	fbProdBase     = "https://calls.okcdn.ru"
++	fieldDeviceID  = "device_id"
++	fieldLang      = "lang"
++	fieldURLs      = "urls"
++	fieldLink      = "link"
++	stageJoin      = "vchat.joinConversationByLink"
++	stageLogin     = "auth.anonymLogin"
++	stageCallToken = "messages.getAnonymCallToken"
++	stagePreview   = "messages.getCallPreview"
++	stageAnonToken = "auth.getAnonymToken"
++	requestLimit   = 8 << 20
++	requestWait    = 20 * time.Second
++	schemaVersion  = "1"
++)
++
++// ErrCreationUnknown reports that calls.start produced no definitive answer:
++// the room may or may not exist. The caller must not retry blindly (spec
++// section 3) and must not treat the link as usable.
++var ErrCreationUnknown = errors.New("vkcalls: room creation result unknown")
++
++// Static validation and transport errors; wrapped with context at call sites.
++var (
++	ErrRoomURLRequired    = errors.New("vkcalls: room url required")
++	ErrTokenUnsupported   = errors.New("vkcalls: account token is not supported for guest issue")
++	ErrOrganizerRequired  = errors.New("vkcalls: calls.start requires an organizer user token")
++	ErrInvalidEndpoint    = errors.New("vkcalls: invalid signaling endpoint")
++	ErrEndpointUserInfo   = errors.New("vkcalls: signaling endpoint must not carry userinfo or port")
++	ErrEndpointToken      = errors.New("vkcalls: endpoint token mismatch")
++	ErrMissingClientType  = errors.New("vkcalls: missing client_type")
++	ErrInvalidDeviceIdx   = errors.New("vkcalls: invalid device_idx")
++	ErrInvalidRoomURL     = errors.New("vkcalls: invalid room url")
++	ErrRoomURLShape       = errors.New("vkcalls: room url must be https://vk.ru/call/join/<id>")
++	ErrRoomURLExtra       = errors.New("vkcalls: room url must not carry userinfo, port, query or fragment")
++	ErrCreatedLinkInvalid = errors.New("vkcalls: created link invalid")
++	ErrICEServers         = errors.New("vkcalls: ice servers")
++	ErrRequestFailed      = errors.New("vkcalls: provider request failed")
++)
++
++// GuestAPIError reports a VK-side API answer; Code carries error_code when
++// present (14 captcha, 10 internal, 5 auth and the anonym_token.* family).
++type GuestAPIError struct {
++	Stage string
++	Code  int
++	Kind  string
++}
++
++func (e *GuestAPIError) Error() string {
++	if e.Code != 0 {
++		return fmt.Sprintf("vkcalls: %s: api error %d (%s)", e.Stage, e.Code, e.Kind)
++	}
++	return fmt.Sprintf("vkcalls: %s: %s", e.Stage, e.Kind)
++}
++
++// Provider issues guest credentials for VK Calls rooms.
++type Provider struct {
++	// APIBase and FBBase default to the production endpoints; tests point
++	// them at a fake server.
++	APIBase string
++	FBBase  string
++}
++
++// New returns a provider with the production endpoints.
++func New() Provider { return Provider{APIBase: "https://api.vk.me", FBBase: "https://calls.okcdn.ru"} }
++
++// Engine reports which engine consumes this provider's credentials.
++func (Provider) Engine() string { return "vkcalls" }
++
++// DefaultServiceURL is empty: a room link is mandatory for VK Calls.
++func (Provider) DefaultServiceURL() string { return "" }
++
++// Credential keys of the v1 Extra contract (spec section 7.2).
++const (
++	strTrue  = "true"
++	strFalse = "false"
++
++	KeySchema        = "vkcalls_schema"
++	KeyRoomURL       = "room_url"
++	KeyICEServers    = "ice_servers"
++	KeyParticipantID = "participant_id"
++	KeyPeerIDHint    = "peer_id_hint"
++	KeyDeviceIdx     = "device_idx"
++	KeyClientType    = "client_type"
++	KeyP2PForbidden  = "p2p_forbidden"
++)
++
++// Issue runs the guest chain for cfg.RoomURL.
++func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
++	if cfg.RoomURL == "" {
++		return auth.Credentials{}, ErrRoomURLRequired
++	}
++	if cfg.Token != "" {
++		return auth.Credentials{}, ErrTokenUnsupported
++	}
++	link, err := canonicalLink(cfg.RoomURL)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	client := protect.NewHTTPClient(cfg.Resolver)
++	ctx, cancel := context.WithTimeout(ctx, requestWait)
++	defer cancel()
++
++	deviceID := "olcrtc-" + randomToken(16)
++	name := cfg.Name
++	if name == "" {
++		name = "guest-" + randomToken(4)
++	}
++
++	bootstrap := struct {
++		Response struct {
++			Token      string `json:"token"`
++			ExpiredAt  int64  `json:"expired_at"`
++			IsVerified bool   `json:"is_verified"`
++		} `json:"response"`
++	}{}
++	if callErr := p.vkCall(ctx, client, stageAnonToken, map[string]string{
++		"client_id": "8093730", fieldLink: link, fieldDeviceID: deviceID,
++		"anonymName": name, "lang": "ru",
++	}, &bootstrap); callErr != nil {
++		return auth.Credentials{}, callErr
++	}
++	if bootstrap.Response.Token == "" {
++		return auth.Credentials{}, WithStartupStage(stageAnonToken, &GuestAPIError{Stage: stageAnonToken, Kind: "missing_token"})
++	}
++
++	preview := struct {
++		Response struct {
++			UserID json.Number `json:"user_id"`
++			Secret string      `json:"secret"`
++		} `json:"response"`
++	}{}
++	if callErr := p.vkCall(ctx, client, stagePreview, map[string]string{
++		"anonymous_token": bootstrap.Response.Token, fieldDeviceID: deviceID,
++		fieldLink: link, fieldLang: "ru", "extended": "1", "fields": "first_name,last_name,photo_200",
++	}, &preview); callErr != nil {
++		return auth.Credentials{}, callErr
++	}
++	if preview.Response.Secret == "" {
++		return auth.Credentials{}, WithStartupStage(stagePreview, &GuestAPIError{Stage: stagePreview, Kind: "missing_secret"})
++	}
++	userID := preview.Response.UserID.String()
++	if userID == "" || strings.Trim(userID, "-0123456789") != "" {
++		return auth.Credentials{}, WithStartupStage(stagePreview, &GuestAPIError{Stage: stagePreview, Kind: "invalid_user_id"})
++	}
++
++	issued := struct {
++		Response struct {
++			Token string `json:"token"`
++		} `json:"response"`
++	}{}
++	if callErr := p.vkCall(ctx, client, stageCallToken, map[string]string{
++		"anonymous_token": bootstrap.Response.Token, fieldDeviceID: deviceID,
++		fieldLink: link, fieldLang: "ru", "name": name,
++		"user_id": userID, "secret": preview.Response.Secret,
++	}, &issued); callErr != nil {
++		return auth.Credentials{}, callErr
++	}
++	if issued.Response.Token == "" {
++		return auth.Credentials{}, WithStartupStage(stageCallToken, &GuestAPIError{Stage: stageCallToken, Kind: "missing_token"})
++	}
++
++	session, loginErr := p.sdkLogin(ctx, client)
++	if loginErr != nil {
++		return auth.Credentials{}, loginErr
++	}
++
++	join := struct {
++		Endpoint   string `json:"endpoint"`
++		WTEndpoint string `json:"wt_endpoint"`
++		Token      string `json:"token"`
++		ID         string `json:"id"`
++		DeviceIdx  any    `json:"device_idx"`
++		ClientType string `json:"client_type"`
++		P2PForbid  *bool  `json:"p2p_forbidden"`
++		StunServer any    `json:"stun_server"`
++		TurnServer any    `json:"turn_server"`
++	}{}
++	joinParams := map[string]string{
++		"joinLink": linkID(link), "isVideo": strFalse, "protocolVersion": "5",
++		"anonymToken": issued.Response.Token, "session_key": session.SessionKey,
++	}
++	if joinErr := p.fbCall(ctx, client, stageJoin, joinParams, &join); joinErr != nil {
++		return auth.Credentials{}, joinErr
++	}
++
++	credentials, validationErr := credentialsFromJoin(link, userID, join.Endpoint, join.Token,
++		join.DeviceIdx, join.ClientType, join.P2PForbid,
++		join.StunServer, join.TurnServer)
++	return credentials, WithStartupStage(stageJoin, validationErr)
++}
++
++// sdkSession is the answer of the SDK anonymous login step.
++type sdkSession struct {
++	SessionKey string `json:"session_key"`
++}
++
++// sdkLogin runs the SDK anonymous login (step 4) and returns its session.
++func (p Provider) sdkLogin(ctx context.Context, client *http.Client) (sdkSession, error) {
++	var session sdkSession
++	sessionPayload := map[string]any{
++		"version": 2, fieldDeviceID: "olcrtc-sdk-" + randomToken(16), "client_version": sdkClientVer,
++	}
++	sessionData, marshalErr := json.Marshal(sessionPayload)
++	if marshalErr != nil {
++		return session, fmt.Errorf("vkcalls: session data: %w", marshalErr)
++	}
++	if fbErr := p.fbCall(ctx, client, stageLogin, map[string]string{
++		"session_data": string(sessionData),
++	}, &session); fbErr != nil {
++		return session, fbErr
++	}
++	if session.SessionKey == "" {
++		return session, WithStartupStage(stageLogin, &GuestAPIError{Stage: stageLogin, Kind: "missing_session_key"})
++	}
++	return session, nil
++}
++
++// CreateRoom starts a call on behalf of the organizer whose user token is
++// cfg.Token. An explicit API error is returned as-is; a lost or ambiguous
++// response yields ErrCreationUnknown, and the caller must not retry the
++// creation blindly (spec section 3).
++func (p Provider) CreateRoom(ctx context.Context, cfg auth.Config) (string, error) {
++	if cfg.Token == "" {
++		return "", ErrOrganizerRequired
++	}
++	client := protect.NewHTTPClient(cfg.Resolver)
++	ctx, cancel := context.WithTimeout(ctx, requestWait)
++	defer cancel()
++	body, err := p.raw(ctx, client, p.apiBase()+"/method/calls.start", map[string]string{
++		"access_token": cfg.Token, "v": "5.199",
++	})
++	if err != nil {
++		// A transport failure after the request may have reached VK leaves
++		// the room state unknown; that is not a plain network error.
++		return "", fmt.Errorf("%w: %w", ErrCreationUnknown, err)
++	}
++	var created struct {
++		Response struct {
++			JoinLink string `json:"join_link"`
++		} `json:"response"`
++		Error *struct {
++			Code int    `json:"error_code"`
++			Msg  string `json:"error_msg"`
++		} `json:"error"`
++	}
++	if unmarshalErr := json.Unmarshal(body, &created); unmarshalErr != nil {
++		return "", fmt.Errorf("%w: %w", ErrCreationUnknown, unmarshalErr)
++	}
++	if created.Error != nil {
++		return "", &GuestAPIError{Stage: "calls.start", Code: created.Error.Code, Kind: "provider_rejected"}
++	}
++	if created.Response.JoinLink == "" {
++		return "", fmt.Errorf("%w: empty join_link", ErrCreationUnknown)
++	}
++	link, err := canonicalLink(created.Response.JoinLink)
++	if err != nil {
++		return "", fmt.Errorf("%w: %w", ErrCreatedLinkInvalid, err)
++	}
++	return link, nil
++}
++
++func (p Provider) apiBase() string {
++	if p.APIBase != "" {
++		return p.APIBase
++	}
++	return "https://api.vk.me"
++}
++
++func (p Provider) fbBase() string {
++	if p.FBBase != "" {
++		return p.FBBase
++	}
++	return fbProdBase
++}
++
++func (p Provider) vkCall(
++	ctx context.Context, client *http.Client, method string,
++	params map[string]string, out any,
++) error {
++	params["v"] = apiVersion
++	body, err := p.raw(ctx, client, p.apiBase()+"/method/"+method, params)
++	if err != nil {
++		return WithStartupStage(method, err)
++	}
++	return WithStartupStage(method, decodeAPI(body, method, out))
++}
++
++func (p Provider) fbCall(
++	ctx context.Context, client *http.Client, method string,
++	params map[string]string, out any,
++) error {
++	params["method"] = method
++	params["format"] = "JSON"
++	params["application_key"] = sdkAppKey
++	body, err := p.raw(ctx, client, p.fbBase()+"/fb.do", params)
++	if err != nil {
++		return WithStartupStage(method, err)
++	}
++	return WithStartupStage(method, decodeAPI(body, method, out))
++}
++
++func (p Provider) raw(
++	ctx context.Context, client *http.Client, endpoint string, params map[string]string,
++) ([]byte, error) {
++	form := make(url.Values, len(params))
++	for k, v := range params {
++		form.Set(k, v)
++	}
++	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
++	if reqErr != nil {
++		return nil, ErrRequestFailed
++	}
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	resp, doErr := client.Do(req)
++	if doErr != nil {
++		if ctx.Err() != nil {
++			return nil, RequestFailure(ctx.Err())
++		}
++		return nil, RequestFailure(doErr)
++	}
++	defer func() { _ = resp.Body.Close() }()
++	body, readErr := io.ReadAll(io.LimitReader(resp.Body, requestLimit))
++	if readErr != nil {
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
++		return nil, RequestFailure(readErr)
++	}
++	if resp.StatusCode != http.StatusOK {
++		// Status is useful; provider bodies may contain rendezvous credentials.
++		return nil, HTTPFailure(resp.StatusCode)
++	}
++	return body, nil
++}
++
++func decodeAPI(body []byte, stage string, out any) error {
++	var envelope struct {
++		Error *struct {
++			Code int    `json:"error_code"`
++			Msg  string `json:"error_msg"`
++		} `json:"error"`
++	}
++	if err := json.Unmarshal(body, &envelope); err != nil {
++		return &GuestAPIError{Stage: stage, Kind: "invalid_json"}
++	}
++	if envelope.Error != nil {
++		return &GuestAPIError{Stage: stage, Code: envelope.Error.Code, Kind: "provider_rejected"}
++	}
++	dec := json.NewDecoder(bytes.NewReader(body))
++	dec.UseNumber()
++	if err := dec.Decode(out); err != nil {
++		return &GuestAPIError{Stage: stage, Kind: "invalid_response"}
++	}
++	return nil
++}
++
++// credentialsFromJoin applies the v1 validations of spec section 7.2.
++func credentialsFromJoin(link, userID, endpoint, token string, deviceIdx any,
++	clientType string, p2p *bool, stun, turn any) (auth.Credentials, error) {
++	if endpoint == "" || token == "" {
++		return auth.Credentials{}, &GuestAPIError{Stage: stageJoin, Kind: "missing_endpoint_or_token"}
++	}
++	u, err := url.Parse(endpoint)
++	if err != nil || u.Scheme != "wss" || !strings.HasSuffix(u.Host, ".okcdn.ru") {
++		return auth.Credentials{}, ErrInvalidEndpoint
++	}
++	if u.User != nil || u.Port() != "" {
++		return auth.Credentials{}, ErrEndpointUserInfo
++	}
++	if q := u.Query().Get("token"); q != "" && q != token {
++		return auth.Credentials{}, ErrEndpointToken
++	}
++	if clientType == "" {
++		return auth.Credentials{}, ErrMissingClientType
++	}
++	p2pValue := strTrue // absent or invalid forbids DIRECT (spec 7.2)
++	if p2p != nil {
++		p2pValue = strconv.FormatBool(*p2p)
++	}
++	deviceIdxStr, ok := decimalOf(deviceIdx)
++	if !ok {
++		return auth.Credentials{}, ErrInvalidDeviceIdx
++	}
++	ice, err := iceServersJSON(stun, turn)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	extra := map[string]string{
++		KeySchema:        schemaVersion,
++		KeyRoomURL:       link,
++		KeyICEServers:    ice,
++		KeyParticipantID: userID,
++		KeyDeviceIdx:     deviceIdxStr,
++		KeyClientType:    clientType,
++		KeyP2PForbidden:  p2pValue,
++	}
++	if hint := u.Query().Get("peerId"); hint != "" {
++		extra[KeyPeerIDHint] = hint
++	}
++	return auth.Credentials{URL: endpoint, Token: token, Extra: extra}, nil
++}
++
++func iceServersJSON(stun, turn any) (string, error) {
++	servers := []map[string]any{}
++	if stun != nil {
++		if stunURLs := urlsOf(stun); len(stunURLs) > 0 {
++			servers = append(servers, map[string]any{fieldURLs: stunURLs})
++		}
++	}
++	if turn != nil {
++		m := map[string]any{}
++		if turnURLs := urlsOf(turn); len(turnURLs) > 0 {
++			m[fieldURLs] = turnURLs
++		}
++		if username, credential := credsOf(turn); username != "" {
++			m["username"] = username
++			m["credential"] = credential
++		}
++		if len(m) > 0 {
++			servers = append(servers, m)
++		}
++	}
++	b, err := json.Marshal(servers)
++	if err != nil {
++		return "", fmt.Errorf("%w: %w", ErrICEServers, err)
++	}
++	return string(b), nil
++}
++
++func urlsOf(server any) []string {
++	m, ok := server.(map[string]any)
++	if !ok {
++		return nil
++	}
++	switch urls := m[fieldURLs].(type) {
++	case string:
++		return []string{urls}
++	case []any:
++		out := make([]string, 0, len(urls))
++		for _, v := range urls {
++			if s, ok := v.(string); ok && s != "" {
++				out = append(out, s)
++			}
++		}
++		return out
++	}
++	return nil
++}
++
++func credsOf(server any) (string, string) {
++	m, ok := server.(map[string]any)
++	if !ok {
++		return "", ""
++	}
++	username, _ := m["username"].(string)
++	credential, _ := m["credential"].(string)
++	return username, credential
++}
++
++func decimalOf(v any) (string, bool) {
++	switch t := v.(type) {
++	case nil:
++		return "", true // device_idx is optional; empty stays empty
++	case json.Number:
++		if t.String() == "" || strings.Trim(t.String(), "0123456789") != "" {
++			return "", false
++		}
++		return t.String(), true
++	case string:
++		if strings.Trim(t, "0123456789") != "" {
++			return "", false
++		}
++		return t, true
++	case float64:
++		if t != float64(int64(t)) || t < 0 {
++			return "", false
++		}
++		return strconv.FormatInt(int64(t), 10), true
++	}
++	return "", false
++}
++
++// canonicalLink validates the join link shape: vk.ru or vk.com host, /call/
++// join/<id> path, no userinfo, port or query (spec section 4).
++func canonicalLink(raw string) (string, error) {
++	u, err := url.Parse(strings.TrimSpace(raw))
++	if err != nil {
++		return "", ErrInvalidRoomURL
++	}
++	if u.Scheme != "https" || (u.Host != "vk.ru" && u.Host != "vk.com") {
++		return "", ErrRoomURLShape
++	}
++	if u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
++		return "", ErrRoomURLExtra
++	}
++	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
++	if len(parts) != 3 || parts[0] != "call" || parts[1] != "join" || parts[2] == "" {
++		return "", ErrRoomURLShape
++	}
++	return "https://" + u.Host + "/call/join/" + parts[2], nil
++}
++
++func linkID(link string) string {
++	parts := strings.Split(strings.Trim(strings.TrimPrefix(link, "https://"), "/"), "/")
++	return parts[len(parts)-1]
++}
++
++// randomToken returns a hex string of n bytes for device/nick uniqueness.
++func randomToken(n int) string {
++	b := make([]byte, n)
++	if _, err := rand.Read(b); err != nil {
++		now := time.Now().UnixNano()
++		for i := range b {
++			b[i%len(b)] = byte(now >> (uint(i%8) * 8)) //nolint:gosec // fallback entropy only
++		}
++	}
++	return hex.EncodeToString(b)
++}
++
++// redact strips newlines and bounds an upstream error body echo.
++func redact(body []byte) string {
++	s := strings.Map(func(r rune) rune {
++		if r == '\n' || r == '\r' {
++			return ' '
++		}
++		return r
++	}, string(body))
++	if len(s) > 200 {
++		s = s[:200]
++	}
++	return s
++}
+diff --git a/internal/auth/vkcalls/vkcalls_test.go b/internal/auth/vkcalls/vkcalls_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/vkcalls/vkcalls_test.go
+@@ -0,0 +1,239 @@
++package vkcalls
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/openlibrecommunity/olcrtc/internal/auth"
++)
++
++const testRoom = "https://vk.ru/call/join/6LYH98MpSLrY358BBjSGWroHhb"
++
++// fakeVK serves the five-step guest chain and calls.start. The recorded
++// request log lets tests assert the wire contract.
++type fakeVK struct {
++	api   *httptest.Server
++	fb    *httptest.Server
++	steps []string
++	apiFn func(method string, form map[string]string) any
++	fbFn  func(method string, form map[string]string) any
++}
++
++func newFakeVK(t *testing.T) *fakeVK {
++	t.Helper()
++	f := &fakeVK{}
++	f.api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = r.ParseForm()
++		method := strings.TrimPrefix(r.URL.Path, "/method/")
++		f.steps = append(f.steps, method)
++		if f.apiFn != nil {
++			writeJSON(w, f.apiFn(method, formMap(r)))
++			return
++		}
++		writeJSON(w, defaultAPIAnswer(method))
++	}))
++	f.fb = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = r.ParseForm()
++		method := r.Form.Get("method")
++		f.steps = append(f.steps, method)
++		if f.fbFn != nil {
++			writeJSON(w, f.fbFn(method, formMap(r)))
++			return
++		}
++		writeJSON(w, defaultFBAnswer(method))
++	}))
++	t.Cleanup(f.api.Close)
++	t.Cleanup(f.fb.Close)
++	return f
++}
++
++func (f *fakeVK) provider() Provider { return Provider{APIBase: f.api.URL, FBBase: f.fb.URL} }
++
++func formMap(r *http.Request) map[string]string {
++	out := make(map[string]string, len(r.PostForm))
++	for k := range r.PostForm {
++		out[k] = r.PostForm.Get(k)
++	}
++	return out
++}
++
++func writeJSON(w http.ResponseWriter, v any) {
++	w.Header().Set("Content-Type", "application/json")
++	b, err := json.Marshal(v)
++	if err != nil {
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	_, _ = w.Write(b)
++}
++
++func defaultAPIAnswer(method string) any {
++	switch method {
++	case "auth.getAnonymToken":
++		return map[string]any{"response": map[string]any{"token": "anon-token", "expired_at": 1790619997}}
++	case "messages.getCallPreview":
++		return map[string]any{"response": map[string]any{"user_id": 579934934382, "secret": "s3cret"}}
++	case "messages.getAnonymCallToken":
++		return map[string]any{"response": map[string]any{"token": "sdk-anon-token"}}
++	}
++	return map[string]any{"error": map[string]any{"error_code": 10, "error_msg": "internal"}}
++}
++
++func defaultFBAnswer(method string) any {
++	switch method {
++	case "auth.anonymLogin":
++		return map[string]any{"session_key": "sk", "session_secret_key": "ssk", "api_server": "https://calls.okcdn.ru"}
++	case "vchat.joinConversationByLink":
++		return map[string]any{
++			"endpoint":      "wss://videowebrtc.okcdn.ru/ws2?conversationId=c&peerId=46584250478&token=join-token&userId=579934934382&entityType=USER",
++			"wt_endpoint":   "wss://videowebrtc.okcdn.ru/wt",
++			"token":         "join-token",
++			"id":            "call-id",
++			"device_idx":    7,
++			"client_type":   "VK",
++			"p2p_forbidden": false,
++			"stun_server":   map[string]any{"urls": "stun:stun.example:3478"},
++			"turn_server":   map[string]any{"urls": []string{"turn:91.231.135.155:19302", "turn:91.231.135.179:19302"}, "username": "u", "credential": "c"},
++		}
++	}
++	return map[string]any{"error": map[string]any{"error_code": 10, "error_msg": "internal"}}
++}
++
++func TestIssueHappyPath(t *testing.T) {
++	f := newFakeVK(t)
++	creds, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom, Name: "Test"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []string{"auth.getAnonymToken", "messages.getCallPreview", "messages.getAnonymCallToken",
++		"auth.anonymLogin", "vchat.joinConversationByLink"}
++	if strings.Join(f.steps, ",") != strings.Join(want, ",") {
++		t.Fatalf("chain order %v, want %v", f.steps, want)
++	}
++	if creds.URL != "wss://videowebrtc.okcdn.ru/ws2?conversationId=c&peerId=46584250478&token=join-token&userId=579934934382&entityType=USER" {
++		t.Fatalf("url: %s", creds.URL)
++	}
++	if creds.Token != "join-token" {
++		t.Fatalf("token: %s", creds.Token)
++	}
++	checks := map[string]string{
++		KeySchema:        "1",
++		KeyRoomURL:       testRoom,
++		KeyParticipantID: "579934934382",
++		KeyPeerIDHint:    "46584250478",
++		KeyDeviceIdx:     "7",
++		KeyClientType:    "VK",
++		KeyP2PForbidden:  "false",
++	}
++	for k, want := range checks {
++		if creds.Extra[k] != want {
++			t.Errorf("%s = %q, want %q", k, creds.Extra[k], want)
++		}
++	}
++	var ice []map[string]any
++	if err := json.Unmarshal([]byte(creds.Extra[KeyICEServers]), &ice); err != nil {
++		t.Fatalf("ice json: %v", err)
++	}
++	if len(ice) != 2 {
++		t.Fatalf("ice servers: %v", ice)
++	}
++	if urls, _ := ice[1]["urls"].([]any); len(urls) != 2 || urls[0] != "turn:91.231.135.155:19302" {
++		t.Fatalf("turn urls: %v", ice[1])
++	}
++	if ice[1]["username"] != "u" || ice[1]["credential"] != "c" {
++		t.Fatalf("turn creds: %v", ice[1])
++	}
++	// Bootstrap secrets must not leak into credentials.
++	for _, v := range creds.Extra {
++		if strings.Contains(v, "anon-token") || strings.Contains(v, "s3cret") || strings.Contains(v, "ssk") {
++			t.Fatal("bootstrap secret leaked into Extra")
++		}
++	}
++}
++
++func TestIssueValidations(t *testing.T) {
++	f := newFakeVK(t)
++	if _, err := f.provider().Issue(context.Background(), auth.Config{}); err == nil {
++		t.Fatal("missing room url accepted")
++	}
++	if _, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom, Token: "acc"}); err == nil {
++		t.Fatal("account token accepted for guest issue")
++	}
++	for _, bad := range []string{
++		"https://evil.example/call/join/x", "https://vk.ru/call/join/x/extra",
++		"https://user@vk.ru/call/join/x", "https://vk.ru:8443/call/join/x",
++		"https://vk.ru/call/join/x?token=1", "https://vk.ru/other/path",
++	} {
++		if _, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: bad}); err == nil {
++			t.Fatalf("bad room url accepted: %s", bad)
++		}
++	}
++	// Endpoint token mismatch.
++	f.fbFn = func(method string, _ map[string]string) any {
++		a := defaultFBAnswer(method).(map[string]any)
++		if method == "vchat.joinConversationByLink" {
++			a["token"] = "different-token"
++		}
++		return a
++	}
++	if _, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom}); err == nil {
++		t.Fatal("endpoint token mismatch accepted")
++	}
++	// p2p_forbidden absent -> conservative true.
++	f.fbFn = func(method string, _ map[string]string) any {
++		a := defaultFBAnswer(method).(map[string]any)
++		delete(a, "p2p_forbidden")
++		return a
++	}
++	creds, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if creds.Extra[KeyP2PForbidden] != "true" {
++		t.Fatalf("absent p2p_forbidden = %q, want true", creds.Extra[KeyP2PForbidden])
++	}
++}
++
++func TestIssueAPIErrors(t *testing.T) {
++	f := newFakeVK(t)
++	f.apiFn = func(method string, _ map[string]string) any {
++		if method == "messages.getCallPreview" {
++			return map[string]any{"error": map[string]any{"error_code": 14, "error_msg": "Captcha needed"}}
++		}
++		return defaultAPIAnswer(method)
++	}
++	_, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom})
++	var apiErr *GuestAPIError
++	if !errors.As(err, &apiErr) || apiErr.Code != 14 {
++		t.Fatalf("captcha error: %v", err)
++	}
++	f.apiFn = func(_ string, _ map[string]string) any { return "<html>" }
++	if _, err := f.provider().Issue(context.Background(), auth.Config{RoomURL: testRoom}); err == nil {
++		t.Fatal("invalid json accepted")
++	}
++}
++
++func TestCreateRoom(t *testing.T) {
++	f := newFakeVK(t)
++	if _, err := f.provider().CreateRoom(context.Background(), auth.Config{}); err == nil {
++		t.Fatal("missing organizer token accepted")
++	}
++	f.apiFn = func(_ string, _ map[string]string) any {
++		return map[string]any{"response": map[string]any{"join_link": "https://vk.ru/call/join/NEWROOM1", "ok_join_link": ""}}
++	}
++	link, err := f.provider().CreateRoom(context.Background(), auth.Config{Token: "org-token"})
++	if err != nil || link != "https://vk.ru/call/join/NEWROOM1" {
++		t.Fatalf("create: %q %v", link, err)
++	}
++	// Ambiguous loss: connection reset mid-answer.
++	f.api.Close()
++	_, err = f.provider().CreateRoom(context.Background(), auth.Config{Token: "org-token"})
++	if !errors.Is(err, ErrCreationUnknown) {
++		t.Fatalf("lost response must be creation_unknown, got %v", err)
++	}
++}
+diff --git a/internal/engine/builtin/builtin.go b/internal/engine/builtin/builtin.go
+--- a/internal/engine/builtin/builtin.go
++++ b/internal/engine/builtin/builtin.go
+@@ -16,11 +16,13 @@
+ 	authJitsi "github.com/openlibrecommunity/olcrtc/internal/auth/jitsi"
+ 	authSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/auth/salutejazz"
+ 	authTelemost "github.com/openlibrecommunity/olcrtc/internal/auth/telemost"
++	authVKCalls "github.com/openlibrecommunity/olcrtc/internal/auth/vkcalls"
+ 	authWBStream "github.com/openlibrecommunity/olcrtc/internal/auth/wbstream"
+ 	"github.com/openlibrecommunity/olcrtc/internal/engine"
+ 	"github.com/openlibrecommunity/olcrtc/internal/engine/goolom"
+ 	engineJitsi "github.com/openlibrecommunity/olcrtc/internal/engine/jitsi"
+ 	engineSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/engine/salutejazz"
++	engineVKCalls "github.com/openlibrecommunity/olcrtc/internal/engine/vkcalls"
+ 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+ )
+ 
+@@ -112,10 +114,12 @@
+ 	engine.Register("goolom", goolom.New)
+ 	engine.Register("jitsi", engineJitsi.New)
+ 	engine.Register("salutejazz", engineSaluteJazz.New)
++	engine.Register("vkcalls", engineVKCalls.New)
+ 	register("wbstream", authWBStream.Provider{})
+ 	register("telemost", authTelemost.Provider{})
+ 	register("jitsi", authJitsi.Provider{})
+ 	register("salutejazz", authSaluteJazz.New())
++	register("vkcalls", authVKCalls.New())
+ 	register("none", nil)
+ }
+ 
+diff --git a/internal/engine/builtin/vkcalls_managed_test.go b/internal/engine/builtin/vkcalls_managed_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/builtin/vkcalls_managed_test.go
+@@ -0,0 +1,16 @@
++package builtin_test
++
++import (
++	"slices"
++	"testing"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++	"github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
++)
++
++func TestManagedVKProviderIsRegistered(t *testing.T) {
++	builtin.RegisterDefaults()
++	if !slices.Contains(builtin.Available(), "vkcalls") || !slices.Contains(engine.Available(), "vkcalls") {
++		t.Fatal("VK auth and engine must be in the same binary")
++	}
++}
+diff --git a/internal/engine/vkcalls/answer.go b/internal/engine/vkcalls/answer.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/answer.go
+@@ -0,0 +1,334 @@
++// Package vkcalls implements an engine.Session over the VK Calls SERVER
++// topology: a signaling WebSocket against calls.okcdn.ru plus one bundled
++// PeerConnection whose answer is shaped into the reference client's byte
++// order — the SFU gates transport creation on that form.
++//
++// The negotiation contract was established by the vk spike
++// (docs/spikes/vkcalls): the answer must carry the current offer's m-line
++// payload lists, codec blocks and section directions in the reference
++// attribute order, with our own ICE/DTLS fields and publish SSRCs, while
++// media forwarding is driven by the update-display-layout control command
++// on the producerCommand data channel, addressed by compact stream ids from
++// the producerNotification registry.
++package vkcalls
++
++import (
++	"errors"
++	"fmt"
++	"math/rand"
++	"regexp"
++	"strconv"
++	"strings"
++)
++
++// maxSDPSize bounds accepted SDP inputs; live offers are ~70 KB.
++const (
++	maxSDPSize  = 1 << 20
++	trickleLn   = "a=ice-options:trickle"
++	activeLn    = "a=setup:active"
++	kindAudio   = "audio"
++	kindVideo   = "video"
++	dirSendOnly = "sendonly"
++	zeroAddrLn  = "c=IN IP4 0.0.0.0"
++)
++
++// Shaping errors. They name the missing piece, never the values.
++var (
++	ErrShapeNoCrypto          = errors.New("vkcalls: native answer carries no ICE/DTLS fields")
++	ErrShapeNoPublish         = errors.New("vkcalls: native answer declares no video publish section")
++	ErrShapeSectionWithoutMID = errors.New("vkcalls: offer section without a=mid")
++	ErrShapeDirection         = errors.New("vkcalls: offer section with unsupported direction")
++	ErrShapeBundle            = errors.New("vkcalls: offer without a BUNDLE group")
++	ErrShapeSDPTooLarge       = errors.New("vkcalls: SDP exceeds size bound")
++)
++
++var (
++	iceUfragLine   = regexp.MustCompile(`(?m)^a=ice-ufrag:(\S+)$`)
++	icePwdLine     = regexp.MustCompile(`(?m)^a=ice-pwd:(\S+)$`)
++	fingerprintLin = regexp.MustCompile(`(?m)^(a=fingerprint:.*)$`)
++	bundleLine     = regexp.MustCompile(`(?m)^a=group:BUNDLE (.*)$`)
++	ssrcCNameLine  = regexp.MustCompile(`(?m)^a=ssrc:(\d+) cname:(\S+)$`)
++	msidLine       = regexp.MustCompile(`(?m)^(a=msid:\S+ \S+)$`)
++	midLine        = regexp.MustCompile(`^a=mid:(\S+)$`)
++)
++
++// section is one m= section split into its lines.
++type section []string
++
++func (s section) mid() string {
++	for _, line := range s {
++		if m := midLine.FindStringSubmatch(line); m != nil {
++			return m[1]
++		}
++	}
++	return ""
++}
++
++func (s section) direction() string {
++	for _, line := range s {
++		switch line {
++		case "a=sendonly", "a=recvonly", "a=sendrecv", "a=inactive":
++			return strings.TrimPrefix(line, "a=")
++		}
++	}
++	return ""
++}
++
++func (s section) kind() string {
++	head := strings.Fields(s[0])
++	if len(head) == 0 {
++		return ""
++	}
++	return strings.TrimPrefix(head[0], "m=")
++}
++
++// splitSections splits SDP text into its m= sections, dropping empty lines
++// and everything before the first one. Blank input yields no sections.
++func splitSections(sdp string) ([]section, error) {
++	if len(sdp) > maxSDPSize {
++		return nil, ErrShapeSDPTooLarge
++	}
++	var sections []section
++	for _, line := range strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n") {
++		if line == "" {
++			continue
++		}
++		if strings.HasPrefix(line, "m=") {
++			sections = append(sections, section{line})
++			continue
++		}
++		if len(sections) > 0 {
++			sections[len(sections)-1] = append(sections[len(sections)-1], line)
++		}
++	}
++	return sections, nil
++}
++
++// ShapeState carries the mutable per-session shaping state across re-answers:
++// the generated o= session id, the bumping o= version and the stable
++// synthetic SSRCs of audio publish slots (we send nothing there, but the
++// reference client declares them and the SFU expects stable attributions).
++type ShapeState struct {
++	SessionID int64
++	Version   int
++	AudioSSRC map[string]uint32
++	// NativeVideoSSRC: EXPERIMENT (temporary) the native publish section's
++	// FID group and cname lines.
++	NativeVideoSSRC []string
++	// NativeAudioSSRC: EXPERIMENT (temporary) the native answer's real
++	// audio sender SSRC per mid.
++	NativeAudioSSRC map[string]uint32
++}
++
++// NewShapeState builds shaping state with a fresh session id.
++func NewShapeState() *ShapeState {
++	return &ShapeState{
++		SessionID: 1000000000000000000 + rand.Int63n(800000000000000000), //nolint:gosec // SDP session id, not a secret
++		AudioSSRC: map[string]uint32{},
++	}
++}
++
++func (st *ShapeState) audioSSRC(mid string) uint32 {
++	if ssrc, ok := st.AudioSSRC[mid]; ok {
++		return ssrc
++	}
++	ssrc := uint32(1000000000 + rand.Int63n(1000000000)) //nolint:gosec // synthetic RTP SSRC
++	st.AudioSSRC[mid] = ssrc
++	return ssrc
++}
++
++// ShapeAnswer reconstructs the answer for offer in the reference client's
++// byte order. Every content-bearing line — m= payload lists, extmap and
++// codec blocks, section directions — comes from the offer; the crypto fields
++// and the video publish declaration come from native, the Pion-generated
++// answer. The session header is fully generated: the transport gate accepts
++// it (spike hybrid-16) and no captured template is needed.
++func ShapeAnswer(offer, native string, st *ShapeState) (string, error) { //nolint:gocognit,gocyclo,cyclop
++	offer = strings.ReplaceAll(offer, "\r\n", "\n")
++	native = strings.ReplaceAll(native, "\r\n", "\n")
++	ufrag := iceUfragLine.FindStringSubmatch(native)
++	pwd := icePwdLine.FindStringSubmatch(native)
++	fingerprint := fingerprintLin.FindStringSubmatch(native)
++	if ufrag == nil || pwd == nil || fingerprint == nil {
++		return "", ErrShapeNoCrypto
++	}
++	publishSSRC, cname, msid, msidStream, err := videoPublishOf(native)
++	if err != nil {
++		return "", err
++	}
++	st.NativeVideoSSRC = nil
++	st.NativeAudioSSRC = map[string]uint32{}
++	if nativeSections, splitErr := splitSections(native); splitErr == nil { //nolint:nestif
++		for _, sec := range nativeSections {
++			if sec.kind() == kindAudio && sec.direction() == "sendonly" {
++				for _, line := range sec {
++					if m := ssrcCNameLine.FindStringSubmatch(line); m != nil {
++						if v, perr := strconv.ParseUint(m[1], 10, 32); perr == nil {
++							st.NativeAudioSSRC[sec.mid()] = uint32(v)
++						}
++						break
++					}
++				}
++			}
++			if sec.kind() != kindVideo || sec.direction() != dirSendOnly {
++				continue
++			}
++			for _, line := range sec {
++				isCName := strings.HasPrefix(line, "a=ssrc:") && strings.Contains(line, " cname:")
++				if strings.HasPrefix(line, "a=ssrc-group:") || isCName {
++					st.NativeVideoSSRC = append(st.NativeVideoSSRC, line)
++				}
++			}
++		}
++	}
++	bundle := bundleLine.FindStringSubmatch(offer)
++	if bundle == nil {
++		return "", ErrShapeBundle
++	}
++
++	offerSections, err := splitSections(offer)
++	if err != nil {
++		return "", err
++	}
++	st.Version += 2
++
++	out := []string{
++		"v=0",
++		fmt.Sprintf("o=- %d %d IN IP4 127.0.0.1", st.SessionID, st.Version),
++		"s=-",
++		"t=0 0",
++		"a=group:BUNDLE " + bundle[1],
++		"a=msid-semantic: WMS " + strings.TrimPrefix(strings.Fields(msid)[0], "a=msid:"),
++	}
++	for _, sec := range offerSections {
++		crypto := cryptoBlock(ufrag[1], pwd[1], fingerprint[1])
++		lines, err := shapeSection(sec, crypto, st, msid, msidStream, publishSSRC, cname)
++		if err != nil {
++			return "", err
++		}
++		out = append(out, lines...)
++	}
++	return strings.Join(out, "\r\n"), nil
++}
++
++// cryptoBlock is the per-section ICE/DTLS block: every section carries the
++// session's credentials with trickle and an active DTLS role, as the
++// reference client writes them.
++func cryptoBlock(ufrag, pwd, fingerprint string) []string {
++	return []string{
++		"a=ice-ufrag:" + ufrag,
++		"a=ice-pwd:" + pwd,
++		trickleLn,
++		fingerprint,
++		activeLn,
++	}
++}
++
++// shapeSection reconstructs one offer section in the reference byte order.
++func shapeSection(sec section, crypto []string, st *ShapeState, msid, msidStream string,
++	_ uint32, cname string,
++) ([]string, error) {
++	mid := sec.mid()
++	if mid == "" {
++		return nil, ErrShapeSectionWithoutMID
++	}
++	kind := sec.kind()
++	out := []string{sec[0], zeroAddrLn}
++	if kind == "application" {
++		out = append(out, crypto...)
++		out = append(out, "a=mid:"+mid, "a=sctp-port:5000")
++		return out, nil
++	}
++	out = append(out, "a=rtcp:9 IN IP4 0.0.0.0")
++	out = append(out, crypto...)
++	out = append(out, "a=mid:"+mid)
++	for _, line := range sec {
++		if strings.HasPrefix(line, "a=extmap:") {
++			out = append(out, line)
++		}
++	}
++	switch sec.direction() {
++	case dirSendOnly:
++		// The SFU sends here: answer recv-only with the offered vocabulary.
++		out = append(out, "a=recvonly", "a=rtcp-mux")
++		out = append(out, codecLines(sec)...)
++		return out, nil
++	case "recvonly":
++		// Our publish slot. Audio slots keep a stable synthetic SSRC; the
++		// video slot declares the Pion track's real SSRC plainly — the
++		// engine sends no rid headers, so the reference rid/simulcast form
++		// would never match a stream.
++		out = append(out, "a=sendonly")
++		if kind == kindAudio {
++			out = append(out, msidStream+" "+mid+"-audio")
++		} else {
++			out = append(out, msid)
++		}
++		out = append(out, "a=rtcp-mux")
++		out = append(out, codecLines(sec)...)
++		if kind == kindAudio {
++			ssrc := st.audioSSRC(mid)
++			out = append(out, "a=ssrc:"+strconv.FormatUint(uint64(ssrc), 10)+" cname:"+cname)
++			return out, nil
++		}
++		// The video slot takes the browser's simulcast declaration: three
++		// rid constraints with the engine publishing the low layer only, and
++		// no a=ssrc — the SFU binds the stream by the rid header instead.
++		// This is the form the SDK's finalizeAnswer writes and the SFU
++		// forwards (spike rid-onelayer).
++		w, h, fps, kbps := layerProfile()
++		out = append(out,
++			fmt.Sprintf("a=rid:l send max-width=%d;max-height=%d;max-fps=%d;max-br=%d", w, h, fps, kbps*1000),
++			"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
++			"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
++			"a=simulcast:send l;m;h")
++		return out, nil
++	default:
++		return nil, fmt.Errorf("%w: mid %s", ErrShapeDirection, mid)
++	}
++}
++
++// codecLines returns the offer's rtpmap/fmtp/rtcp-fb block in offer order.
++func codecLines(sec section) []string {
++	var out []string
++	for _, line := range sec {
++		switch {
++		case strings.HasPrefix(line, "a=rtpmap:"), strings.HasPrefix(line, "a=fmtp:"), strings.HasPrefix(line, "a=rtcp-fb:"):
++			out = append(out, line)
++		}
++	}
++	return out
++}
++
++// videoPublishOf extracts the sendonly video section's SSRC, CNAME, msid
++// line and msid stream prefix from the native answer.
++func videoPublishOf(native string) (uint32, string, string, string, error) {
++	sections, err := splitSections(native)
++	if err != nil {
++		return 0, "", "", "", err
++	}
++	for _, sec := range sections {
++		if sec.kind() != kindVideo || sec.direction() != dirSendOnly {
++			continue
++		}
++		msid := "a=msid:proofkit video"
++		if found := msidLine.FindStringSubmatch(strings.Join(sec, "\n")); found != nil {
++			msid = found[1]
++		}
++		for _, line := range sec {
++			m := ssrcCNameLine.FindStringSubmatch(line)
++			if m == nil {
++				continue
++			}
++			ssrc, err := strconv.ParseUint(m[1], 10, 32)
++			if err != nil {
++				return 0, "", "", "", ErrShapeNoPublish
++			}
++			return uint32(ssrc), m[2], msid, strings.Fields(msid)[0], nil
++		}
++	}
++	return 0, "", "", "", ErrShapeNoPublish
++}
++
++// vp8Only restricts a publish section to the offer's VP8 payload type and
++// its rtx, rewriting the m= line.
+diff --git a/internal/engine/vkcalls/answer_test.go b/internal/engine/vkcalls/answer_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/answer_test.go
+@@ -0,0 +1,326 @@
++package vkcalls
++
++import (
++	"errors"
++	"strings"
++	"testing"
++)
++
++// fixtureOffer mirrors the live SFU offer structure with sanitized values:
++// an audio-mix sendonly section, the application section, two publish slots
++// (audio and video recvonly) and one video recv section.
++const fixtureOffer = "v=0\r\n" +
++	"o=- 1790552099500 1790552100511 IN IP4 127.0.0.1\r\n" +
++	"s=-\r\nt=0 0\r\n" +
++	"a=group:BUNDLE 0 1 2 3 5\r\n" +
++	"a=ice-lite\r\n" +
++	"a=msid-semantic: WMS *\r\n" +
++	"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
++	"c=IN IP4 0.0.0.0\r\n" +
++	"a=rtcp:9 IN IP4 0.0.0.0\r\n" +
++	"a=candidate:1 1 udp 1 192.0.2.1 43210 typ host\r\n" +
++	"a=ice-ufrag:QcK1avCrgDjn21p\r\n" +
++	"a=ice-pwd:GZU7Kw3Sq1YSJxrABCtRTGhms\r\n" +
++	"a=fingerprint:sha-256 32:16:0D:10:FC:A1:F1:04:43:F5:22:01:9B:2E:53:38\r\n" +
++	"a=setup:actpass\r\n" +
++	"a=mid:0\r\n" +
++	"a=extmap:4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n" +
++	"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n" +
++	"a=sendonly\r\n" +
++	"a=rtcp-mux\r\n" +
++	"a=rtpmap:111 opus/48000/2\r\n" +
++	"a=rtcp-fb:111 transport-cc\r\n" +
++	"a=fmtp:111 useinbandfec=1;minptime=10\r\n" +
++	"a=ssrc:2463708138 cname:audio-mix\r\n" +
++	"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" +
++	"c=IN IP4 0.0.0.0\r\n" +
++	"a=ice-ufrag:QcK1avCrgDjn21p\r\n" +
++	"a=ice-pwd:GZU7Kw3Sq1YSJxrABCtRTGhms\r\n" +
++	"a=mid:1\r\n" +
++	"a=sendrecv\r\n" +
++	"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
++	"c=IN IP4 0.0.0.0\r\n" +
++	"a=ice-ufrag:QcK1avCrgDjn21p\r\n" +
++	"a=mid:2\r\n" +
++	"a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n" +
++	"a=recvonly\r\n" +
++	"a=rtcp-mux\r\n" +
++	"a=rtpmap:111 opus/48000/2\r\n" +
++	"a=fmtp:111 useinbandfec=1;minptime=10;maxaveragebitrate=64000\r\n" +
++	"m=video 9 UDP/TLS/RTP/SAVPF 102 103 100 101\r\n" +
++	"c=IN IP4 0.0.0.0\r\n" +
++	"a=ice-ufrag:QcK1avCrgDjn21p\r\n" +
++	"a=mid:3\r\n" +
++	"a=extmap:4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n" +
++	"a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n" +
++	"a=recvonly\r\n" +
++	"a=rtcp-mux\r\n" +
++	"a=rtpmap:102 VP9/90000\r\n" +
++	"a=rtcp-fb:102 transport-cc\r\n" +
++	"a=rtpmap:103 rtx/90000\r\n" +
++	"a=fmtp:103 apt=102\r\n" +
++	"a=rtpmap:100 VP8/90000\r\n" +
++	"a=rtcp-fb:100 nack\r\n" +
++	"a=rtcp-fb:100 nack pli\r\n" +
++	"a=rid:l recv\r\n" +
++	"a=simulcast:recv l\r\n" +
++	"m=video 9 UDP/TLS/RTP/SAVPF 100 101\r\n" +
++	"c=IN IP4 0.0.0.0\r\n" +
++	"a=ice-ufrag:QcK1avCrgDjn21p\r\n" +
++	"a=mid:5\r\n" +
++	"a=extmap:4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n" +
++	"a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n" +
++	"a=sendonly\r\n" +
++	"a=rtcp-mux\r\n" +
++	"a=rtpmap:100 VP8/90000\r\n" +
++	"a=rtcp-fb:100 nack\r\n" +
++	"a=ssrc:2463708139 cname:pat\r\n" +
++	"a=ssrc:2463708139 msid:pat video-pat\r\n"
++
++// fixtureNative mirrors the fields the shaper takes from Pion's answer.
++const fixtureNative = "v=0\r\n" +
++	"o=- 123 2 IN IP4 127.0.0.1\r\n" +
++	"s=-\r\nt=0 0\r\n" +
++	"a=group:BUNDLE 0 1 2 3 5\r\n" +
++	"m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" +
++	"a=ice-ufrag:KdfaZFqRLOnUhmUW\r\n" +
++	"a=ice-pwd:WTugXtAYkOEfiYMfOWDCKNNQNhVqAkoc\r\n" +
++	"a=fingerprint:sha-256 BC:92:07:E6:13:23:65:25:C2:FE:85:A0:9D:EE:46:CA\r\n" +
++	"a=mid:0\r\n" +
++	"a=recvonly\r\n" +
++	"m=video 9 UDP/TLS/RTP/SAVPF 100\r\n" +
++	"a=ice-ufrag:KdfaZFqRLOnUhmUW\r\n" +
++	"a=ice-pwd:WTugXtAYkOEfiYMfOWDCKNNQNhVqAkoc\r\n" +
++	"a=fingerprint:sha-256 BC:92:07:E6:13:23:65:25:C2:FE:85:A0:9D:EE:46:CA\r\n" +
++	"a=mid:3\r\n" +
++	"a=sendonly\r\n" +
++	"a=msid:proofkit video\r\n" +
++	"a=ssrc:3842537998 cname:proofkit\r\n"
++
++func TestShapeAnswerStructure(t *testing.T) {
++	state := NewShapeState()
++	shaped, err := ShapeAnswer(fixtureOffer, fixtureNative, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lines := strings.Split(shaped, "\r\n")
++
++	// Session header: fully generated, BUNDLE echoed from the offer.
++	if lines[0] != "v=0" || !strings.HasPrefix(lines[1], "o=- ") || lines[4] != "a=group:BUNDLE 0 1 2 3 5" {
++		t.Fatalf("session header %v", lines[:6])
++	}
++	if lines[5] != "a=msid-semantic: WMS proofkit" {
++		t.Fatalf("msid-semantic %q", lines[5])
++	}
++
++	// The application section keeps the reference shape: no direction, no rtcp.
++	app := sectionOf(t, lines, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel")
++	if app[1] != "c=IN IP4 0.0.0.0" || app[2] != "a=ice-ufrag:KdfaZFqRLOnUhmUW" {
++		t.Fatalf("application head %v", app[:3])
++	}
++	if strings.Join(app, "\n") != strings.Join([]string{
++		"m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
++		"c=IN IP4 0.0.0.0",
++		"a=ice-ufrag:KdfaZFqRLOnUhmUW",
++		"a=ice-pwd:WTugXtAYkOEfiYMfOWDCKNNQNhVqAkoc",
++		"a=ice-options:trickle",
++		"a=fingerprint:sha-256 BC:92:07:E6:13:23:65:25:C2:FE:85:A0:9D:EE:46:CA",
++		"a=setup:active",
++		"a=mid:1",
++		"a=sctp-port:5000",
++	}, "\n") {
++		t.Fatalf("application section %v", app)
++	}
++
++	// A recv section answers recvonly with the offered codec vocabulary, no
++	// SSRC attributions, no rid/simulcast from the offer.
++	recv := sectionOf(t, lines, "m=video 9 UDP/TLS/RTP/SAVPF 100 101")
++	wantRecv := strings.Join([]string{
++		"m=video 9 UDP/TLS/RTP/SAVPF 100 101",
++		"c=IN IP4 0.0.0.0",
++		"a=rtcp:9 IN IP4 0.0.0.0",
++		"a=ice-ufrag:KdfaZFqRLOnUhmUW",
++		"a=ice-pwd:WTugXtAYkOEfiYMfOWDCKNNQNhVqAkoc",
++		"a=ice-options:trickle",
++		"a=fingerprint:sha-256 BC:92:07:E6:13:23:65:25:C2:FE:85:A0:9D:EE:46:CA",
++		"a=setup:active",
++		"a=mid:5",
++		"a=extmap:4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
++		"a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
++		"a=recvonly",
++		"a=rtcp-mux",
++		"a=rtpmap:100 VP8/90000",
++		"a=rtcp-fb:100 nack",
++	}, "\n")
++	if strings.Join(recv, "\n") != wantRecv {
++		t.Fatalf("recv section:\n%s", strings.Join(recv, "\n"))
++	}
++
++	// The video publish slot takes the browser's simulcast declaration:
++	// three rid constraints, one simulcast line, no SSRC attribution — the
++	// SFU binds the stream by the rid RTP header (spike rid-onelayer).
++	pub := sectionOf(t, lines, "m=video 9 UDP/TLS/RTP/SAVPF 102 103 100 101")
++	if !contains(pub, "a=sendonly") || !contains(pub, "a=msid:proofkit video") {
++		t.Fatalf("publish section %v", pub)
++	}
++	for _, want := range []string{
++		"a=rid:l send max-width=320;max-height=180;max-fps=15;max-br=180000",
++		"a=rid:m send max-width=640;max-height=360;max-fps=20;max-br=500000",
++		"a=rid:h send max-width=1280;max-height=720;max-fps=20;max-br=1200000",
++		"a=simulcast:send l;m;h",
++	} {
++		if !contains(pub, want) {
++			t.Fatalf("publish section missing %q: %v", want, pub)
++		}
++	}
++	for _, line := range pub {
++		if strings.HasPrefix(line, "a=ssrc:") {
++			t.Fatalf("ssrc attribution leaked into the video publish slot: %q", line)
++		}
++	}
++
++	// The audio publish slot gets a stable synthetic SSRC and our msid with a
++	// slot-scoped track id. Both audio sections share one m= text, so the
++	// publish one is identified by its mid.
++	audioPub := sectionByMid(t, lines, "a=mid:2")
++	if !contains(audioPub, "a=sendonly") {
++		t.Fatalf("audio publish section %v", audioPub)
++	}
++	if !contains(audioPub, "a=msid:proofkit 2-audio") {
++		t.Fatalf("audio publish msid not slot-scoped: %v", audioPub)
++	}
++	audioSSRC := lineOf(audioPub, "a=ssrc:")
++	if audioSSRC == "" {
++		t.Fatal("audio publish slot without SSRC")
++	}
++	again, err := ShapeAnswer(fixtureOffer, fixtureNative, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !contains(strings.Split(again, "\r\n"), audioSSRC) {
++		t.Fatal("synthetic audio SSRC is not stable across re-answers")
++	}
++
++	// Offer candidates and ssrc attributions never leak into the answer.
++	for _, line := range lines {
++		if strings.HasPrefix(line, "a=candidate:") {
++			t.Fatalf("candidate leaked: %q", line)
++		}
++		if line == "a=ssrc:2463708138 cname:audio-mix" {
++			t.Fatal("offer ssrc leaked into a recv answer")
++		}
++	}
++}
++
++func TestShapeAnswerVersionBumps(t *testing.T) {
++	state := NewShapeState()
++	first, err := ShapeAnswer(fixtureOffer, fixtureNative, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	second, err := ShapeAnswer(fixtureOffer, fixtureNative, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	v1 := strings.Fields(strings.Split(first, "\r\n")[1])
++	v2 := strings.Fields(strings.Split(second, "\r\n")[1])
++	if v1[2] == v2[2] {
++		t.Fatalf("o= version did not bump: %q vs %q", v1, v2)
++	}
++	if v1[1] != v2[1] {
++		t.Fatalf("o= session id changed across answers: %q vs %q", v1[1], v2[1])
++	}
++}
++
++func TestShapeAnswerErrors(t *testing.T) {
++	if _, err := ShapeAnswer(fixtureOffer, "v=0", NewShapeState()); !errors.Is(err, ErrShapeNoCrypto) {
++		t.Fatalf("want ErrShapeNoCrypto, got %v", err)
++	}
++	noPublish := strings.ReplaceAll(fixtureNative, "a=ssrc:3842537998 cname:proofkit\r\n", "")
++	if _, err := ShapeAnswer(fixtureOffer, noPublish, NewShapeState()); !errors.Is(err, ErrShapeNoPublish) {
++		t.Fatalf("want ErrShapeNoPublish, got %v", err)
++	}
++	noBundle := strings.ReplaceAll(fixtureOffer, "a=group:BUNDLE 0 1 2 3 5\r\n", "")
++	if _, err := ShapeAnswer(noBundle, fixtureNative, NewShapeState()); !errors.Is(err, ErrShapeBundle) {
++		t.Fatalf("want ErrShapeBundle, got %v", err)
++	}
++}
++
++func TestRemoteSSRCs(t *testing.T) {
++	got := remoteSSRCs(fixtureOffer)
++	want := []string{"2463708138", "2463708139"}
++	if len(got) != len(want) {
++		t.Fatalf("ssrcs %v, want %v", got, want)
++	}
++	for i := range want {
++		if got[i] != want[i] {
++			t.Fatalf("ssrc[%d]=%s, want %s", i, got[i], want[i])
++		}
++	}
++}
++
++func sectionOf(t *testing.T, lines []string, mLine string) []string {
++	t.Helper()
++	var out []string
++	for _, line := range lines {
++		if strings.HasPrefix(line, "m=") {
++			if line == mLine {
++				out = append(out, line)
++			} else if out != nil {
++				break
++			}
++			continue
++		}
++		if out != nil {
++			out = append(out, line)
++		}
++	}
++	if out == nil {
++		t.Fatalf("section %q not found", mLine)
++	}
++	return out
++}
++
++func sectionByMid(t *testing.T, lines []string, mid string) []string {
++	t.Helper()
++	var current []string
++	var found []string
++	flush := func() {
++		if len(current) > 0 && contains(current, mid) && found == nil {
++			found = current
++		}
++	}
++	for _, line := range lines {
++		if strings.HasPrefix(line, "m=") {
++			flush()
++			current = []string{line}
++			continue
++		}
++		if current != nil {
++			current = append(current, line)
++		}
++	}
++	flush()
++	if found == nil {
++		t.Fatalf("section with %q not found", mid)
++	}
++	return found
++}
++
++func contains(lines []string, want string) bool {
++	for _, line := range lines {
++		if line == want {
++			return true
++		}
++	}
++	return false
++}
++
++func lineOf(lines []string, prefix string) string {
++	for _, line := range lines {
++		if strings.HasPrefix(line, prefix) {
++			return line
++		}
++	}
++	return ""
++}
+diff --git a/internal/engine/vkcalls/control.go b/internal/engine/vkcalls/control.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/control.go
+@@ -0,0 +1,234 @@
++package vkcalls
++
++import (
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"math"
++	"sort"
++)
++
++// The producer control route is a small MessagePack subset over the
++// producerCommand data channel, per the SDK bundle: fixint/fixstr/fixarray,
++// the int16 marker for larger ints, bin8 and nil. The registry notification
++// uses the same encoding.
++var (
++	ErrRegistryShort  = errors.New("vkcalls: producerNotification shorter than its header")
++	ErrRegistryShape  = errors.New("vkcalls: producerNotification registry is not a one-entry map")
++	ErrLayoutNoStream = errors.New("vkcalls: layout update without any registry stream")
++	ErrLayoutKeyLong  = errors.New("vkcalls: registry stream key exceeds the fixstr bound")
++	ErrLayoutTooMany  = errors.New("vkcalls: layout update exceeds the array16 bound")
++	// ErrNotRegistry marks an expected non-registry notification frame.
++	ErrNotRegistry = errors.New("vkcalls: frame is not a registry update")
++)
++
++// registryKind is the leading byte of kind-1 producerNotification frames: a
++// per-consumer map {"<participantId>:sCAMERA" → compactId}.
++const registryKind = 1
++
++// Registry maps SFU stream descriptions to the compact ids this consumer
++// must address them by in update-display-layout.
++type Registry map[string]uint8
++
++// ParseRegistry decodes a kind-1 producerNotification frame. Any other kind
++// returns an empty registry and no error: frames of other kinds are expected
++// and carry no addressing data.
++// ParseRegistry decodes a kind-1 producerNotification frame. Frames of other
++// kinds are expected on this channel and carry no addressing data; they yield
++// ErrNotRegistry so callers skip them uniformly.
++func ParseRegistry(frame []byte) (Registry, error) {
++	if len(frame) == 0 {
++		return nil, ErrRegistryShort
++	}
++	if frame[0] != registryKind {
++		return nil, ErrNotRegistry
++	}
++	if len(frame) < 4 {
++		return nil, ErrRegistryShort
++	}
++	var count, pos int
++	switch {
++	case frame[1]&0xF0 == 0x80: // fixmap
++		count, pos = int(frame[1]&0x0F), 2
++	case frame[1] == 0xDE: // map16
++		count, pos = int(binary.BigEndian.Uint16(frame[2:4])), 4
++	default:
++		return nil, ErrRegistryShape
++	}
++	out := make(Registry, count)
++	for range count {
++		key, next, err := readRegistryKey(frame, pos)
++		if err != nil {
++			return nil, err
++		}
++		id, after, err := readRegistryID(frame, next)
++		if err != nil {
++			return nil, err
++		}
++		out[key], pos = id, after
++	}
++	return out, nil
++}
++
++// readRegistryKey reads the fixstr stream description at pos.
++func readRegistryKey(frame []byte, pos int) (string, int, error) {
++	if pos >= len(frame) {
++		return "", 0, ErrRegistryShort
++	}
++	if frame[pos]&0xE0 != 0xA0 {
++		return "", 0, ErrRegistryShape
++	}
++	end := pos + 1 + int(frame[pos]&0x1F)
++	if end > len(frame) {
++		return "", 0, ErrRegistryShort
++	}
++	return string(frame[pos+1 : end]), end, nil
++}
++
++// readRegistryID reads the compact id at pos: a positive fixint, or the
++// uint8 form the encoder picks from 128 on.
++func readRegistryID(frame []byte, pos int) (uint8, int, error) {
++	switch {
++	case pos >= len(frame):
++		return 0, 0, ErrRegistryShort
++	case frame[pos] < 0x80:
++		return frame[pos], pos + 1, nil
++	case frame[pos] == 0xCC && pos+1 < len(frame):
++		return frame[pos+1], pos + 2, nil
++	case frame[pos] == 0xCC:
++		return 0, 0, ErrRegistryShort
++	default:
++		return 0, 0, ErrRegistryShape
++	}
++}
++
++// LayoutEntry is one stream subscription: the tile priority and the size the
++// consumer displays it at, which the SFU uses to pick a simulcast layer.
++// ByCompact selects the compact-id addressing the SFU honours (the SDK's
++// form); the fixstr key form is kept for diagnostics.
++type LayoutEntry struct {
++	Key       string
++	Compact   uint8
++	ByCompact bool
++	Priority  int
++	Width     int
++	Height    int
++}
++
++// EncodeLayout builds the update-display-layout producer-command frame:
++// [cmdType=0, 0, sequence, nil, [bin(layout)…], nil]. Each layout blob is the
++// stream key (compact int, or fixstr), variant 0, then priority, width,
++// height and fit (nil when unset) — the field order the SDK serializer
++// writes.
++func EncodeLayout(sequence int, entries []LayoutEntry) ([]byte, error) {
++	if len(entries) == 0 {
++		return nil, ErrLayoutNoStream
++	}
++	if len(entries) > math.MaxUint16 {
++		return nil, fmt.Errorf("%w: %d entries", ErrLayoutTooMany, len(entries))
++	}
++	out := appendMPInt(nil, 0)
++	out = appendMPInt(out, 0)
++	out = appendMPInt(out, sequence)
++	out = append(out, 0xC0)
++	if len(entries) < 16 {
++		out = append(out, 0x90|byte(len(entries))) //nolint:gosec // bounded to 15 entries here
++	} else {
++		out = append(out, 0xDC, byte(len(entries)>>8), byte(len(entries))) //nolint:gosec // bounded to uint16 above
++	}
++	for _, e := range entries {
++		blob := make([]byte, 0, 32)
++		switch {
++		case e.ByCompact:
++			blob = append(blob, e.Compact)
++		case e.Key != "":
++			if len(e.Key) >= 32 {
++				return nil, fmt.Errorf("%w: %d bytes", ErrLayoutKeyLong, len(e.Key))
++			}
++			blob = append(blob, 0xA0|byte(len(e.Key))) //nolint:gosec // bounded to 31 bytes above
++			blob = append(blob, e.Key...)
++		default:
++			return nil, ErrLayoutNoStream
++		}
++		blob = append(blob, 0x00) // variant 0: set the tile layout
++		blob = appendMPInt(blob, e.Priority)
++		if e.Width > 0 && e.Height > 0 {
++			blob = appendMPInt(blob, e.Width)
++			blob = appendMPInt(blob, e.Height)
++		} else {
++			blob = append(blob, 0xC0, 0xC0)
++		}
++		blob = append(blob, 0x00) // fit=cv
++		if len(blob) >= 256 {
++			return nil, ErrLayoutKeyLong
++		}
++		out = append(out, 0xC4, byte(len(blob))) //nolint:gosec // bounded to 255 bytes above
++		out = append(out, blob...)
++	}
++	return append(out, 0xC0), nil
++}
++
++// appendMPInt writes a small non-negative int in the wire's compact form:
++// fixint below 128, otherwise the int16 marker the SDK's int encoder picks.
++func appendMPInt(dst []byte, value int) []byte {
++	switch {
++	case value >= 0 && value < 128:
++		return append(dst, byte(value))
++	case value >= math.MinInt16 && value <= math.MaxInt16:
++		var buf [2]byte
++		binary.BigEndian.PutUint16(buf[:], uint16(int16(value))) //nolint:gosec // two's-complement bit pattern by design
++		return append(append(dst, 0xD1), buf[:]...)
++	default:
++		var buf [4]byte
++		binary.BigEndian.PutUint32(buf[:], uint32(value)) //nolint:gosec // two's-complement bit pattern by design
++		return append(append(dst, 0xD2), buf[:]...)
++	}
++}
++
++// sortedStreams returns the registry keys in a stable order so repeated
++// layout commands encode identically.
++func (r Registry) sortedStreams() []string {
++	keys := make([]string, 0, len(r))
++	for key := range r {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	return keys
++}
++
++// cameraKey is the stream description of a participant's camera.
++func cameraKey(participant string) string { return "u" + participant + ":sCAMERA" }
++
++// layoutEntries is the whole subscription: every registry stream by its
++// compact id, then the camera of every participant the registry does not
++// name yet by its string key. The SFU answers a string key with a registry
++// entry for it: without asking, a participant who joins later is never
++// named and never forwarded (live, 2026-09-28).
++func layoutEntries(r Registry, participants []string) []LayoutEntry {
++	entries, _ := r.LayoutFor() // an empty registry adds nothing
++	asked := make([]string, 0, len(participants))
++	for _, participant := range participants {
++		if _, known := r[cameraKey(participant)]; !known {
++			asked = append(asked, cameraKey(participant))
++		}
++	}
++	sort.Strings(asked)
++	for _, key := range asked {
++		entries = append(entries, LayoutEntry{Key: key, Priority: 1, Width: 640, Height: 360})
++	}
++	return entries
++}
++
++// LayoutFor builds the subscription of every registry stream.
++func (r Registry) LayoutFor() ([]LayoutEntry, error) {
++	streams := r.sortedStreams()
++	if len(streams) == 0 {
++		return nil, ErrLayoutNoStream
++	}
++	entries := make([]LayoutEntry, 0, len(streams))
++	for _, key := range streams {
++		entry := LayoutEntry{Key: key, Compact: r[key], ByCompact: true, Priority: 1, Width: 640, Height: 360}
++		entries = append(entries, entry)
++	}
++	return entries, nil
++}
+diff --git a/internal/engine/vkcalls/control_test.go b/internal/engine/vkcalls/control_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/control_test.go
+@@ -0,0 +1,249 @@
++package vkcalls
++
++import (
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"strings"
++	"testing"
++)
++
++// The registry vectors are frames captured from the live SFU (spike
++// hybrid-09): kind-1 maps of a camera stream description to its compact id.
++func TestParseRegistry(t *testing.T) {
++	cases := []struct {
++		name    string
++		b64     string
++		want    Registry
++		wantErr bool
++	}{
++		{
++			name: "camera stream compact 1",
++			// 01 81 b5 <21-byte key "u588003930589:sCAMERA"> 01, live capture
++			b64:  "AYG1dTU4ODAwMzkzMDU4OTpzQ0FNRVJBAQ==",
++			want: Registry{"u588003930589:sCAMERA": 1},
++		},
++		{
++			// The shape the SFU sends when a layout asked for several streams
++			// by string key at once (live 2026-09-28): one fixmap, many
++			// entries. Constructed with test ids in that shape.
++			name: "three cameras in one frame",
++			b64: base64.StdEncoding.EncodeToString(append(append(append([]byte{0x01, 0x83},
++				mpEntry("u100000000001:sCAMERA", 0x00)...), mpEntry("u100000000002:sCAMERA", 0x01)...),
++				mpEntry("u100000000003", 0x02)...)),
++			want: Registry{"u100000000001:sCAMERA": 0, "u100000000002:sCAMERA": 1, "u100000000003": 2},
++		},
++		{
++			name: "map16 with a uint8 compact id",
++			b64: base64.StdEncoding.EncodeToString(append(append([]byte{0x01, 0xDE, 0x00, 0x02},
++				mpEntry("u1:sCAMERA", 0x05)...), append(mpStr("u2:sCAMERA"), 0xCC, 0x80)...)),
++			want: Registry{"u1:sCAMERA": 5, "u2:sCAMERA": 128},
++		},
++		{
++			name:    "second entry truncated",
++			b64:     base64.StdEncoding.EncodeToString(append([]byte{0x01, 0x82}, mpEntry("u1:sCAMERA", 0x00)...)),
++			wantErr: true,
++		},
++		{
++			name:    "empty frame",
++			b64:     "",
++			wantErr: true,
++		},
++		{
++			name:    "truncated",
++			b64:     "AQE=",
++			wantErr: true,
++		},
++		{
++			name:    "not a map",
++			b64:     "AZAA",
++			wantErr: true,
++		},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			raw, err := base64.StdEncoding.DecodeString(tc.b64)
++			if err != nil {
++				t.Fatal(err)
++			}
++			got, err := ParseRegistry(raw)
++			if tc.wantErr {
++				if err == nil {
++					t.Fatalf("expected error")
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			if len(got) != len(tc.want) {
++				t.Fatalf("registry size %d, want %d", len(got), len(tc.want))
++			}
++			for key, id := range tc.want {
++				if got[key] != id {
++					t.Fatalf("key %q: compact %d, want %d", key, got[key], id)
++				}
++			}
++		})
++	}
++}
++
++// mpStr is a msgpack fixstr; mpEntry one registry entry with a fixint id.
++func mpStr(key string) []byte {
++	return append([]byte{0xA0 | byte(len(key)&0x1F)}, key...)
++}
++
++func mpEntry(key string, id byte) []byte { return append(mpStr(key), id) }
++
++// TestParseRegistryOtherKind checks non-registry frames are marked
++// distinctly: the notification channel carries several kinds.
++func TestParseRegistryOtherKind(t *testing.T) {
++	if _, err := ParseRegistry([]byte{0x02, 0x91, 0x00}); !errors.Is(err, ErrNotRegistry) {
++		t.Fatalf("want ErrNotRegistry, got %v", err)
++	}
++}
++
++// The golden bytes are the compact-addressed form the live SFU accepted
++// (spike hybrid-11): update-display-layout, sequence 1, one stream at
++// compact id 0, priority 1, 640x360, fit=cv.
++func TestEncodeLayoutGolden(t *testing.T) {
++	frame, err := EncodeLayout(1, []LayoutEntry{{Key: "u604532170515:sCAMERA", Compact: 0, ByCompact: true, Priority: 1, Width: 640, Height: 360}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	const golden = "000001c091c40a000001d10280d1016800c0"
++	if got := hexOf(frame); got != golden {
++		t.Fatalf("frame %s, want %s", got, golden)
++	}
++}
++
++// TestEncodeLayoutStringKey pins the string-addressed form the SDK falls back
++// to without a registry: priority 0 is a set value, encoded as fixint 0.
++func TestEncodeLayoutStringKey(t *testing.T) {
++	frame, err := EncodeLayout(2, []LayoutEntry{{Key: "42:sCAMERA", Priority: 0}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	const golden = "000002c091c410aa34323a7343414d4552410000c0c000c0"
++	if got := hexOf(frame); got != golden {
++		t.Fatalf("frame %s, want %s", got, golden)
++	}
++}
++
++func TestEncodeLayoutEmpty(t *testing.T) {
++	if _, err := EncodeLayout(1, nil); err == nil {
++		t.Fatal("expected error for empty layout")
++	}
++}
++
++// TestRegistryLayoutFor pins the subscribe-all policy: every registry stream,
++// compact-addressed, stable key order.
++func TestRegistryLayoutFor(t *testing.T) {
++	r := Registry{"b:sCAMERA": 1, "a:sCAMERA": 0}
++	entries, err := r.LayoutFor()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(entries) != 2 {
++		t.Fatalf("entries %d, want 2", len(entries))
++	}
++	if entries[0].Key != "a:sCAMERA" || !entries[0].ByCompact || entries[0].Compact != 0 {
++		t.Fatalf("first entry %+v", entries[0])
++	}
++	if entries[1].Key != "b:sCAMERA" || entries[1].Compact != 1 {
++		t.Fatalf("second entry %+v", entries[1])
++	}
++	if entries[0].Priority != 1 || entries[0].Width != 640 || entries[0].Height != 360 {
++		t.Fatalf("layout fields %+v", entries[0])
++	}
++}
++
++func hexOf(b []byte) string {
++	const digits = "0123456789abcdef"
++	out := make([]byte, 0, len(b)*2)
++	for _, v := range b {
++		out = append(out, digits[v>>4], digits[v&0x0f])
++	}
++	return string(out)
++}
++
++// TestLayoutEntriesAskUnknownCamerasByKey pins how a consumer subscribes: a
++// stream the registry names goes by its compact id; a participant's camera
++// the registry does not name yet goes by its string key, which is how the
++// SFU hands out a compact id for it (live 2026-09-28: without this the
++// engine never received a real client's camera).
++func TestLayoutEntriesAskUnknownCamerasByKey(t *testing.T) {
++	r := Registry{"u1:sCAMERA": 0, "u3": 2}
++	entries := layoutEntries(r, []string{"3", "1", "2"})
++	var got []string
++	for _, e := range entries {
++		if e.ByCompact {
++			got = append(got, fmt.Sprintf("%s#%d", e.Key, e.Compact))
++		} else {
++			got = append(got, e.Key+"#str")
++		}
++		if e.Priority != 1 || e.Width != 640 || e.Height != 360 {
++			t.Fatalf("layout fields %+v", e)
++		}
++	}
++	want := []string{"u1:sCAMERA#0", "u3#2", "u2:sCAMERA#str", "u3:sCAMERA#str"}
++	if strings.Join(got, ",") != strings.Join(want, ",") {
++		t.Fatalf("entries %v, want %v", got, want)
++	}
++	if entries := layoutEntries(Registry{}, nil); len(entries) != 0 {
++		t.Fatalf("nothing to ask for, got %v", entries)
++	}
++}
++
++// TestEncodeLayoutManyEntries: sixteen streams and more take the array16
++// form instead of failing the whole subscription.
++func TestEncodeLayoutManyEntries(t *testing.T) {
++	entries := make([]LayoutEntry, 17)
++	for i := range entries {
++		entries[i] = LayoutEntry{Compact: uint8(i), ByCompact: true, Priority: 1, Width: 640, Height: 360}
++	}
++	frame, err := EncodeLayout(3, entries)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if frame[3] != 0xC0 || frame[4] != 0xDC || frame[5] != 0x00 || frame[6] != 17 {
++		t.Fatalf("header % x, want array16 of 17", frame[:7])
++	}
++}
++
++// TestGenerationTracksParticipants: a participant noted is asked for by its
++// camera key until the registry names it; one who hangs up leaves both the
++// asked set and the registry. Layouts built from several goroutines at once
++// stay race-free (run with -race).
++func TestGenerationTracksParticipants(t *testing.T) {
++	gen := &generation{registry: Registry{"u7:sCAMERA": 3, "u7": 4, "u8:sCAMERA": 5}}
++	if !gen.noteParticipant("9") || gen.noteParticipant("9") {
++		t.Fatal("noteParticipant reports a new id once")
++	}
++	gen.noteParticipant("7")
++	keys := func() string {
++		gen.registryMu.Lock()
++		defer gen.registryMu.Unlock()
++		entries := layoutEntries(gen.registry, gen.participantList())
++		out := make([]string, 0, len(entries))
++		for _, e := range entries {
++			out = append(out, e.Key)
++		}
++		return strings.Join(out, ",")
++	}
++	if got := keys(); got != "u7,u7:sCAMERA,u8:sCAMERA,u9:sCAMERA" {
++		t.Fatalf("layout keys %s", got)
++	}
++	gen.removeStream("7")
++	gen.removeStream("9")
++	if got := keys(); got != "u8:sCAMERA" {
++		t.Fatalf("after hang-ups: %s", got)
++	}
++	done := make(chan struct{})
++	for range 4 {
++		go func() { gen.subscribeAll(); done <- struct{}{} }()
++	}
++	for range 4 {
++		<-done
++	}
++}
+diff --git a/internal/engine/vkcalls/managed_diagnostic_test.go b/internal/engine/vkcalls/managed_diagnostic_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/managed_diagnostic_test.go
+@@ -0,0 +1,30 @@
++package vkcalls
++
++import (
++	"context"
++	"errors"
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++	"strings"
++	"testing"
++)
++
++// A pre-WebSocket rejection must not be reported as an unlocated auth or media
++// failure; the existing error identity still controls cleanup callers.
++func TestManagedVKConnectFailureKeepsSignalingBoundary(t *testing.T) {
++	value, err := New(context.Background(), engine.Config{URL: "https://private.invalid/room-secret"})
++	if err != nil {
++		t.Fatal("inert construction failed")
++	}
++	s := value.(*Session)
++	err = s.Connect(context.Background())
++	_ = s.Close()
++	if !errors.Is(err, ErrSignalingEndpoint) {
++		t.Fatal("lost signaling identity")
++	}
++	if err.Error() != "vkcalls: RGA_VK_STARTUP stage=SIGNAL_DIAL class=SIGNALING code=0" {
++		t.Fatal("lost signaling stage")
++	}
++	if strings.Contains(err.Error(), "private.invalid") || strings.Contains(err.Error(), "room-secret") {
++		t.Fatal("target escaped")
++	}
++}
+diff --git a/internal/engine/vkcalls/managed_lifecycle_test.go b/internal/engine/vkcalls/managed_lifecycle_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/managed_lifecycle_test.go
+@@ -0,0 +1,170 @@
++package vkcalls
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++)
++
++func TestManagedCloseOwnsUnpublishedConnect(t *testing.T) {
++	accepted := make(chan struct{})
++	peerClosed := make(chan struct{})
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		defer close(peerClosed)
++		close(accepted)
++		for {
++			if _, _, err := conn.ReadMessage(); err != nil {
++				return
++			}
++		}
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	raw, err := New(ctx, engine.Config{URL: "ws" + strings.TrimPrefix(server.URL, "http")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := raw.(*Session)
++	defer s.Close()
++	finished := make(chan error, 1)
++	go func() { finished <- s.Connect(ctx) }()
++	select {
++	case <-accepted:
++	case <-time.After(time.Second):
++		t.Fatal("no test signaling join")
++	}
++	if err := s.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-finished:
++	case <-time.After(300 * time.Millisecond):
++		t.Fatal("Close returned while unpublished Connect still owns a socket")
++	}
++	select {
++	case <-peerClosed:
++	case <-time.After(300 * time.Millisecond):
++		t.Fatal("startup participant still connected after Close")
++	}
++}
++
++func TestManagedTopologyCompletionCancelsAndJoinsRecruitment(t *testing.T) {
++	entered := make(chan struct{})
++	retired := make(chan struct{})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	raw, err := New(ctx, engine.Config{URL: "ws://example.invalid", Refresh: func(ctx context.Context) (engine.Credentials, error) {
++		close(entered)
++		<-ctx.Done()
++		close(retired)
++		return engine.Credentials{}, ctx.Err()
++	}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := raw.(*Session)
++	defer s.Close()
++	signal := &signalingClient{notifications: make(chan notification, 2), closed: make(chan struct{})}
++	direct := notification{Notification: noteConnection}
++	direct.Conversation = &struct {
++		Topology     string `json:"topology"`
++		Participants []struct {
++			ID    any    `json:"id"`
++			State string `json:"state"`
++		} `json:"participants"`
++	}{Topology: "DIRECT"}
++	signal.notifications <- direct
++	finished := make(chan error, 1)
++	go func() { _, err := s.waitConnected(ctx, signal); finished <- err }()
++	select {
++	case <-entered:
++	case <-time.After(4 * time.Second):
++		t.Fatal("recruitment did not begin")
++	}
++	signal.notifications <- notification{Notification: noteTopology, Topology: topologyServer}
++	select {
++	case err := <-finished:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("topology wait did not finish")
++	}
++	select {
++	case <-retired:
++	default:
++		t.Fatal("topology returned before recruited guest acquisition was canceled and joined")
++	}
++}
++
++func TestManagedSignalingCloseDoesNotWaitForWriterLock(t *testing.T) {
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		c, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer c.Close()
++		for {
++			if _, _, err := c.ReadMessage(); err != nil {
++				return
++			}
++		}
++	}))
++	defer server.Close()
++	c, err := dialSignaling(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++	defer c.shutdown()
++	closed := make(chan struct{})
++	go func() { c.close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(300 * time.Millisecond):
++		t.Fatal("Close waits for best-effort hangup instead of interrupting the socket")
++	}
++}
++
++func TestManagedAttemptLifetimeIsNotTheConnectDeadline(t *testing.T) {
++	startup, cancelStartup := context.WithCancel(context.Background())
++	raw, err := New(context.Background(), engine.Config{URL: "ws://example.invalid"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := raw.(*Session)
++	defer s.Close()
++	gen, err := s.owner.attempt(startup)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cancelStartup()
++	select {
++	case <-gen.ctx.Done():
++		t.Fatal("successful attempt would inherit an expired constructor/connect deadline")
++	default:
++	}
++	if err = s.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-gen.ctx.Done():
++	default:
++		t.Fatal("Close did not cancel the owned generation")
++	}
++}
+diff --git a/internal/engine/vkcalls/managed_owner.go b/internal/engine/vkcalls/managed_owner.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/managed_owner.go
+@@ -0,0 +1,102 @@
++package vkcalls
++
++import (
++	"context"
++	"sync"
++
++	"github.com/pion/webrtc/v4"
++)
++
++// sessionOwner follows the existing engines' launch gate: once Close starts,
++// no positive WaitGroup Add may race the final Wait. Startup operations count
++// too; an unpublished attempt must not escape the session's custody.
++type sessionOwner struct {
++	mu       sync.Mutex
++	closed   bool
++	wg       sync.WaitGroup
++	ctx      context.Context
++	cancel   context.CancelFunc
++	attempts map[*generation]struct{}
++}
++
++func (o *sessionOwner) begin() bool {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.closed {
++		return false
++	}
++	o.wg.Add(1)
++	return true
++}
++
++func (o *sessionOwner) launch(fn func()) bool {
++	if !o.begin() {
++		return false
++	}
++	go func() { defer o.wg.Done(); fn() }()
++	return true
++}
++
++func (o *sessionOwner) attempt(parent context.Context) (*generation, error) {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.closed {
++		return nil, ErrSessionClosed
++	}
++	// Connect's parent is a startup budget, not an active media lifetime.
++	ctx, cancel := context.WithCancel(o.ctx)
++	gen := &generation{ctx: ctx, cancel: cancel, shape: NewShapeState(), registry: Registry{}, connected: make(chan struct{}), done: make(chan struct{})}
++	if o.attempts == nil {
++		o.attempts = make(map[*generation]struct{})
++	}
++	o.attempts[gen] = struct{}{}
++	return gen, nil
++}
++
++func (o *sessionOwner) release(gen *generation) {
++	gen.teardown()
++	o.mu.Lock()
++	delete(o.attempts, gen)
++	o.mu.Unlock()
++}
++
++func (o *sessionOwner) retire() {
++	o.mu.Lock()
++	o.closed = true
++	all := make([]*generation, 0, len(o.attempts))
++	for gen := range o.attempts {
++		all = append(all, gen)
++	}
++	o.mu.Unlock()
++	if o.cancel != nil {
++		o.cancel()
++	}
++	for _, gen := range all {
++		gen.teardown()
++	}
++	o.wg.Wait()
++}
++
++func (gen *generation) attachSignal(signal *signalingClient) bool {
++	gen.ownerMu.Lock()
++	if gen.isDone() {
++		gen.ownerMu.Unlock()
++		signal.close()
++		return false
++	}
++	gen.signal = signal
++	gen.ownerMu.Unlock()
++	return true
++}
++
++func (gen *generation) attachPC(pc *webrtc.PeerConnection) bool {
++	gen.ownerMu.Lock()
++	if gen.isDone() {
++		gen.ownerMu.Unlock()
++		_ = pc.Close()
++		return false
++	}
++	gen.pc = pc
++	gen.ownerMu.Unlock()
++	return true
++}
+diff --git a/internal/engine/vkcalls/negotiate.go b/internal/engine/vkcalls/negotiate.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/negotiate.go
+@@ -0,0 +1,238 @@
++package vkcalls
++
++import (
++	"fmt"
++	"regexp"
++	"strconv"
++	"strings"
++
++	"github.com/pion/interceptor"
++
++	"github.com/pion/webrtc/v4"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++	"github.com/openlibrecommunity/olcrtc/internal/logger"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++)
++
++// The VK SFU only enables media for guests whose answer covers the offered
++// codec set; Pion's default MediaEngine answers a subset. The offer's codecs
++// are therefore echoed into the MediaEngine so the shaped answer negotiates
++// the full offered vocabulary (spike: codecs-mode negotiation).
++
++var (
++	rtpmapLine  = regexp.MustCompile(`^a=rtpmap:(\d+) ([A-Za-z0-9-]+)/(\d+)(?:/(\d+))?`)
++	fmtpLine    = regexp.MustCompile(`^a=fmtp:(\d+) (.*)$`)
++	feedbackLin = regexp.MustCompile(`^a=rtcp-fb:(\d+) (\S+)(?: (\S+))?`)
++	ssrcLine    = regexp.MustCompile(`(?m)^a=ssrc:(\d+)\s`)
++)
++
++// offerCodec parses one offered codec block: the rtpmap name and rate, then
++// a bare-number channel count (audio) and fmtp:/fb: extras in any order.
++func offerCodec(kind string, fields []string, payload uint8) (webrtc.RTPCodecParameters, bool) {
++	spec := webrtc.RTPCodecParameters{
++		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: kind + "/" + fields[0]},
++		PayloadType:        webrtc.PayloadType(payload),
++	}
++	rate, err := strconv.ParseUint(fields[1], 10, 32)
++	if err != nil {
++		return spec, false
++	}
++	spec.ClockRate = uint32(rate)
++	for _, extra := range fields[2:] {
++		switch {
++		case strings.HasPrefix(extra, "fmtp:"):
++			spec.SDPFmtpLine = strings.TrimPrefix(extra, "fmtp:")
++		case strings.HasPrefix(extra, "fb:"):
++			parts := strings.Fields(strings.TrimPrefix(extra, "fb:"))
++			fb := webrtc.RTCPFeedback{Type: parts[0]}
++			if len(parts) > 1 {
++				fb.Parameter = parts[1]
++			}
++			spec.RTCPFeedback = append(spec.RTCPFeedback, fb)
++		default:
++			channels, err := strconv.ParseUint(extra, 10, 16)
++			if err != nil {
++				return spec, false
++			}
++			spec.Channels = uint16(channels)
++		}
++	}
++	return spec, true
++}
++
++// offerMediaEngine builds a MediaEngine mirroring the offer's codecs and the
++// header extensions the SFU tags its forwarded packets with.
++func offerMediaEngine(offer string) (*webrtc.MediaEngine, error) {
++	sections, err := splitSections(offer)
++	if err != nil {
++		return nil, err
++	}
++	media := &webrtc.MediaEngine{}
++	for _, sec := range sections {
++		if err := registerSectionCodecs(media, sec); err != nil {
++			return nil, err
++		}
++	}
++	for _, uri := range []string{
++		"urn:ietf:params:rtp-hdrext:ssrc-audio-level",
++		"urn:ietf:params:rtp-hdrext:sdes:mid",
++		"urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
++		"urn:ietf:params:rtp-hdrext:toffset",
++		"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
++		"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
++		"http://www.webrtc.org/experiments/rtp-hdrext/color-space",
++		"urn:3gpp:video-orientation",
++		"http://www.webrtc.org/experiments/rtp-hdrext/playout-delay",
++	} {
++		_ = media.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeVideo)
++		_ = media.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeAudio)
++	}
++	return media, nil
++}
++
++// registerSectionCodecs registers one m= section's offered codecs in payload
++// order, keeping each payload's rtpmap, fmtp and rtcp-fb lines together.
++func registerSectionCodecs(media *webrtc.MediaEngine, sec section) error {
++	head := strings.Fields(sec[0])
++	if len(head) < 4 {
++		return nil
++	}
++	kind := strings.TrimPrefix(head[0], "m=")
++	if kind != kindAudio && kind != kindVideo {
++		return nil
++	}
++	codecType := webrtc.RTPCodecTypeVideo
++	if kind == kindAudio {
++		codecType = webrtc.RTPCodecTypeAudio
++	}
++	blocks := sectionCodecBlocks(sec)
++	for _, payloadStr := range head[3:] {
++		payload, err := strconv.ParseUint(payloadStr, 10, 8)
++		if err != nil {
++			continue
++		}
++		fields, ok := blocks[uint8(payload)]
++		if !ok {
++			continue
++		}
++		spec, ok := offerCodec(kind, fields, uint8(payload))
++		if !ok {
++			continue
++		}
++		if err := media.RegisterCodec(spec, codecType); err != nil {
++			return fmt.Errorf("vkcalls: register %s pt=%d: %w", spec.MimeType, payload, err)
++		}
++	}
++	return nil
++}
++
++// sectionCodecBlocks maps payload types to their codec fields: the rtpmap
++// name/rate/channels followed by this payload's fmtp and rtcp-fb lines.
++func sectionCodecBlocks(sec section) map[uint8][]string {
++	blocks := map[uint8]*[]string{}
++	pick := func(line string) (uint8, string, bool) {
++		if m := fmtpLine.FindStringSubmatch(line); m != nil {
++			pt, err := strconv.ParseUint(m[1], 10, 8)
++			return uint8(pt), "fmtp:" + m[2], err == nil
++		}
++		if m := feedbackLin.FindStringSubmatch(line); m != nil {
++			pt, err := strconv.ParseUint(m[1], 10, 8)
++			if err != nil {
++				return 0, "", false
++			}
++			extra := "fb:" + m[2]
++			if m[3] != "" {
++				extra += " " + m[3]
++			}
++			return uint8(pt), extra, true
++		}
++		return 0, "", false
++	}
++	for _, line := range sec {
++		if m := rtpmapLine.FindStringSubmatch(line); m != nil {
++			pt, parseErr := strconv.ParseUint(m[1], 10, 8)
++			if parseErr != nil {
++				continue
++			}
++			fields := []string{m[2], m[3]}
++			if m[4] != "" {
++				fields = append(fields, m[4])
++			}
++			blocks[uint8(pt)] = &fields
++			continue
++		}
++		if pt, extra, ok := pick(line); ok {
++			if fields, found := blocks[pt]; found {
++				*fields = append(*fields, extra)
++			}
++		}
++	}
++	out := map[uint8][]string{}
++	for pt, fields := range blocks {
++		out[pt] = *fields
++	}
++	return out
++}
++
++// newWebRTCAPI builds the Pion API for the bundled peer connection: the
++// offer's codecs, DTLS client role (the SDK answers active) and the host's
++// protected networking.
++func newWebRTCAPI(offer string, cfg engine.Config, resolver protect.Lookup) (*webrtc.API, error) {
++	media, err := offerMediaEngine(offer)
++	if err != nil {
++		return nil, err
++	}
++	settings := webrtc.SettingEngine{}
++	if roleErr := settings.SetAnsweringDTLSRole(webrtc.DTLSRoleClient); roleErr != nil {
++		return nil, fmt.Errorf("vkcalls: dtls role: %w", roleErr)
++	}
++	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
++		Resolver:         resolver,
++		LoggerFactory:    logger.NewPionLoggerFactory(),
++		IPv4Only:         true,
++		ProxyDialer:      true,
++		DisableMulticast: true,
++	})
++	if err != nil {
++		return nil, err //nolint:wrapcheck // shared builder already adds protected-net context
++	}
++	if apply != nil {
++		apply(&settings)
++	}
++	// The engine answers as a browser-class endpoint: default interceptors
++	// (RTCP receiver/sender reports, NACK, TWCC) keep the SFU's consumer-leg
++	// liveness fed — without them the SFU stalls the forward after a minute —
++	// and every outbound packet carries the mid and rid header extensions the
++	// SFU maps our single simulcast layer by.
++	registry := &interceptor.Registry{}
++	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
++		media, registry, engine.DefaultInterceptorOptions()...,
++	); err != nil {
++		return nil, fmt.Errorf("vkcalls: interceptors: %w", err)
++	}
++	if err := webrtc.ConfigureTWCCHeaderExtensionSender(media, registry); err != nil {
++		return nil, fmt.Errorf("vkcalls: twcc: %w", err)
++	}
++	registry.Add(sdesStamperFactory{mid: publishMid(offer), rid: "l"})
++	opts := []func(*webrtc.API){
++		webrtc.WithSettingEngine(settings),
++		webrtc.WithMediaEngine(media),
++		webrtc.WithInterceptorRegistry(registry),
++	}
++	return webrtc.NewAPI(opts...), nil
++}
++
++// remoteSSRCs lists the distinct SSRC attributions of an offer — the streams
++// the accept-producer command reports knowing about.
++func remoteSSRCs(offer string) []string {
++	seen := map[string]bool{}
++	var out []string
++	for _, match := range ssrcLine.FindAllStringSubmatch(offer, -1) {
++		if !seen[match[1]] {
++			seen[match[1]] = true
++			out = append(out, match[1])
++		}
++	}
++	return out
++}
+diff --git a/internal/engine/vkcalls/offer_track_test.go b/internal/engine/vkcalls/offer_track_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/offer_track_test.go
+@@ -0,0 +1,68 @@
++package vkcalls
++
++import (
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/pion/webrtc/v4"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++)
++
++// TestOfferTrackNegotiates is the regression test for two negotiation-order
++// bugs found against the live SFU: the remote description must be set before
++// tracks attach (AddTrack then reuses the offer's publish transceiver), and
++// every offered codec must register — an fb: extra parsed as a channel count
++// once dropped VP8, leaving the answer with only red/ulpfec and the track
++// with "codec is not supported by remote".
++//
++// The full-capture offer lives outside git (private spike artifacts); the
++// test skips without it and the fixture in answer_test.go covers the shape.
++func TestOfferTrackNegotiates(t *testing.T) {
++	const capture = "/tmp/proofkit-vk-live/current-offer.sdp"
++	raw, err := os.ReadFile(capture)
++	if err != nil {
++		t.Skip("no captured offer")
++	}
++	offer := strings.ReplaceAll(string(raw), "\r\n", "\n")
++	media, err := offerMediaEngine(offer)
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = media
++	api, err := newWebRTCAPI(offer, engine.Config{}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pc, err := api.NewPeerConnection(webrtc.Configuration{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pc.Close()
++	if srdErr := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); srdErr != nil {
++		t.Fatal(srdErr)
++	}
++	track, err := webrtc.NewTrackLocalStaticSample(
++		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "video", "proofkit")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, errAdd := pc.AddTrack(track); errAdd != nil {
++		t.Fatal(errAdd)
++	}
++	answer, err := pc.CreateAnswer(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sections := strings.Split(answer.SDP, "m=video")
++	for _, sec := range sections[1:] { // [0] is the session header and audio sections
++		if strings.Contains(sec, "a=sendonly") {
++			if !strings.Contains(strings.SplitN(sec, "\r\n", 2)[0], " 100 ") {
++				t.Fatalf("publish section does not negotiate VP8: %s", sec[:min(120, len(sec))])
++			}
++			return
++		}
++	}
++	t.Fatal("no sendonly video section in the answer")
++}
+diff --git a/internal/engine/vkcalls/recruit.go b/internal/engine/vkcalls/recruit.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/recruit.go
+@@ -0,0 +1,114 @@
++package vkcalls
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/logger"
++)
++
++// A fresh VK room keeps its first participants in DIRECT: two alone never
++// switch, and a third simultaneous participant is what flips the SFU to
++// SERVER - which then sticks for the room's lifetime (the spike's
++// topology-flip runs, and the 1.0.444 fresh-link measurement: a server and
++// its client sat in DIRECT to their connect timeouts with no
++// topology-changed between them). While the engine waits in DIRECT it
++// therefore recruits signaling-only guest joins of its own, and drops them
++// the moment the switch arrives.
++const (
++	// maxRecruits is how many guests the engine adds besides itself: one
++	// already makes three with the waiting peer, two cover the case the
++	// peer has not joined yet.
++	maxRecruits = 2
++	// recruitFirstDelay lets the waiting peer join first, so its own
++	// connection already counts toward the three.
++	recruitFirstDelay = 2 * time.Second
++	// recruitNextDelay spaces the joins: the flip lands on a join, and a
++	// burst buys nothing.
++	recruitNextDelay = 3 * time.Second
++)
++
++// recruitGuests joins signaling-only guests until done closes (the main
++// socket saw the switch, or gave up), at most maxRecruits of them. Every
++// guest is closed on the way out: they exist only to raise the room's
++// simultaneous participant count.
++func (s *Session) recruitGuests(ctx context.Context, done <-chan struct{}) {
++	if s.cfg.Refresh == nil {
++		// Without a credential issuer there is nothing to join with; the
++		// wait stands on its own.
++		return
++	}
++	var guests []*signalingClient
++	defer func() {
++		for _, guest := range guests {
++			guest.close()
++		}
++	}()
++	delay := recruitFirstDelay
++	for range maxRecruits {
++		if !recruitPause(ctx, done, delay) {
++			return
++		}
++		delay = recruitNextDelay
++		guest, err := s.recruitOne(ctx)
++		if err != nil {
++			logger.Debugf("vkcalls: guest recruit failed")
++			continue
++		}
++		guests = append(guests, guest)
++		logger.Debugf("vkcalls: recruited a signaling-only guest to flip the fresh room to SERVER")
++	}
++	<-doneOrContext(ctx, done)
++}
++
++// recruitOne issues a fresh guest's credentials, joins its signaling socket
++// and holds it open - answering keepalives and nothing else: no peer
++// connection, no commands, the participant only counts.
++func (s *Session) recruitOne(ctx context.Context) (*signalingClient, error) {
++	creds, err := s.cfg.Refresh(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("guest credentials: %w", err)
++	}
++	guest, err := dialSignaling(ctx, creds.URL, s.cfg.Resolver)
++	if err != nil {
++		return nil, err
++	}
++	if _, err = guest.awaitJoin(ctx); err != nil {
++		guest.close()
++		return nil, fmt.Errorf("guest join: %w", err)
++	}
++	// readLoop services keepalives and boundedly drops unused notifications;
++	// an extra drain worker would have no lifetime owner.
++	return guest, nil
++}
++
++// recruitPause waits d, or ends early when the wait is over.
++func recruitPause(ctx context.Context, done <-chan struct{}, d time.Duration) bool {
++	timer := time.NewTimer(d)
++	defer timer.Stop()
++	select {
++	case <-timer.C:
++		return true
++	case <-done:
++		return false
++	case <-ctx.Done():
++		return false
++	}
++}
++
++// doneOrContext is what a recruiter out of guests blocks on.
++func doneOrContext(ctx context.Context, done <-chan struct{}) <-chan struct{} {
++	if ctxDone := ctx.Done(); ctxDone != nil {
++		merged := make(chan struct{})
++		go func() {
++			select {
++			case <-done:
++			case <-ctxDone:
++			}
++			close(merged)
++		}()
++		return merged
++	}
++	return done
++}
+diff --git a/internal/engine/vkcalls/signaling.go b/internal/engine/vkcalls/signaling.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/signaling.go
+@@ -0,0 +1,462 @@
++package vkcalls
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/url"
++	"strconv"
++	"sync"
++	"time"
++
++	"github.com/gorilla/websocket"
++	authvk "github.com/openlibrecommunity/olcrtc/internal/auth/vkcalls"
++
++	"github.com/openlibrecommunity/olcrtc/internal/logger"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++)
++
++// Signaling errors, all static for wrapping discipline.
++var (
++	ErrSignalingEndpoint  = errors.New("vkcalls: invalid signaling endpoint")
++	ErrParticipantID      = errors.New("vkcalls: invalid participant id")
++	ErrSignalingClosed    = errors.New("vkcalls: signaling socket closed")
++	ErrSignalingRejected  = errors.New("vkcalls: signaling command rejected")
++	ErrSignalingTimeout   = errors.New("vkcalls: signaling response timeout")
++	ErrSignalingNotServer = errors.New("vkcalls: conversation is not in SERVER topology")
++	ErrSignalingDial      = errors.New("vkcalls: signaling dial failed")
++	// ErrSignalingPayload refuses a command payload that is not a JSON object.
++	ErrSignalingPayload = errors.New("vkcalls: signaling command payload")
++	// ErrSignalingFrameTooLarge refuses a command that would not fit one frame.
++	ErrSignalingFrameTooLarge = errors.New("vkcalls: signaling command exceeds one frame")
++)
++
++const (
++	wsHandshakeTimeout = 20 * time.Second
++	commandTimeout     = 15 * time.Second
++	connectionTimeout  = 30 * time.Second
++
++	// signalingWriteBuffer bounds one command frame. The SFU parses every
++	// text frame on its own and answers a continuation-split message with
++	// invalid-request, so each command must leave as a single frame, and
++	// gorilla splits a client message at its write buffer (4 KiB by
++	// default). An accept-producer answer is ~50 KB for the 41-section
++	// offer; the buffer leaves room for about five times that.
++	signalingWriteBuffer = 256 << 10
++
++	// Wire field names and values used more than once.
++	fieldSequence    = "sequence"
++	fieldDescription = "description"
++	fieldPeerID      = "peerId"
++	noteConnection   = "connection"
++	noteTopology     = "topology-changed"
++	frameTypeError   = "error"
++	reasonHungup     = "HUNGUP"
++	topologyServer   = "SERVER"
++
++	// capabilitiesBitmask is the feature set this engine actually implements:
++	// unified plan, single session and the producer-command data channel. The
++	// SDK reference mask is a diagnostic control in the spike, not a constant
++	// to copy (spec 7.4).
++	capabilitiesBitmask = "2F7F"
++)
++
++// notification is one server frame. Only the fields the engine acts on are
++// decoded; everything else stays raw for diagnostics.
++type notification struct {
++	Type         string `json:"type"`
++	Sequence     int64  `json:"sequence"`
++	Response     string `json:"response"`
++	Notification string `json:"notification"`
++	Stamp        int64  `json:"stamp"`
++	PeerID       *struct {
++		ID int64 `json:"id"`
++	} `json:"peerId"` //nolint:tagliatelle // connector wire is camelCase
++	SessionID   string `json:"sessionId"` //nolint:tagliatelle // connector wire is camelCase
++	Description string `json:"description"`
++	// Topology is the topology-changed notification's value; the
++	// connection notification carries it inside Conversation instead.
++	Topology     string `json:"topology"`
++	Conversation *struct {
++		Topology     string `json:"topology"`
++		Participants []struct {
++			ID    any    `json:"id"`
++			State string `json:"state"`
++		} `json:"participants"`
++	} `json:"conversation"`
++	ParticipantID any `json:"participantId"` //nolint:tagliatelle // connector wire is camelCase
++}
++
++// signalingClient is one signaling WebSocket: a single reader goroutine, a
++// serialized writer and pending commands correlated by sequence.
++type signalingClient struct {
++	conn    *websocket.Conn
++	writeMu sync.Mutex
++	pending sync.Map // int64 -> chan notification
++
++	sequence int64
++	stamp    int64
++	self     string
++
++	notifications chan notification
++	closed        chan struct{}
++	readDone      chan struct{}
++	closeOnce     sync.Once
++}
++
++// dialSignaling opens the signaling socket. The endpoint comes from the auth
++// provider's join response and already carries the token and userId query.
++func dialSignaling(ctx context.Context, endpoint string, resolver protect.Lookup) (*signalingClient, error) {
++	return dialSignalingOwned(ctx, ctx, endpoint, resolver)
++}
++
++func dialSignalingOwned(ctx, lifetime context.Context, endpoint string, resolver protect.Lookup) (*signalingClient, error) {
++	target, err := signalingURL(endpoint)
++	if err != nil {
++		return nil, err
++	}
++	dialer := protect.NewWebSocketDialer(wsHandshakeTimeout, resolver)
++	dialer.WriteBufferSize = signalingWriteBuffer
++	conn, response, err := dialer.DialContext(ctx, target, http.Header{
++		"Origin":  {"https://vk.com"},
++		"Referer": {"https://vk.com/"},
++	})
++	if response != nil && response.Body != nil {
++		_ = response.Body.Close()
++	}
++	if err != nil {
++		if ctx.Err() != nil {
++			return nil, authvk.RequestFailure(ctx.Err())
++		}
++		if response != nil && response.StatusCode != http.StatusSwitchingProtocols {
++			return nil, fmt.Errorf("%w: %w", ErrSignalingDial, authvk.HTTPFailure(response.StatusCode))
++		}
++		return nil, fmt.Errorf("%w: %w", ErrSignalingDial, authvk.RequestFailure(err))
++	}
++	client := &signalingClient{
++		conn:          conn,
++		self:          selfParticipant(endpoint),
++		notifications: make(chan notification, 16),
++		closed:        make(chan struct{}),
++		readDone:      make(chan struct{}),
++	}
++	stop := context.AfterFunc(lifetime, client.shutdown)
++	go func() { defer stop(); client.readLoop() }()
++	return client, nil
++}
++
++// signalingURL extends the join endpoint with the client parameters the SDK
++// sends on a fresh join. A peer id belongs to a retry join only; carrying it
++// on a fresh join makes the SFU answer the session differently.
++func signalingURL(endpoint string) (string, error) {
++	u, err := url.Parse(endpoint)
++	// ws:// is the local-test transport; production endpoints arrive from the
++	// auth provider, which accepts only wss.
++	if err != nil || (u.Scheme != "wss" && u.Scheme != "ws") {
++		return "", fmt.Errorf("%w: %w", ErrSignalingEndpoint, err)
++	}
++	q := u.Query()
++	q.Set("platform", "WEB")
++	q.Set("appVersion", "1.1")
++	q.Set("version", "5")
++	q.Set("device", "browser")
++	q.Set("capabilities", capabilitiesBitmask)
++	q.Set("clientType", "VK")
++	q.Set("tgt", "join")
++	u.RawQuery = q.Encode()
++	return u.String(), nil
++}
++
++func selfParticipant(endpoint string) string {
++	u, err := url.Parse(endpoint)
++	if err != nil {
++		return ""
++	}
++	return u.Query().Get("userId")
++}
++
++// Self returns this session's participant id.
++func (c *signalingClient) Self() string { return c.self }
++
++// Notifications exposes the server frames; the reader drops nothing.
++func (c *signalingClient) Notifications() <-chan notification { return c.notifications }
++
++// Closed is closed once the socket is gone.
++func (c *signalingClient) Closed() <-chan struct{} { return c.closed }
++
++// readLoop is the socket's only reader.
++func (c *signalingClient) readLoop() {
++	defer close(c.readDone)
++	defer c.shutdown()
++	for {
++		messageType, data, err := c.conn.ReadMessage()
++		if err != nil {
++			return
++		}
++		if messageType != websocket.TextMessage {
++			continue
++		}
++		if string(data) == "ping" {
++			_ = c.write(websocket.TextMessage, []byte("pong"))
++			continue
++		}
++		var note notification
++		if err := json.Unmarshal(data, &note); err != nil {
++			// Frames are never logged raw: they carry the endpoint's token.
++			logger.Debugf("vkcalls: invalid signaling frame: %d bytes: %v", len(data), err)
++			continue
++		}
++		if note.Stamp != 0 {
++			c.stamp = note.Stamp
++		}
++		c.deliver(note)
++	}
++}
++
++func (c *signalingClient) deliver(note notification) {
++	if note.Sequence != 0 {
++		if loaded, ok := c.pending.LoadAndDelete(note.Sequence); ok {
++			if ch, ok := loaded.(chan notification); ok {
++				select {
++				case ch <- note:
++				default:
++				}
++			}
++			return
++		}
++	}
++	select {
++	case c.notifications <- note:
++	case <-c.closed:
++	default:
++		logger.Debugf("vkcalls: notification dropped, queue full")
++	}
++}
++
++// command sends one command frame and waits for its response or error frame.
++func (c *signalingClient) command(ctx context.Context, name string, payload any) (notification, error) {
++	// A canceled operation interrupts its writer even before a response wait
++	// begins. The established socket otherwise keeps its owned lifetime.
++	stop := context.AfterFunc(ctx, c.shutdown)
++	defer stop()
++	c.writeMu.Lock()
++	sequence := c.sequence + 1
++	c.sequence = sequence
++	// The response can arrive before the write returns: the waiter is in
++	// place before the first byte goes out.
++	ch := make(chan notification, 1)
++	c.pending.Store(sequence, ch)
++	defer c.pending.Delete(sequence)
++	raw, err := orderedCommandFrame(name, sequence, payload)
++	if err == nil && len(raw) > signalingWriteBuffer {
++		err = fmt.Errorf("%w: %d bytes", ErrSignalingFrameTooLarge, len(raw))
++	}
++	if err == nil {
++		err = c.conn.WriteMessage(websocket.TextMessage, raw)
++	}
++	c.writeMu.Unlock()
++	if err != nil {
++		return notification{}, fmt.Errorf("vkcalls: signaling write %s: %w", name, err)
++	}
++
++	timer := time.NewTimer(commandTimeout)
++	defer timer.Stop()
++	select {
++	case note := <-ch:
++		if note.Type == frameTypeError {
++			return note, fmt.Errorf("%w: %s", ErrSignalingRejected, name)
++		}
++		return note, nil
++	case <-timer.C:
++		return notification{}, fmt.Errorf("%w: %s", ErrSignalingTimeout, name)
++	case <-c.closed:
++		return notification{}, fmt.Errorf("%w: %s", ErrSignalingClosed, name)
++	case <-ctx.Done():
++		return notification{}, fmt.Errorf("vkcalls: signaling %s: %w", name, ctx.Err())
++	}
++}
++
++// orderedCommandFrame renders a command frame with command and sequence
++// first, then the payload's own fields: the order the SDK writes. The
++// invalid-request first blamed on a sorted-key map marshal was the
++// continuation split (see signalingWriteBuffer); the SDK order stays, as the
++// captured frames are the only shape known to be accepted.
++func orderedCommandFrame(name string, sequence int64, payload any) ([]byte, error) {
++	nameJSON, err := json.Marshal(name)
++	if err != nil {
++		return nil, err //nolint:wrapcheck // marshalling a plain string
++	}
++	head := append([]byte(`{"command":`), nameJSON...)
++	// The SDK's key order, as captured.
++	//nolint:gocritic // building JSON in a fixed key order
++	head = append(head, fmt.Sprintf(`,"%s":%d,`, fieldSequence, sequence)...)
++	body, err := json.Marshal(payload)
++	if err != nil {
++		return nil, err //nolint:wrapcheck // caller-provided payload
++	}
++	// No payload, or one without fields, closes the frame after the sequence.
++	if bytes.Equal(body, []byte("null")) || bytes.Equal(body, []byte("{}")) {
++		return append(head[:len(head)-1], '}'), nil
++	}
++	if body[0] != '{' {
++		return nil, fmt.Errorf("%w: %s payload is not an object", ErrSignalingPayload, name)
++	}
++	body = bytes.TrimPrefix(body, []byte{'{'})
++	body = bytes.TrimSuffix(body, []byte{'}'})
++	out := head
++	out = append(out, body...)
++	return append(out, '}'), nil
++}
++
++// write is the serialized low-level writer used by pong and hangup.
++func (c *signalingClient) write(messageType int, data []byte) error {
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++	return c.conn.WriteMessage(messageType, data) //nolint:wrapcheck // transport-level failure, caller logs
++}
++
++// hangup leaves the conversation best-effort before close.
++func (c *signalingClient) hangup() {
++	// Leaving is best effort, never a prerequisite for transport disposal.
++	// A blocked current writer is interrupted by shutdown instead.
++	if !c.writeMu.TryLock() {
++		return
++	}
++	defer c.writeMu.Unlock()
++	raw, err := json.Marshal(map[string]any{"command": "hangup", fieldSequence: c.sequence + 1, "reason": reasonHungup})
++	if err != nil {
++		return
++	}
++	_ = c.conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
++	_ = c.conn.WriteMessage(websocket.TextMessage, raw)
++}
++
++func (c *signalingClient) shutdown() {
++	c.closeOnce.Do(func() {
++		_ = c.conn.Close()
++		close(c.closed)
++		c.pending.Range(func(_, value any) bool {
++			if ch, ok := value.(chan notification); ok {
++				select {
++				case ch <- notification{Type: frameTypeError}:
++				default:
++				}
++			}
++			return true
++		})
++	})
++}
++
++// close hangs up and tears the socket down.
++func (c *signalingClient) close() {
++	c.hangup()
++	c.shutdown()
++	if c.readDone != nil {
++		<-c.readDone
++	}
++}
++
++// awaitJoin waits for this socket's connection notification - the moment
++// the participant counts in the conversation - whatever its topology.
++func (c *signalingClient) awaitJoin(ctx context.Context) (notification, error) {
++	timer := time.NewTimer(connectionTimeout)
++	defer timer.Stop()
++	for {
++		select {
++		case note := <-c.notifications:
++			if note.Notification == noteConnection {
++				return note, nil
++			}
++		case <-timer.C:
++			return notification{}, fmt.Errorf("%w: connection", ErrSignalingTimeout)
++		case <-c.closed:
++			return notification{}, fmt.Errorf("%w: connection", ErrSignalingClosed)
++		case <-ctx.Done():
++			return notification{}, fmt.Errorf("vkcalls: connection wait: %w", ctx.Err())
++		}
++	}
++}
++
++// drainNotifications consumes the socket's notifications until they end, so
++// a signaling-only guest's queue never fills: its reader drops nothing and
++// the debug log stays quiet.
++func (c *signalingClient) drainNotifications() {
++	for {
++		select {
++		case <-c.notifications:
++		case <-c.closed:
++			return
++		}
++	}
++}
++
++// waitServerTopology ends when the conversation stands in SERVER topology -
++// immediately for a room that opened there, and on the topology-changed
++// notification a third simultaneous participant triggers for a fresh room's
++// DIRECT (two alone never switch; see recruitGuests).
++func (c *signalingClient) waitServerTopology(ctx context.Context, connection notification) error {
++	waited := false
++	for connection.Conversation == nil || connection.Conversation.Topology != topologyServer {
++		if !waited {
++			waited = true
++			logger.Debugf("vkcalls: conversation opened outside SERVER topology; " +
++				"waiting for the switch a second participant triggers")
++		}
++		select {
++		case note := <-c.notifications:
++			switch {
++			case note.Notification == noteTopology && note.Topology == topologyServer:
++				// The connection note's participant list is stale now; the
++				// run loop learns every join as its own notification.
++				return nil
++			case note.Notification == noteConnection:
++				connection = note
++			}
++		case <-c.closed:
++			return fmt.Errorf("%w: waiting for SERVER topology", ErrSignalingClosed)
++		case <-ctx.Done():
++			return fmt.Errorf("%w: %w", ErrSignalingNotServer, ctx.Err())
++		}
++	}
++	return nil
++}
++
++// participantIDs returns the numeric ids of participants that are still in
++// the conversation, as decimal strings (json.Number-safe).
++func participantIDs(note notification, self string) []string {
++	if note.Conversation == nil {
++		return nil
++	}
++	var out []string
++	for _, p := range note.Conversation.Participants {
++		if p.State == reasonHungup || p.State == "REJECTED" {
++			continue
++		}
++		id, err := decimalID(p.ID)
++		if err != nil || id == self {
++			continue
++		}
++		out = append(out, id)
++	}
++	return out
++}
++
++func decimalID(v any) (string, error) {
++	switch t := v.(type) {
++	case float64:
++		if t != float64(int64(t)) {
++			return "", fmt.Errorf("%w: non-integer", ErrParticipantID)
++		}
++		return strconv.FormatInt(int64(t), 10), nil
++	case string:
++		if _, err := strconv.ParseInt(t, 10, 64); err != nil {
++			return "", fmt.Errorf("%w: non-numeric", ErrParticipantID)
++		}
++		return t, nil
++	default:
++		return "", fmt.Errorf("%w: unsupported type", ErrParticipantID)
++	}
++}
+diff --git a/internal/engine/vkcalls/signaling_test.go b/internal/engine/vkcalls/signaling_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/signaling_test.go
+@@ -0,0 +1,434 @@
++package vkcalls
++
++import (
++	"context"
++	"encoding/binary"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++)
++
++// The server side of the test is one actor: gorilla allows a single
++// concurrent reader and writer per connection, so all server-side access is
++// serialized through one mutex.
++type fakeSFU struct {
++	conn     *websocket.Conn
++	mu       sync.Mutex
++	seenPong bool
++	reject   bool
++}
++
++func (f *fakeSFU) write(frame any) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	_ = f.conn.WriteJSON(frame)
++}
++
++func (f *fakeSFU) serve() {
++	f.mu.Lock()
++	_ = f.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
++	f.mu.Unlock()
++	for {
++		_, data, err := f.conn.ReadMessage()
++		if err != nil {
++			return
++		}
++		if string(data) == "pong" {
++			f.mu.Lock()
++			f.seenPong = true
++			f.mu.Unlock()
++			continue
++		}
++		var frame map[string]any
++		if json.Unmarshal(data, &frame) != nil {
++			continue
++		}
++		command, isString := frame["command"].(string)
++		if !isString {
++			continue
++		}
++		reply := map[string]any{"sequence": frame["sequence"], "response": command, "type": "response"}
++		if f.reject {
++			reply = map[string]any{"sequence": frame["sequence"], "type": "error"}
++		}
++		f.write(reply)
++	}
++}
++
++// TestSignalingCommandFlow drives the signaling client through its contract:
++// the connection notification, command response correlation, the ping/pong
++// keepalive, rejection and the closed-session failure.
++func TestSignalingCommandFlow(t *testing.T) {
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	fsfu := &fakeSFU{}
++	connected := make(chan struct{})
++	var once sync.Once
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		fsfu.conn = conn
++		once.Do(func() { close(connected) })
++		go fsfu.serve()
++		fsfu.write(map[string]any{
++			"type": "notification", "notification": "connection",
++			"peerId": map[string]any{"id": 111},
++			"conversation": map[string]any{"topology": "SERVER", "participants": []any{
++				map[string]any{"id": 42, "state": "ACCEPTED"},
++				map[string]any{"id": 43, "state": "HUNGUP"},
++			}},
++		})
++	}))
++	defer server.Close()
++
++	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.close()
++	<-connected
++
++	connection, err := client.awaitJoin(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if connection.Conversation == nil || connection.Conversation.Topology != "SERVER" {
++		t.Fatalf("connection topology missing: %+v", connection)
++	}
++	if ids := participantIDs(connection, "42"); len(ids) != 0 {
++		t.Fatalf("expected self filtered out, got %v", ids)
++	}
++
++	response, err := client.command(context.Background(), "allocate-consumer", map[string]any{"capabilities": referenceCapabilities()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if response.Response != "allocate-consumer" {
++		t.Fatalf("response %q", response.Response)
++	}
++
++	// The keepalive: a text "ping" from the server is answered "pong"; the
++	// serve loop records it.
++	fsfu.mu.Lock()
++	_ = fsfu.conn.WriteMessage(websocket.TextMessage, []byte("ping"))
++	fsfu.mu.Unlock()
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		fsfu.mu.Lock()
++		seen := fsfu.seenPong
++		fsfu.mu.Unlock()
++		if seen {
++			break
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++	fsfu.mu.Lock()
++	seen := fsfu.seenPong
++	fsfu.mu.Unlock()
++	if !seen {
++		t.Fatal("client did not answer ping with pong")
++	}
++
++	fsfu.mu.Lock()
++	fsfu.reject = true
++	fsfu.mu.Unlock()
++	// A command with no payload fields is still one JSON object, so the fake
++	// SFU parses it and its error frame maps to ErrSignalingRejected.
++	if _, err := client.command(context.Background(), "update-media-modifiers", nil); !errors.Is(err, ErrSignalingRejected) {
++		t.Fatalf("got %v, want ErrSignalingRejected", err)
++	}
++
++	// Closing the socket fails pending and future commands.
++	fsfu.mu.Lock()
++	_ = fsfu.conn.Close()
++	fsfu.mu.Unlock()
++	select {
++	case <-client.Closed():
++	case <-time.After(2 * time.Second):
++		t.Fatal("closed channel not signalled")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	if _, err := client.command(ctx, "hangup", nil); err == nil {
++		t.Fatal("expected closed error")
++	}
++}
++
++func TestSignalingURL(t *testing.T) {
++	got, err := signalingURL("wss://calls.example.okcdn.ru/fb?token=t&userId=1")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, want := range []string{"platform=WEB", "appVersion=1.1", "version=5", "capabilities=2F7F", "tgt=join"} {
++		if !strings.Contains(got, want) {
++			t.Fatalf("url %q missing %q", got, want)
++		}
++	}
++	if _, err := signalingURL("https://calls.example/"); err == nil {
++		t.Fatal("expected endpoint error")
++	}
++}
++
++// frameHeader is the first header of a client frame as it arrives on the wire.
++type frameHeader struct {
++	fin    bool
++	opcode byte
++	length uint64
++}
++
++// readFrameHeader parses one raw WebSocket frame header (RFC 6455 5.2):
++// gorilla's own reader would join continuation frames and hide a split.
++func readFrameHeader(r io.Reader) (frameHeader, error) {
++	var b [2]byte
++	if _, err := io.ReadFull(r, b[:]); err != nil {
++		return frameHeader{}, err
++	}
++	h := frameHeader{fin: b[0]&0x80 != 0, opcode: b[0] & 0x0f, length: uint64(b[1] & 0x7f)}
++	switch h.length {
++	case 126:
++		var ext [2]byte
++		if _, err := io.ReadFull(r, ext[:]); err != nil {
++			return frameHeader{}, err
++		}
++		h.length = uint64(binary.BigEndian.Uint16(ext[:]))
++	case 127:
++		var ext [8]byte
++		if _, err := io.ReadFull(r, ext[:]); err != nil {
++			return frameHeader{}, err
++		}
++		h.length = binary.BigEndian.Uint64(ext[:])
++	}
++	return h, nil
++}
++
++// TestSignalingLargeCommandIsOneFrame pins the wire shape of a large command.
++// The SFU parses each text frame on its own: an accept-producer description
++// (~50 KB) split into 4 KiB continuation frames came back as invalid-request
++// "Invalid message format" with no sequence (live engine smoke, 2026-09-28),
++// while the probe's single frame with the same bytes was accepted.
++func TestSignalingLargeCommandIsOneFrame(t *testing.T) {
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	headers := make(chan frameHeader, 1)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer func() { _ = conn.Close() }()
++		raw := conn.NetConn()
++		_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
++		header, err := readFrameHeader(raw)
++		if err != nil {
++			close(headers)
++			return
++		}
++		headers <- header
++		_ = conn.WriteMessage(websocket.TextMessage,
++			[]byte(`{"stamp":0,"sequence":1,"response":"accept-producer","type":"response"}`))
++		_, _ = io.Copy(io.Discard, raw)
++	}))
++	defer server.Close()
++
++	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.close()
++
++	payload := map[string]any{fieldDescription: strings.Repeat("a=rtcp-fb:96 nack pli\r\n", 3000)}
++	want, err := orderedCommandFrame("accept-producer", 1, payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := client.command(context.Background(), "accept-producer", payload); err != nil {
++		t.Fatal(err)
++	}
++	header, ok := <-headers
++	if !ok {
++		t.Fatal("server read no frame header")
++	}
++	if !header.fin || header.opcode != websocket.TextMessage || header.length != uint64(len(want)) {
++		t.Fatalf("accept-producer of %d bytes went out as fin=%v opcode=%d length=%d; want one text frame",
++			len(want), header.fin, header.opcode, header.length)
++	}
++
++	// A command larger than the write buffer is refused before any byte goes
++	// out, never split.
++	huge := map[string]any{fieldDescription: strings.Repeat("x", signalingWriteBuffer)}
++	if _, err := client.command(context.Background(), "accept-producer", huge); !errors.Is(err, ErrSignalingFrameTooLarge) {
++		t.Fatalf("oversized command: got %v, want ErrSignalingFrameTooLarge", err)
++	}
++}
++
++// TestOrderedCommandFrameIsJSON pins the frame to one JSON object whatever
++// the payload holds: none, no fields, or fields.
++func TestOrderedCommandFrameIsJSON(t *testing.T) {
++	for _, payload := range []any{nil, map[string]any{}, map[string]any{"a": 1}} {
++		raw, err := orderedCommandFrame("x", 2, payload)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !json.Valid(raw) || !strings.HasPrefix(string(raw), `{"command":"x","sequence":2`) {
++			t.Fatalf("payload %v: frame %s", payload, raw)
++		}
++	}
++	if _, err := orderedCommandFrame("x", 2, []int{1}); !errors.Is(err, ErrSignalingPayload) {
++		t.Fatalf("array payload: got %v, want ErrSignalingPayload", err)
++	}
++}
++
++// TestSignalingWaitsForServerTopology pins the fresh-room path: a lone guest
++// is handed DIRECT, and the wait ends only on the topology-changed
++// notification a second participant triggers - or with the caller's context,
++// naming the topology as the reason.
++func TestSignalingWaitsForServerTopology(t *testing.T) {
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	fsfu := &fakeSFU{}
++	connected := make(chan struct{})
++	var once sync.Once
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		fsfu.conn = conn
++		once.Do(func() { close(connected) })
++		go fsfu.serve()
++		fsfu.write(map[string]any{
++			"type": "notification", "notification": "connection",
++			"peerId":       map[string]any{"id": 111},
++			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
++		})
++	}))
++	defer server.Close()
++
++	client, err := dialSignaling(context.Background(), "ws"+server.URL[4:]+"?token=t&userId=42", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.close()
++	<-connected
++
++	ctx, cancel := context.WithCancel(context.Background())
++	got := make(chan error, 1)
++	go func() {
++		note, err := client.awaitJoin(ctx)
++		if err != nil {
++			got <- err
++			return
++		}
++		got <- client.waitServerTopology(ctx, note)
++	}()
++
++	// Still waiting while the room is DIRECT.
++	select {
++	case err := <-got:
++		t.Fatalf("wait ended early: %v", err)
++	case <-time.After(150 * time.Millisecond):
++	}
++	fsfu.write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
++	select {
++	case err := <-got:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("the switch to SERVER did not end the wait")
++	}
++	cancel()
++
++	// A context that ends in DIRECT names the topology. The first wait
++	// consumed the connection notification, so the fake sends it again.
++	fsfu.write(map[string]any{
++		"type": "notification", "notification": "connection",
++		"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
++	})
++	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
++	defer cancel2()
++	if _, err := func() (notification, error) {
++		note, err := client.awaitJoin(ctx2)
++		if err != nil {
++			return notification{}, err
++		}
++		return note, client.waitServerTopology(ctx2, note)
++	}(); !errors.Is(err, ErrSignalingNotServer) {
++		t.Fatalf("want ErrSignalingNotServer, got %v", err)
++	}
++}
++
++// TestRecruitFlipsFreshRoom models the measured fresh-room behaviour: the
++// first two connections stay DIRECT, and the third simultaneous participant
++// is what flips the SFU to SERVER - which it announces to everyone. The
++// session's wait, with its recruiter running, must end on that flip.
++func TestRecruitFlipsFreshRoom(t *testing.T) {
++	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
++	var mu sync.Mutex
++	var conns []*websocket.Conn
++	flip := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := upgrader.Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		mu.Lock()
++		conns = append(conns, conn)
++		count := len(conns)
++		mu.Unlock()
++		write := func(frame any) { _ = conn.WriteJSON(frame) }
++		write(map[string]any{
++			"type": "notification", "notification": "connection",
++			"conversation": map[string]any{"topology": "DIRECT", "participants": []any{}},
++		})
++		if count == 3 {
++			close(flip)
++		}
++		go func() {
++			<-flip
++			write(map[string]any{"type": "notification", "notification": "topology-changed", "topology": "SERVER"})
++		}()
++	}))
++	defer server.Close()
++	endpoint := "ws" + server.URL[4:] + "?token=t&userId=42"
++
++	s := &Session{cfg: engine.Config{
++		URL: endpoint,
++		Refresh: func(context.Context) (engine.Credentials, error) {
++			return engine.Credentials{URL: endpoint}, nil
++		},
++	}}
++	signal, err := dialSignaling(context.Background(), endpoint, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer signal.close()
++	done := make(chan error, 1)
++	go func() {
++		_, err := s.waitConnected(context.Background(), signal)
++		done <- err
++	}()
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(15 * time.Second):
++		t.Fatal("the recruited third participant did not flip the room")
++	}
++	// The recruiter's guests leave with the wait.
++	mu.Lock()
++	defer mu.Unlock()
++	if len(conns) != 3 {
++		t.Fatalf("connections=%d, want the session plus two recruits", len(conns))
++	}
++}
+diff --git a/internal/engine/vkcalls/stamp.go b/internal/engine/vkcalls/stamp.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/stamp.go
+@@ -0,0 +1,118 @@
++package vkcalls
++
++import (
++	"strings"
++
++	"github.com/pion/interceptor"
++	"github.com/pion/rtp"
++	"github.com/pion/sdp/v3"
++)
++
++// sdesStamper writes the SDES mid and rid header extensions on every
++// outgoing video packet. Pion negotiates both extensions but writes neither,
++// and the SFU binds a published stream to its section and simulcast layer
++// by them, as Chrome's packets carry them.
++// The declared simulcast layer: the transport's small frame.
++const (
++	layerWidth  = 320
++	layerHeight = 180
++	layerFPS    = 15
++	layerKbps   = 180
++)
++
++type sdesStamper struct {
++	interceptor.NoOp
++	mid, rid string
++}
++
++type sdesStamperFactory struct{ mid, rid string }
++
++// NewInterceptor implements interceptor.Factory.
++func (f sdesStamperFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
++	return &sdesStamper{mid: f.mid, rid: f.rid}, nil
++}
++
++// BindLocalStream stamps the stream's packets when it is video and the
++// extensions were negotiated for it.
++func (s *sdesStamper) BindLocalStream(info *interceptor.StreamInfo, w interceptor.RTPWriter) interceptor.RTPWriter {
++	if !strings.HasPrefix(strings.ToLower(info.MimeType), "video/") {
++		return w
++	}
++	var midID, ridID, astID uint8
++	for _, ext := range info.RTPHeaderExtensions {
++		switch ext.URI {
++		case sdp.SDESMidURI:
++			midID = uint8(ext.ID) //nolint:gosec // extension ids are 1..255
++		case sdp.SDESRTPStreamIDURI:
++			ridID = uint8(ext.ID) //nolint:gosec // extension ids are 1..255
++		case sdp.ABSSendTimeURI:
++			astID = uint8(ext.ID) //nolint:gosec // extension ids are 1..255
++		}
++	}
++	if midID == 0 && ridID == 0 && astID == 0 {
++		return w
++	}
++	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attrs interceptor.Attributes) (int, error) {
++		if midID != 0 && s.mid != "" {
++			_ = header.SetExtension(midID, []byte(s.mid))
++		}
++		if ridID != 0 && s.rid != "" {
++			_ = header.SetExtension(ridID, []byte(s.rid))
++		}
++		return w.Write(header, payload, attrs)
++	})
++}
++
++// publishMid is the mid of the offer's video section the SFU receives on.
++func publishMid(offer string) string {
++	sections, err := splitSections(strings.ReplaceAll(offer, "\r\n", "\n"))
++	if err != nil {
++		return ""
++	}
++	for _, sec := range sections {
++		if sec.kind() == kindVideo && sec.direction() == "recvonly" {
++			return sec.mid()
++		}
++	}
++	return ""
++}
++
++// EXPERIMENT (temporary): encodeChangeSimulcast is the change-simulcast
++// producer command: 07 00 seq mediaSource(1=camera) count, then per layer
++// rid(str) width height fps bitrate.
++func encodeChangeSimulcast(sequence int, rid string, width, height, fps, bitrate int) []byte {
++	out := appendMPInt(nil, 7)
++	out = appendMPInt(out, 0)
++	out = appendMPInt(out, sequence)
++	out = appendMPInt(out, 1)
++	out = appendMPInt(out, 1)
++	out = append(out, 0xA0|byte(len(rid))) //nolint:gosec // wire-format bit assembly, truncation is the point
++	out = append(out, rid...)
++	out = appendMPInt(out, width)
++	out = appendMPInt(out, height)
++	out = appendMPInt(out, fps)
++	// The web client's serializeChangeSimulcast writes eT.enc(bitrate/1e3):
++	// the layer bitrate travels in kbit/s, not bit/s.
++	return appendMPInt(out, bitrate/1000)
++}
++
++// layerProfile is the simulcast layer the engine declares, in the change
++// command and the answer's rid constraints: the small layer the transport
++// publishes. The SFU forwards it whatever the transport's frame rate - the
++// CI gate measured the full matrix with this declaration.
++func layerProfile() (int, int, int, int) {
++	return layerWidth, layerHeight, layerFPS, layerKbps
++}
++
++// encodePerfStatReport is the SDK's report-perf-stat producer command (type
++// 1): [1, 0, sequence, framesDecoded, framesReceived]. The SDK sends it every
++// statisticsInterval (5 s) from getStats; the SFU feeds its consumer-leg
++// liveness with it — without the reports the forward is stalled within a
++// minute (spike tun-rr-01).
++func encodePerfStatReport(sequence int, framesDecoded, framesReceived uint32) []byte {
++	out := appendMPInt(nil, 1)
++	out = appendMPInt(out, 0)
++	out = appendMPInt(out, sequence)
++	out = appendMPInt(out, int(framesDecoded))
++	return appendMPInt(out, int(framesReceived))
++}
+diff --git a/internal/engine/vkcalls/vkcalls.go b/internal/engine/vkcalls/vkcalls.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/vkcalls/vkcalls.go
+@@ -0,0 +1,863 @@
++package vkcalls
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	authvk "github.com/openlibrecommunity/olcrtc/internal/auth/vkcalls"
++	"github.com/pion/webrtc/v4"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++	"github.com/openlibrecommunity/olcrtc/internal/logger"
++)
++
++// Session errors.
++var (
++	ErrSessionClosed   = errors.New("vkcalls: session closed")
++	ErrNoEndpoint      = errors.New("vkcalls: signaling endpoint missing")
++	ErrOfferTimeout    = errors.New("vkcalls: no producer offer arrived")
++	ErrConnectTimeout  = errors.New("vkcalls: peer connection did not connect")
++	ErrSendUnsupported = errors.New("vkcalls: send requires the video transport")
++)
++
++const (
++	offerWait     = 30 * time.Second
++	connectWait   = 30 * time.Second
++	commandSeqMod = 1 << 20
++	// maxReconnects bounds the supervisor's rejoin attempts before the
++	// session ends with the limit reason.
++	maxReconnects = 10
++
++	// perfStatInterval is the SDK's statisticsInterval: how often the client
++	// reports decoded frames to the SFU.
++	perfStatInterval = 5 * time.Second
++)
++
++// referenceCapabilities is the allocate-consumer feature report: only what
++// this engine implements. The SDK's own mask is a diagnostic reference, not a
++// constant to copy (spec 7.4).
++func referenceCapabilities() map[string]any {
++	return map[string]any{
++		"estimatedPerformanceIndex": 0, "audioMix": true, "consumerUpdate": true,
++		"producerNotificationDataChannelVersion": 8, "producerCommandDataChannelVersion": 3,
++		"consumerScreenDataChannelVersion": 1, "producerScreenDataChannelVersion": 1,
++		"asrDataChannelVersion": 1, "animojiDataChannelVersion": 2, "animojiBackendRender": true,
++		"onDemandTracks": true, "unifiedPlan": true, "singleSession": true, "videoTracksCount": 36,
++		"red": true, "audioShare": true, "fastScreenShare": true, "videoSuspend": false,
++		"simulcast": true, "simulcastNativeOrder": true, "consumerFastScreenShare": false,
++		"consumerFastScreenShareQualityOnDemand": false, "transparentAudio": false,
++	}
++}
++
++// Session is an engine.Session over one VK Calls SERVER conversation. Payload
++// rides the video track (the videochannel transport on top); the SFU bridges
++// no arbitrary data channel, so Send reports unsupported.
++type Session struct {
++	owner    sessionOwner
++	cfg      engine.Config
++	endpoint string
++	peerID   string
++	iceJSON  string
++
++	video engine.VideoTrackState
++
++	engine.Reconnector
++
++	mu           sync.Mutex
++	gen          *generation
++	encodings    []webrtc.RTPEncodingParameters // EXPERIMENT: the publish encodings
++	closed       atomic.Bool
++	reconnecting atomic.Bool
++	closeCh      chan struct{}
++	closeOnce    sync.Once
++	endOnce      sync.Once
++}
++
++// generation bundles everything one connection attempt owns, so closing it
++// tears the whole attempt down (spec 7.3: state never crosses generations).
++type generation struct {
++	ownerMu      sync.Mutex
++	teardownOnce sync.Once
++	ctx          context.Context
++	cancel       context.CancelFunc
++	signal       *signalingClient
++	pc           *webrtc.PeerConnection
++	command      *webrtc.DataChannel
++	notify       *webrtc.DataChannel
++	shape        *ShapeState
++
++	registryMu sync.Mutex
++	registry   Registry
++	// participants are the others in the conversation, whose cameras the
++	// layout asks for (by string key until the registry names them).
++	participants map[string]bool
++	commandSeq   int
++	sessionID    string
++	connected    chan struct{}
++	done         chan struct{}
++	doneOnce     sync.Once
++}
++
++// isDone says whether this attempt was torn down: a failure it raised after
++// that says nothing about the session (see reconnectAttempt).
++
++// New builds a VK Calls session from provider credentials.
++func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
++	if cfg.URL == "" {
++		return nil, ErrNoEndpoint
++	}
++	s := &Session{
++		cfg: cfg, endpoint: cfg.URL,
++		peerID: cfg.Extra["peer_id_hint"], iceJSON: cfg.Extra["ice_servers"],
++		closeCh: make(chan struct{}),
++	}
++	// Like the pinned engines, construction and Connect budgets do not own
++	// an established session. The explicit Close owner owns that lifetime.
++	s.owner.ctx, s.owner.cancel = context.WithCancel(context.Background())
++	s.Configure(engine.ReconnectorConfig{
++		MaxAttempts: maxReconnects,
++		Reconnect:   s.reconnect,
++		OnError:     func(error) { logger.Debugf("vkcalls: reconnect failed") },
++		OnLimit:     func(string) { s.signalEnded("reconnect limit reached") },
++		LimitReason: "reconnect limit reached",
++	})
++	return s, nil
++}
++
++// AddVideoTrack records a local track for the next connection.
++func (s *Session) AddVideoTrack(track webrtc.TrackLocal) error { //nolint:unparam // the VideoTrackCapable contract
++	s.video.StoreVideoTrack(track)
++	return nil
++}
++
++// SetVideoTrackHandler registers the remote-track callback.
++func (s *Session) SetVideoTrackHandler(cb func(*webrtc.TrackRemote, *webrtc.RTPReceiver)) {
++	s.video.SetVideoTrackHandler(cb)
++}
++
++// Connect joins the conversation and brings the bundled peer connection to
++// the connected state with an active media subscription.
++func (s *Session) Connect(ctx context.Context) (result error) {
++	stage := "SIGNAL_DIAL"
++	defer func() { result = authvk.WithStartupStage(stage, result) }()
++	if s.closed.Load() || !s.owner.begin() {
++		return ErrSessionClosed
++	}
++	defer s.owner.wg.Done()
++	gen, err := s.owner.attempt(ctx)
++	if err != nil {
++		return err
++	}
++	ctx, cancelStartup := context.WithCancel(ctx)
++	stopStartup := context.AfterFunc(gen.ctx, cancelStartup)
++	defer func() { stopStartup(); cancelStartup() }()
++	committed := false
++	defer func() {
++		if !committed {
++			s.owner.release(gen)
++		}
++	}()
++
++	// A fresh join carries no peer id: the hint names this client only to a
++	// retry join (tgt=retry), which the reconnect path issues.
++	signal, err := dialSignalingOwned(ctx, gen.ctx, s.endpoint, s.cfg.Resolver)
++	if err != nil {
++		return err
++	}
++	if !gen.attachSignal(signal) {
++		return ErrSessionClosed
++	}
++	stage = "SIGNAL_JOIN"
++	connection, err := s.waitConnected(ctx, signal)
++	if err != nil {
++		signal.close()
++		return err
++	}
++	stage = "SIGNAL_ALLOCATE"
++	if _, err := signal.command(ctx, "allocate-consumer",
++		map[string]any{"capabilities": referenceCapabilities()}); err != nil {
++		signal.close()
++		return err
++	}
++	stage = "SIGNAL_SETTINGS"
++	if _, err := signal.command(ctx, "update-media-modifiers", map[string]any{
++		"mediaModifiers": map[string]any{"denoise": true, "denoiseAnn": true},
++	}); err != nil {
++		signal.close()
++		return err
++	}
++
++	stage = "MEDIA_OFFER"
++	offerNote := waitOffer(ctx, signal)
++	if offerNote.Description == "" {
++		signal.close()
++		return ErrOfferTimeout
++	}
++	gen.sessionID = offerNote.SessionID
++	stage = "MEDIA_SETTINGS"
++	if _, err := signal.command(ctx, "change-media-settings", map[string]any{
++		"mediaSettings": map[string]any{"isAudioEnabled": false, "isVideoEnabled": false,
++			"isScreenSharingEnabled": false, "isFastScreenSharingEnabled": false,
++			"isAudioSharingEnabled": false, "isAnimojiEnabled": true},
++	}); err != nil {
++		signal.close()
++		return err
++	}
++	stage = "NEGOTIATION"
++	if err := s.negotiate(ctx, gen, offerNote.Description); err != nil {
++		gen.teardown()
++		return err
++	}
++
++	s.mu.Lock()
++	if s.closed.Load() || gen.isDone() {
++		s.mu.Unlock()
++		return ErrSessionClosed
++	}
++	s.gen = gen
++	s.mu.Unlock()
++	if !s.owner.launch(gen.perfStatLoop) || !s.owner.launch(func() { s.run(gen, connection) }) {
++		return ErrSessionClosed
++	}
++	committed = true
++	return nil
++}
++
++// waitConnected waits for the connection notification and, when the room
++// opened outside SERVER topology, keeps waiting while recruiting the
++// signaling-only guests that flip a fresh room - two participants alone
++// never switch it, a third simultaneous one does, and SERVER sticks after
++// that (see recruitGuests).
++func (s *Session) waitConnected(ctx context.Context, signal *signalingClient) (notification, error) {
++	connection, err := signal.awaitJoin(ctx)
++	if err != nil {
++		return notification{}, err
++	}
++	direct := connection.Conversation == nil || connection.Conversation.Topology != topologyServer
++	if !direct {
++		return connection, nil
++	}
++	flipDone := make(chan struct{})
++	recruitCtx, cancel := context.WithCancel(ctx)
++	joined := make(chan struct{})
++	go func() { defer close(joined); s.recruitGuests(recruitCtx, flipDone) }()
++	defer func() { cancel(); close(flipDone); <-joined }()
++	if err := signal.waitServerTopology(ctx, connection); err != nil {
++		return notification{}, err
++	}
++	return connection, nil
++}
++
++// negotiate answers one producer offer: the bundled peer connection mirrors
++// the offer's codecs, the shaped answer passes the transport gate and
++// accept-producer completes the session.
++func (s *Session) negotiate(ctx context.Context, gen *generation, offer string) error { //nolint:gocyclo,cyclop
++	api, err := newWebRTCAPI(offer, s.cfg, s.cfg.Resolver)
++	if err != nil {
++		return err
++	}
++	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: iceServersOf(s.iceJSON)})
++	if err != nil {
++		return fmt.Errorf("vkcalls: new peer connection: %w", err)
++	}
++	if !gen.attachPC(pc) {
++		return ErrSessionClosed
++	}
++
++	// The remote description is set before tracks attach: AddTrack then
++	// reuses the offer's publish transceiver instead of opening a fresh one
++	// that would pair with a receive-only section (the worker's proven order).
++	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
++		return fmt.Errorf("vkcalls: set remote description: %w", err)
++	}
++	// The publish slot carries the video transport's track; its SSRC lands in
++	// the native answer and the shaper declares it to the SFU.
++	// The service channels are created before the tracks, in the SDK's
++	// order (channel ids 0,2,4,… before the media sections' SSRCs).
++	if err := s.openControlChannels(gen, pc); err != nil {
++		return err
++	}
++	senders := map[string]*webrtc.RTPSender{}
++	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
++		// EXPERIMENT: a track with a RID joins the sender of its track id as
++		// one more simulcast encoding.
++		if base, ok := senders[track.ID()]; ok && track.RID() != "" {
++			if err := base.AddEncoding(track); err != nil {
++				logger.Debugf("vkcalls: add encoding %s: %v", track.RID(), err)
++			}
++			return
++		}
++		sender, err := pc.AddTrack(track)
++		if err != nil {
++			logger.Debugf("vkcalls: add track: %v", err)
++			return
++		}
++		senders[track.ID()] = sender
++		s.owner.launch(func() { drainRTCP(sender) })
++	})
++	s.mu.Lock()
++	s.encodings = nil
++	s.mu.Unlock()
++	for _, sender := range senders {
++		for _, enc := range sender.GetParameters().Encodings {
++			if enc.RID != "" {
++				logger.Debugf("vkcalls: encoding rid=%s ssrc=%d", enc.RID, enc.SSRC)
++			}
++			s.mu.Lock()
++			s.encodings = append(s.encodings, enc)
++			s.mu.Unlock()
++		}
++	}
++	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
++		logger.Debugf("vkcalls: remote track kind=%s codec=%s ssrc=%d", track.Kind(), track.Codec().MimeType, track.SSRC())
++		if handler := s.video.VideoTrackHandler(); handler != nil {
++			handler(track, receiver)
++		}
++	})
++	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
++		logger.Debugf("vkcalls: peer connection %s", state)
++		switch state {
++		case webrtc.PeerConnectionStateConnected:
++			select {
++			case <-gen.connected:
++			default:
++				close(gen.connected)
++			}
++		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
++			s.reconnectAttempt(gen)
++		case webrtc.PeerConnectionStateNew, webrtc.PeerConnectionStateConnecting,
++			webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateUnknown:
++		}
++	})
++
++	return s.acceptOffer(ctx, gen, offer)
++}
++
++// openControlChannels creates the two service data channels the engine
++// speaks: producerCommand carries the layout subscription, and
++// producerNotification delivers the stream registry.
++func (s *Session) openControlChannels(gen *generation, pc *webrtc.PeerConnection) error {
++	ordered := true
++	notify, err := pc.CreateDataChannel("producerNotification", &webrtc.DataChannelInit{Ordered: &ordered})
++	if err != nil {
++		return fmt.Errorf("vkcalls: producer notification channel: %w", err)
++	}
++	gen.notify = notify
++	command, err := pc.CreateDataChannel("producerCommand", &webrtc.DataChannelInit{Ordered: &ordered})
++	if err != nil {
++		return fmt.Errorf("vkcalls: producer command channel: %w", err)
++	}
++	gen.command = command
++	// The participants known at connect, and a registry that arrived first,
++	// are subscribed as soon as the channel can carry the layout.
++	command.OnOpen(func() {
++		// The SDK configures its encodings right after accept-producer
++		// (sync({force:true})): without this the SFU accepts the stream but
++		// never forwards it, and the command is fire-and-forget, so the
++		// mistake is silent. The engine publishes one layer: l at the
++		// transport's small frame. Bitrate is written in kbit/s.
++		{
++			gen.registryMu.Lock()
++			gen.commandSeq++
++			seq := gen.commandSeq
++			gen.registryMu.Unlock()
++			w, h, fps, kbps := layerProfile()
++			frame := encodeChangeSimulcast(seq, "l", w, h, fps, kbps*1000)
++			if err := command.Send(frame); err != nil {
++				logger.Debugf("vkcalls: change-simulcast send failed")
++			}
++		}
++		gen.subscribeAll()
++	})
++	notify.OnMessage(func(message webrtc.DataChannelMessage) {
++		s.onServiceFrame(gen, message.Data)
++	})
++	return nil
++}
++
++// acceptOffer shapes the answer for the current offer and completes the
++// accept-producer handshake.
++func (s *Session) acceptOffer(ctx context.Context, gen *generation, offer string) error {
++	native, err := gen.pc.CreateAnswer(nil)
++	if err != nil {
++		return fmt.Errorf("vkcalls: create answer: %w", err)
++	}
++	if localErr := gen.pc.SetLocalDescription(native); localErr != nil {
++		return fmt.Errorf("vkcalls: set local description: %w", localErr)
++	}
++	shaped, err := ShapeAnswer(offer, native.SDP, gen.shape)
++	if err != nil {
++		return err
++	}
++	if _, err := gen.signal.command(ctx, "accept-producer", acceptPayload(offer, shaped, gen.sessionID)); err != nil {
++		return err
++	}
++	select {
++	case <-gen.connected:
++		return nil
++	case <-time.After(connectWait):
++		return ErrConnectTimeout
++	case <-ctx.Done():
++		return fmt.Errorf("vkcalls: connect wait: %w", ctx.Err())
++	}
++}
++
++// acceptPayload builds the accept-producer command body: the shaped answer,
++// the session the offer belonged to and the offer's SSRC attributions.
++func acceptPayload(offer, shaped, sessionID string) map[string]any {
++	ssrcs := remoteSSRCs(offer)
++	ids := make([]any, 0, len(ssrcs))
++	for _, ssrc := range ssrcs {
++		ids = append(ids, ssrc)
++	}
++	return map[string]any{fieldDescription: shaped, "sessionId": sessionID, "ssrcs": ids}
++}
++
++// waitOffer returns the first producer-updated notification, or an empty one
++// on timeout.
++func waitOffer(ctx context.Context, signal *signalingClient) notification {
++	timer := time.NewTimer(offerWait)
++	defer timer.Stop()
++	for {
++		select {
++		case note := <-signal.Notifications():
++			if note.Notification == "producer-updated" && note.Description != "" {
++				return note
++			}
++		case <-timer.C:
++			return notification{}
++		case <-signal.Closed():
++			return notification{}
++		case <-ctx.Done():
++			return notification{}
++		}
++	}
++}
++
++// run owns the session after a successful connect: renegotiations and the
++// signaling socket's lifetime.
++func (s *Session) run(gen *generation, connection notification) {
++	others := participantIDs(connection, gen.signal.Self())
++	logger.Debugf("vkcalls: connected as <%s>, %d other participants", idTag(gen.signal.Self()), len(others))
++	for _, id := range others {
++		gen.noteParticipant(id)
++	}
++	gen.subscribeAll()
++	for {
++		select {
++		case note := <-gen.signal.Notifications():
++			switch note.Notification {
++			case "participant-joined", "media-settings-changed":
++				// A camera may appear with either: ask for it by key.
++				if id, err := decimalID(note.ParticipantID); err == nil && id != gen.signal.Self() && gen.noteParticipant(id) {
++					gen.subscribeAll()
++				}
++			case "producer-updated":
++				if note.Description == "" || note.SessionID == gen.sessionID {
++					continue
++				}
++				gen.sessionID = note.SessionID
++				if err := s.reanswer(gen, note.Description); err != nil {
++					logger.Debugf("vkcalls: renegotiation failed")
++					s.reconnectAttempt(gen)
++				}
++			case "hungup":
++				if id, err := decimalID(note.ParticipantID); err == nil {
++					gen.removeStream(id)
++				}
++			}
++		case <-gen.signal.Closed():
++			// The supervisor owns the verdict: a rejoin is asked for, and the
++			// session only ends through its limit or the caller's policy.
++			s.reconnectAttempt(gen)
++			return
++		}
++	}
++}
++
++// reanswer handles a renegotiation offer on the established transport: same
++// shaping and accept handshake, no second connect wait.
++func (s *Session) reanswer(gen *generation, offer string) error {
++	if gen.pc == nil {
++		return ErrSessionClosed
++	}
++	offer = strings.ReplaceAll(offer, "\r\n", "\n")
++	if err := gen.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
++		return fmt.Errorf("vkcalls: renegotiation remote: %w", err)
++	}
++	native, err := gen.pc.CreateAnswer(nil)
++	if err != nil {
++		return fmt.Errorf("vkcalls: renegotiation answer: %w", err)
++	}
++	if localErr := gen.pc.SetLocalDescription(native); localErr != nil {
++		return fmt.Errorf("vkcalls: renegotiation local: %w", localErr)
++	}
++	shaped, err := ShapeAnswer(offer, native.SDP, gen.shape)
++	if err != nil {
++		return err
++	}
++	_, err = gen.signal.command(gen.ctx, "accept-producer",
++		acceptPayload(offer, shaped, gen.sessionID))
++	return err
++}
++
++// onServiceFrame folds producerNotification registry frames into the stream
++// registry and re-subscribes to everything the SFU offers us.
++func (s *Session) onServiceFrame(gen *generation, data []byte) {
++	entries, err := ParseRegistry(data)
++	if errors.Is(err, ErrNotRegistry) {
++		return
++	}
++	if err != nil {
++		logger.Debugf("vkcalls: registry frame: %v", err)
++		return
++	}
++	if len(entries) == 0 {
++		return
++	}
++	gen.registryMu.Lock()
++	for key, id := range entries {
++		gen.registry[key] = id
++	}
++	gen.registryMu.Unlock()
++	gen.subscribeAll()
++}
++
++// removeStream drops a hung-up participant's stream from the subscription.
++// Registry keys are typed with a participant-type prefix ("u" for USER)
++// before the numeric id.
++func (gen *generation) removeStream(participant string) {
++	prefixes := []string{"u" + participant + ":", participant + ":"}
++	gen.registryMu.Lock()
++	delete(gen.participants, participant)
++	delete(gen.registry, "u"+participant)
++	for key := range gen.registry {
++		for _, prefix := range prefixes {
++			if len(key) > len(prefix) && key[:len(prefix)] == prefix {
++				delete(gen.registry, key)
++			}
++		}
++	}
++	gen.registryMu.Unlock()
++}
++
++// nextSeq takes the next producerCommand sequence number; every command on
++// that channel shares one counter, as in the SDK.
++func (gen *generation) nextSeq() int {
++	gen.registryMu.Lock()
++	defer gen.registryMu.Unlock()
++	gen.commandSeq++
++	return gen.commandSeq % commandSeqMod
++}
++
++// perfStatLoop reports the consumer's decoded frames every five seconds, the
++// SDK's statisticsInterval: the SFU's consumer-leg liveness depends on these
++// reports (spike tun-rr-01: without them the forward stalls within a minute).
++func (gen *generation) perfStatLoop() {
++	ticker := time.NewTicker(perfStatInterval)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-gen.done:
++			return
++		case <-ticker.C:
++		}
++		if gen.pc == nil || gen.command == nil || gen.command.ReadyState() != webrtc.DataChannelStateOpen {
++			continue
++		}
++		// Pion never populates FramesDecoded (nothing in the stack decodes),
++		// so the honest progression signal is received video packets — the
++		// report exists to prove the consumer consumes, and packet counts do.
++		var received uint32
++		for _, entry := range gen.pc.GetStats() {
++			inbound, ok := entry.(webrtc.InboundRTPStreamStats)
++			if !ok || inbound.Kind != kindVideo {
++				continue
++			}
++			received += inbound.PacketsReceived
++		}
++		frame := encodePerfStatReport(gen.nextSeq(), received, received)
++		if err := gen.command.Send(frame); err != nil {
++			logger.Debugf("vkcalls: perf stat: %v", err)
++		}
++	}
++}
++
++// subscribeAll sends the update-display-layout producer command for every
++// registry stream. The SFU forwards exactly what the layout lists; without
++// it nothing flows (spike hybrid-03…11).
++func (gen *generation) subscribeAll() {
++	gen.registryMu.Lock()
++	entries := layoutEntries(gen.registry, gen.participantList())
++	gen.commandSeq++
++	sequence := gen.commandSeq % commandSeqMod
++	gen.registryMu.Unlock()
++	if len(entries) == 0 {
++		return
++	}
++	frame, err := EncodeLayout(sequence, entries)
++	if err != nil {
++		logger.Debugf("vkcalls: layout encode: %v", err)
++		return
++	}
++	if gen.command == nil || gen.command.ReadyState() != webrtc.DataChannelStateOpen {
++		return
++	}
++	if err := gen.command.Send(frame); err != nil {
++		logger.Debugf("vkcalls: layout send: %v", err)
++		return
++	}
++	logger.Debugf("vkcalls: layout %d sent for %d streams", sequence, len(entries))
++}
++
++// noteParticipant records another participant and says whether it is new.
++func (gen *generation) noteParticipant(id string) bool {
++	gen.registryMu.Lock()
++	defer gen.registryMu.Unlock()
++	if gen.participants[id] {
++		return false
++	}
++	if gen.participants == nil {
++		gen.participants = map[string]bool{}
++	}
++	gen.participants[id] = true
++	return true
++}
++
++// participantList is the participants noted so far; the caller holds
++// registryMu.
++func (gen *generation) participantList() []string {
++	out := make([]string, 0, len(gen.participants))
++	for id := range gen.participants {
++		out = append(out, id)
++	}
++	return out
++}
++
++// reconnectAttempt asks the session's supervisor for a rejoin on behalf of
++// one connection attempt. A failure raised by an attempt already torn down
++// says nothing about the session - Close, a superseding attempt or a giving-up
++// Connect did it deliberately - so it asks nothing. The supervisor coalesces
++// repeats and consults the caller's own policy (SetShouldReconnect).
++func (s *Session) reconnectAttempt(gen *generation) {
++	if s.closed.Load() || gen.isDone() {
++		return
++	}
++	s.Request(s.closed.Load(), s.reconnecting.Load())
++}
++
++func (gen *generation) isDone() bool {
++	select {
++	case <-gen.done:
++		return true
++	default:
++		return false
++	}
++}
++
++func (gen *generation) stop() {
++	if gen.done == nil {
++		return
++	}
++	gen.doneOnce.Do(func() { close(gen.done) })
++	if gen.cancel != nil {
++		gen.cancel()
++	}
++}
++
++func (gen *generation) teardown() {
++	gen.teardownOnce.Do(func() {
++		gen.ownerMu.Lock()
++		gen.stop()
++		pc, signal := gen.pc, gen.signal
++		gen.ownerMu.Unlock()
++		if signal != nil {
++			signal.close()
++		}
++		if pc != nil {
++			_ = pc.Close()
++		}
++	})
++}
++
++// Reconnect asks the session to rejoin the room. Upper layers call it when a
++// liveness probe declares the path dead before the engine has noticed; the
++// supervisor serializes it with the failure-driven rejoins.
++func (s *Session) Reconnect(reason string) {
++	if s.closed.Load() {
++		return
++	}
++	logger.Debugf("vkcalls: reconnect requested: %s", reason)
++	s.Request(s.closed.Load(), s.reconnecting.Load())
++}
++
++// reconnect tears the current attempt down and joins again. The old attempt
++// goes whole - signaling and the bundled peer connection - so the SFU never
++// carries two guests of ours; then the provider's fresh credentials, then a
++// join from scratch (spec 7.3: state never crosses generations).
++func (s *Session) reconnect(ctx context.Context) error {
++	if s.closed.Load() || !s.owner.begin() {
++		return ErrSessionClosed
++	}
++	defer s.owner.wg.Done()
++	s.reconnecting.Store(true)
++	defer s.reconnecting.Store(false)
++	refreshCtx, cancel := context.WithCancel(ctx)
++	stop := context.AfterFunc(s.owner.ctx, cancel)
++	defer func() { stop(); cancel() }()
++
++	s.mu.Lock()
++	gen := s.gen
++	s.gen = nil
++	s.mu.Unlock()
++	if gen != nil {
++		s.owner.release(gen)
++	}
++	if s.cfg.Refresh != nil {
++		creds, err := s.cfg.Refresh(refreshCtx)
++		if err != nil {
++			return fmt.Errorf("refresh credentials: %w", err)
++		}
++		s.mu.Lock()
++		s.endpoint = creds.URL
++		s.peerID = creds.Extra["peer_id_hint"]
++		s.iceJSON = creds.Extra["ice_servers"]
++		s.mu.Unlock()
++	}
++	if err := s.Connect(ctx); err != nil {
++		return err
++	}
++	// The transport re-handshakes the tunnel over the rebuilt carrier when
++	// it hears this, the shared contract's successful-reconnect notice.
++	s.NotifyReconnect()
++	return nil
++}
++
++// Encodings (EXPERIMENT) lists the publish sender's encodings.
++func (s *Session) Encodings() []webrtc.RTPEncodingParameters {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return append([]webrtc.RTPEncodingParameters(nil), s.encodings...)
++}
++
++// Send is unsupported: the SFU bridges only its known service channels, so
++// payload rides the video transport.
++func (s *Session) Send([]byte) error { return ErrSendUnsupported }
++
++// CanSend reports whether the bundled peer connection is connected.
++func (s *Session) CanSend() bool {
++	s.mu.Lock()
++	gen := s.gen
++	s.mu.Unlock()
++	if gen == nil || gen.pc == nil {
++		return false
++	}
++	return gen.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
++}
++
++// SubscriberCanSend mirrors CanSend: one bundled peer connection.
++func (s *Session) SubscriberCanSend() bool { return s.CanSend() }
++
++// GetBufferedAmount reports the producer command channel's buffered amount.
++func (s *Session) GetBufferedAmount() uint64 {
++	s.mu.Lock()
++	gen := s.gen
++	s.mu.Unlock()
++	if gen == nil || gen.command == nil {
++		return 0
++	}
++	return gen.command.BufferedAmount()
++}
++
++// WatchConnection services the session's reconnect requests until ctx ends
++// or the session closes.
++func (s *Session) WatchConnection(ctx context.Context) {
++	s.Watch(ctx, s.closeCh)
++}
++
++// end reports the session's terminal verdict once, through the shared
++// Reconnector's callback slot.
++func (s *Session) end(reason string) {
++	s.endOnce.Do(func() { s.SignalEnded(reason) })
++}
++
++// signalEnded ends the session for good: the verdict is about the room, so
++// no rejoin is asked for, and everything waiting on the session's done
++// channel - the reconnect supervisor included - stops with it.
++func (s *Session) signalEnded(reason string) {
++	s.end(reason)
++	s.closed.Store(true)
++	s.closeOnce.Do(func() { close(s.closeCh) })
++}
++
++// Close leaves the conversation and frees the peer connection. A closed
++// session refuses every later reconnect request and stops the supervisor.
++func (s *Session) Close() error {
++	s.closed.Store(true)
++	s.closeOnce.Do(func() { close(s.closeCh) })
++	s.owner.retire()
++	s.mu.Lock()
++	s.gen = nil
++	s.mu.Unlock()
++	return nil
++}
++
++// drainRTCP reads a sender's RTCP until the sender closes, so the RTCP
++// reaches the interceptors.
++func drainRTCP(sender *webrtc.RTPSender) {
++	buf := make([]byte, 1500)
++	for {
++		if _, _, err := sender.Read(buf); err != nil {
++			return
++		}
++	}
++}
++
++// streamKind is a registry key with its participant id replaced by a tag.
++func streamKind(key string) string {
++	head, suffix, _ := strings.Cut(key, ":")
++	prefix := strings.TrimRight(head, "0123456789")
++	tag := idTag(strings.TrimPrefix(head, prefix))
++	if suffix == "" {
++		return prefix + "<" + tag + ">"
++	}
++	return prefix + "<" + tag + ">:" + suffix
++}
++
++// idTag tells participant ids apart in a debug log without printing them.
++func idTag(id string) string {
++	sum := sha256.Sum256([]byte(id))
++	return hex.EncodeToString(sum[:2])
++}
++
++// iceServersOf decodes the provider's ice_servers JSON document; an empty or
++// invalid document yields an empty list — the SFU's own candidates arrive in
++// the offer.
++func iceServersOf(raw string) []webrtc.ICEServer {
++	type serverJSON struct {
++		URLs       []string `json:"urls"`
++		Username   string   `json:"username"`
++		Credential string   `json:"credential"`
++	}
++	var servers []serverJSON
++	if err := json.Unmarshal([]byte(raw), &servers); err != nil {
++		return nil
++	}
++	out := make([]webrtc.ICEServer, 0, len(servers))
++	for _, s := range servers {
++		if len(s.URLs) == 0 {
++			continue
++		}
++		ice := webrtc.ICEServer{URLs: s.URLs, Username: s.Username, Credential: s.Credential}
++		out = append(out, ice)
++	}
++	return out
++}
+diff --git a/internal/transport/common/red.go b/internal/transport/common/red.go
+new file mode 100644
+--- /dev/null
++++ b/internal/transport/common/red.go
+@@ -0,0 +1,48 @@
++package common
++
++import "errors"
++
++// RED (RFC 2198) unwrapping, shared by the video transports: a VK Calls SFU
++// forwards camera video as video/red even when the publisher sent no
++// redundancy, so a receiver must look through the wrapper for the codec the
++// primary block names.
++const (
++	redFollowBit      = 0x80 // F: another block header follows this one
++	redPayloadMask    = 0x7f // the block's payload type
++	redBlockHeader    = 4    // bytes of a redundant block's header
++	redLengthHighByte = 2    // header byte holding the length's top two bits
++	redLengthLowByte  = 3    // header byte holding the length's low eight bits
++	redLengthHighMask = 0x03
++)
++
++// ErrREDHeader is returned for a RED payload whose block headers do not fit it.
++var ErrREDHeader = errors.New("common: malformed RED header")
++
++// REDPrimary returns the payload type and data of a RED payload's primary
++// block. Block headers come first — four bytes while the F bit is set, one
++// byte for the primary — then every redundant block's data in order, then
++// the primary's.
++func REDPrimary(payload []byte) (uint8, []byte, error) {
++	offset, skip := 0, 0
++	for {
++		if offset >= len(payload) {
++			return 0, nil, ErrREDHeader
++		}
++		if payload[offset]&redFollowBit == 0 {
++			offset++
++			break
++		}
++		if offset+redBlockHeader > len(payload) {
++			return 0, nil, ErrREDHeader
++		}
++		high := int(payload[offset+redLengthHighByte] & redLengthHighMask)
++		skip += high<<8 | int(payload[offset+redLengthLowByte])
++		offset += redBlockHeader
++	}
++	primaryType := payload[offset-1] & redPayloadMask
++	start := offset + skip
++	if start > len(payload) {
++		return 0, nil, ErrREDHeader
++	}
++	return primaryType, payload[start:], nil
++}
+diff --git a/internal/transport/vp8channel/managed_red_test.go b/internal/transport/vp8channel/managed_red_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/transport/vp8channel/managed_red_test.go
+@@ -0,0 +1,88 @@
++package vp8channel
++
++import (
++	"bytes"
++	"github.com/pion/rtp"
++	"testing"
++)
++
++func TestManagedVKREDPrimaryReachesTheExistingVP8Assembler(t *testing.T) {
++	payload := []byte{0x10, 0x01, 0x02, 0x03}
++	for _, mime := range []string{"video/VP8", "video/red"} {
++		raw := append([]byte(nil), payload...)
++		if mime == "video/red" {
++			raw = append([]byte{100}, raw...)
++		}
++		pkt := &rtp.Packet{Header: rtp.Header{PayloadType: 116, SequenceNumber: 7, Timestamp: 9, Marker: true}, Payload: raw}
++		if err := unwrapVP8CarrierPacket(mime, pkt, map[uint8]string{100: "video/VP8"}); err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(pkt.Payload, payload) || pkt.SequenceNumber != 7 || pkt.Timestamp != 9 || !pkt.Marker {
++			t.Fatal("RED adapter changed framing or lost the primary payload")
++		}
++		if mime == "video/red" && pkt.PayloadType != 100 {
++			t.Fatal("primary codec payload type not retained")
++		}
++	}
++}
++
++func TestManagedMalformedOrUnknownCarriersNeverEnterVP8(t *testing.T) {
++	for _, tc := range []struct {
++		mime    string
++		payload []byte
++	}{
++		{"video/red", nil}, {"video/red", []byte{0x80}}, {"video/red", []byte{0x80, 0, 3, 0, 100}},
++		{"video/VP9", []byte{1, 2, 3}}, {"audio/red", []byte{100, 1, 2, 3}},
++	} {
++		pkt := &rtp.Packet{Payload: append([]byte(nil), tc.payload...)}
++		before := append([]byte(nil), pkt.Payload...)
++		if err := unwrapVP8CarrierPacket(tc.mime, pkt, map[uint8]string{100: "video/VP8"}); err == nil {
++			t.Fatal("unsupported carrier accepted")
++		}
++		if !bytes.Equal(before, pkt.Payload) {
++			t.Fatal("rejected packet was partially adopted")
++		}
++	}
++}
++
++func TestManagedUnnegotiatedREDPrimaryIsNotVP8(t *testing.T) {
++	// PT117 could be ULPFEC or VP9 despite a valid RED envelope. Until the
++	// receiver establishes a VP8 mapping, none may enter the assembler.
++	pkt := &rtp.Packet{Payload: []byte{117, 0x10, 1, 2, 3}}
++	if err := unwrapVP8CarrierPacket("video/red", pkt, map[uint8]string{100: "video/VP8", 117: "video/ulpfec"}); err == nil {
++		t.Fatal("unnegotiated RED primary was interpreted as VP8")
++	}
++}
++
++func TestManagedMixedREDUsesRealReorderAndAssembler(t *testing.T) {
++	codecs := map[uint8]string{100: "video/VP8", 117: "video/ulpfec", 118: "video/VP9"}
++	frame := bytes.Repeat([]byte{0x42}, epochHdrLen+8)
++	for _, bad := range []uint8{117, 118, 119} {
++		var state vp8FrameState
++		reorder := newReorderBuffer()
++		var got [][]byte
++		deliver := func(pkt *rtp.Packet) {
++			if full := state.processCarrierPacket("video/red", pkt, codecs); full != nil {
++				got = append(got, append([]byte(nil), full...))
++			}
++		}
++		start := &rtp.Packet{Header: rtp.Header{SequenceNumber: 10}, Payload: append([]byte{100, 0x10}, frame[:len(frame)/2]...)}
++		middle := &rtp.Packet{Header: rtp.Header{SequenceNumber: 11}, Payload: []byte{bad, 0x10, 0x66, 0x66}}
++		end := &rtp.Packet{Header: rtp.Header{SequenceNumber: 12, Marker: true}, Payload: append([]byte{100, 0x00}, frame[len(frame)/2:]...)}
++		reorder.push(start, deliver)
++		reorder.push(end, deliver)
++		reorder.push(middle, deliver)
++		if bad == 117 {
++			if len(got) != 1 || !bytes.Equal(got[0], frame) {
++				t.Fatal("negotiated FEC damaged a valid fragmented VP8 frame")
++			}
++		} else if len(got) != 0 {
++			t.Fatal("unknown/different codec contaminated a VP8 frame")
++		}
++		// A rejected frame cannot poison the next complete VP8 frame.
++		reorder.push(&rtp.Packet{Header: rtp.Header{SequenceNumber: 13, Marker: true}, Payload: append([]byte{100, 0x10}, frame...)}, deliver)
++		if !bytes.Equal(got[len(got)-1], frame) {
++			t.Fatal("valid frame did not recover after rejected primary")
++		}
++	}
++}
+diff --git a/internal/transport/vp8channel/rtp_reader.go b/internal/transport/vp8channel/rtp_reader.go
+--- a/internal/transport/vp8channel/rtp_reader.go
++++ b/internal/transport/vp8channel/rtp_reader.go
+@@ -1,6 +1,8 @@
+ package vp8channel
+ 
+ import (
++	"errors"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/pion/rtp"
+@@ -8,6 +10,7 @@
+ 	"github.com/pion/webrtc/v4"
+ 
+ 	"github.com/openlibrecommunity/olcrtc/internal/logger"
++	"github.com/openlibrecommunity/olcrtc/internal/transport/common"
+ )
+ 
+ // reorderWindow bounds how many out-of-order RTP packets the reorder buffer
+@@ -230,8 +233,8 @@
+ 	return nil
+ }
+ 
+-func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+-	if track.Codec().MimeType != webrtc.MimeTypeVP8 {
++func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
++	if !isVP8CarrierCodec(track.Codec().MimeType) {
+ 		go p.drainTrack(track)
+ 		return
+ 	}
+@@ -239,7 +242,62 @@
+ 	// We don't reset KCP here. Peer restarts are detected by the epoch
+ 	// header on incoming frames, which works even when the SFU keeps
+ 	// forwarding the same track across our restarts.
+-	go p.readVP8Track(track)
++	codecs := map[uint8]string{}
++	if receiver != nil {
++		for _, codec := range receiver.GetParameters().Codecs {
++			codecs[uint8(codec.PayloadType)] = codec.MimeType
++		}
++	}
++	go p.readVP8Track(track, codecs)
++}
++
++// VK's SFU wraps the existing VP8 packets in RFC2198 RED. This only removes
++// that wrapper; it does not add VP9, change KCP/crypto or reinterpret audio.
++func isVP8CarrierCodec(mime string) bool {
++	return strings.EqualFold(mime, webrtc.MimeTypeVP8) || strings.EqualFold(mime, "video/red")
++}
++
++var errCarrierCodec = errors.New("vp8channel: unsupported carrier codec")
++var errCarrierFEC = errors.New("vp8channel: negotiated FEC packet")
++
++func unwrapVP8CarrierPacket(mime string, pkt *rtp.Packet, codecs map[uint8]string) error {
++	if strings.EqualFold(mime, webrtc.MimeTypeVP8) {
++		return nil
++	}
++	if !strings.EqualFold(mime, "video/red") {
++		return errCarrierCodec
++	}
++	typ, payload, err := common.REDPrimary(pkt.Payload)
++	if err != nil {
++		return err
++	}
++	inner := codecs[typ]
++	if strings.EqualFold(inner, "video/ulpfec") || strings.EqualFold(inner, "video/flexfec-03") {
++		return errCarrierFEC
++	}
++	if !strings.EqualFold(inner, webrtc.MimeTypeVP8) {
++		return errCarrierCodec
++	}
++	pkt.PayloadType = typ
++	pkt.Payload = payload
++	return nil
++}
++
++func (s *vp8FrameState) processCarrierPacket(mime string, pkt *rtp.Packet, codecs map[uint8]string) []byte {
++	if err := unwrapVP8CarrierPacket(mime, pkt, codecs); err != nil {
++		// Reordering precedes demultiplexing. A known FEC packet consumes an
++		// RTP sequence number, not VP8 bytes; malformed/unknown media invalidates
++		// a partial frame. Genuine missing sequence numbers still drop it.
++		gap := s.haveLastSeq && pkt.SequenceNumber != s.lastSeq+1
++		if gap || !errors.Is(err, errCarrierFEC) {
++			s.frameValid = false
++			s.frameBuf = s.frameBuf[:0]
++		}
++		s.lastSeq = pkt.SequenceNumber
++		s.haveLastSeq = true
++		return nil
++	}
++	return s.processRTPPacket(pkt)
+ }
+ 
+ func (p *streamTransport) drainTrack(track *webrtc.TrackRemote) {
+@@ -251,7 +309,7 @@
+ 	}
+ }
+ 
+-func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
++func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote, codecs map[uint8]string) {
+ 	var state vp8FrameState
+ 	reorder := newReorderBuffer()
+ 	buf := make([]byte, rtpBufSize)
+@@ -274,7 +332,7 @@
+ 		// Restore sequence order before assembly so SFU reordering is not
+ 		// mistaken for loss.
+ 		reorder.push(pkt, func(ordered *rtp.Packet) {
+-			frame := state.processRTPPacket(ordered)
++			frame := state.processCarrierPacket(track.Codec().MimeType, ordered, codecs)
+ 			if frame == nil {
+ 				return
+ 			}
+diff --git a/mobile/config.go b/mobile/config.go
+--- a/mobile/config.go
++++ b/mobile/config.go
+@@ -657,7 +657,7 @@
+ // here cannot be selected at all.
+ func supportedProvider(provider string) bool {
+ 	switch provider {
+-	case "jitsi", "telemost", "wbstream", "salutejazz", providerNone:
++	case "jitsi", "telemost", "wbstream", "salutejazz", "vkcalls", providerNone:
+ 		return true
+ 	default:
+ 		return false
+diff --git a/mobile/vkcalls_managed_test.go b/mobile/vkcalls_managed_test.go
+new file mode 100644
+--- /dev/null
++++ b/mobile/vkcalls_managed_test.go
+@@ -0,0 +1,13 @@
++package mobile
++
++import "testing"
++
++func TestManagedVKProviderIsSelectableWithoutChangingLeaseDefaults(t *testing.T) {
++	r := New()
++	if err := r.SetProvider("vkcalls"); err != nil {
++		t.Fatalf("ready VK provider rejected before managed startup: %v", err)
++	}
++	if err := r.SetProvider("vkcalls-other"); err == nil {
++		t.Fatal("unknown provider was accepted")
++	}
++}

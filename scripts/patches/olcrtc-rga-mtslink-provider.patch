@@ -1,0 +1,3531 @@
+diff --git a/internal/auth/mtslink/api.go b/internal/auth/mtslink/api.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/mtslink/api.go
+@@ -0,0 +1,324 @@
++// Package mtslink is the MTS Link auth provider: the guest's way into an
++// endless meeting, measured against the live service on 2026-10-11.
++//
++// The service is the former webinar.ru. Its gateway is gw.mts-link.ru/api,
++// and a guest needs no account: a login with a nickname is accepted without
++// captcha or moderation and sets the cookies every later call presents. The
++// rooms the platform makes are endless meetings («постоянные встречи»), which
++// a guest enters with no organizer inside.
++//
++// What the web client does between a link and the media, and so what Issue
++// does: look the event's session up, log the guest in, read the session's
++// configuration for the SFU it lives on, make a conference - the record of
++// one participant's published media, whose private key is the publish ticket
++// - and take a join token. The join itself, one SDP exchange with the SFU, is
++// the engine's (internal/engine/mtslink).
++package mtslink
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++)
++
++const (
++	// defaultGateway is the API the web client talks to.
++	defaultGateway = "https://gw.mts-link.ru"
++	// webOrigin is the page the web client's calls come from.
++	webOrigin = "https://my.mts-link.ru"
++	userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
++	// replyLimit bounds a gateway reply; the largest the flow reads is the
++	// event's public record, a few kilobytes.
++	replyLimit = 1 << 20
++	formType   = "application/x-www-form-urlencoded"
++	// yes and no are how the service's forms and queries spell a flag.
++	yes = "true"
++	no  = "false"
++)
++
++var (
++	// ErrRoomRef is a room reference that is not the event join link.
++	ErrRoomRef = errors.New("mtslink: room must be the event join link (…/j/{ownerId}/{eventId})")
++	// ErrRoomGone is the service no longer having the room: 404, or the 406
++	// "Not Acceptable" it answers for an event or a session it does not know.
++	ErrRoomGone = errors.New("mtslink: the service has no such room")
++	// ErrNoSession is an event that has no session to join.
++	ErrNoSession = errors.New("mtslink: the event has no session")
++	// ErrNotAccepted is the service turning the guest away.
++	ErrNotAccepted = errors.New("mtslink: the service did not accept the guest")
++	// ErrBadStatus is any other status a gateway call was not measured to
++	// answer. The call and the number ride along; the body never does.
++	ErrBadStatus = errors.New("mtslink: unexpected status")
++	// ErrIncompleteReply is a reply that does not name what the flow needs
++	// from it.
++	ErrIncompleteReply = errors.New("mtslink: incomplete reply")
++	// ErrConferenceID is a conference id that is not a number.
++	ErrConferenceID = errors.New("mtslink: conference id is not a number")
++)
++
++// parseEventLink reads the event, and the session when the link names one,
++// out of a room reference: the join link the platform stores,
++// https://my.mts-link.ru/j/{ownerId}/{eventId}, or the same with
++// /session/{sessionId} behind it.
++func parseEventLink(room string) (string, string, error) {
++	u, err := url.Parse(strings.TrimSpace(room))
++	if err != nil || u.Scheme == "" || u.Host == "" {
++		return "", "", ErrRoomRef
++	}
++	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
++	at := -1
++	for i, part := range parts {
++		if part == "j" {
++			at = i
++			break
++		}
++	}
++	if at < 0 || len(parts) < at+3 || !isID(parts[at+1]) || !isID(parts[at+2]) {
++		return "", "", ErrRoomRef
++	}
++	event, session := parts[at+2], ""
++	if len(parts) >= at+5 && parts[at+3] == "session" && isID(parts[at+4]) {
++		session = parts[at+4]
++	}
++	return event, session, nil
++}
++
++// isID says whether s is a service id: digits, and not too many of them.
++func isID(s string) bool {
++	if s == "" || len(s) > 20 {
++		return false
++	}
++	for _, c := range s {
++		if c < '0' || c > '9' {
++			return false
++		}
++	}
++	return true
++}
++
++// isHost says whether s can be the host of a URL and nothing more: the SFU's
++// name comes out of a reply and goes into one.
++func isHost(s string) bool {
++	if s == "" || len(s) > 253 {
++		return false
++	}
++	for _, c := range s {
++		switch {
++		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-', c == ':':
++		default:
++			return false
++		}
++	}
++	return true
++}
++
++// guest is the session a login made: the cookies the gateway set, as the
++// Cookie header that presents them. They are a live credential and reach no
++// log and no error.
++type guest struct {
++	cookies string
++	userID  string
++}
++
++// call is one gateway request: what it is called in an error, how it is
++// made, and which statuses are an answer.
++type call struct {
++	name   string
++	method string
++	url    string
++	form   url.Values
++	want   int
++}
++
++// do makes the call and returns the reply's body and Set-Cookie pairs. A
++// status that is not the one wanted is ErrRoomGone for a room the service
++// does not know and ErrBadStatus for the rest.
++func (c call) do(ctx context.Context, client *http.Client, cookies string) ([]byte, []string, error) {
++	var body io.Reader = http.NoBody
++	if c.form != nil {
++		body = strings.NewReader(c.form.Encode())
++	}
++	req, err := http.NewRequestWithContext(ctx, c.method, c.url, body)
++	if err != nil {
++		return nil, nil, fmt.Errorf("mtslink: %s request: %w", c.name, err)
++	}
++	req.Header.Set("User-Agent", userAgent)
++	req.Header.Set("Origin", webOrigin)
++	req.Header.Set("Referer", webOrigin+"/")
++	if c.form != nil {
++		req.Header.Set("Content-Type", formType)
++	}
++	if cookies != "" {
++		req.Header.Set("Cookie", cookies)
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		return nil, nil, fmt.Errorf("mtslink: %s: %w", c.name, err)
++	}
++	defer func() { _ = resp.Body.Close() }()
++	raw, _ := io.ReadAll(io.LimitReader(resp.Body, replyLimit))
++
++	switch resp.StatusCode {
++	case c.want:
++	case http.StatusNotFound, http.StatusNotAcceptable, http.StatusGone:
++		return nil, nil, fmt.Errorf("%s: %w", c.name, ErrRoomGone)
++	default:
++		return nil, nil, fmt.Errorf("%s: %w %d", c.name, ErrBadStatus, resp.StatusCode)
++	}
++
++	var set []string
++	for _, cookie := range resp.Cookies() {
++		if cookie.Name != "" && cookie.Value != "" {
++			set = append(set, cookie.Name+"="+cookie.Value)
++		}
++	}
++	return raw, set, nil
++}
++
++// eventSession asks the event's public record for its session. An endless
++// meeting has one, started when the room was made.
++func eventSession(ctx context.Context, client *http.Client, gateway, event string) (string, error) {
++	raw, _, err := call{
++		name: "event", method: http.MethodGet, url: gateway + "/api/event/" + event, want: http.StatusOK,
++	}.do(ctx, client, "")
++	if err != nil {
++		return "", err
++	}
++	var reply struct {
++		EventSessions []struct {
++			ID int64 `json:"id"`
++		} `json:"eventSessions"` //nolint:tagliatelle // the service's wire is camelCase
++	}
++	if json.Unmarshal(raw, &reply) != nil || len(reply.EventSessions) == 0 || reply.EventSessions[0].ID <= 0 {
++		return "", ErrNoSession
++	}
++	return strconv.FormatInt(reply.EventSessions[0].ID, 10), nil
++}
++
++// guestLogin registers a guest on the session. The reply's own `user` carries
++// no id - the guest's user sits under `participation` - and the cookies are
++// every one the reply set: the web client presents them all.
++func guestLogin(ctx context.Context, client *http.Client, gateway, session, nickname string) (guest, error) {
++	raw, cookies, err := call{
++		name: "guestlogin", method: http.MethodPost,
++		url:  gateway + "/api/eventsessions/" + session + "/guestlogin",
++		form: url.Values{"nickname": {nickname}, "name": {""}, "secondName": {""}, "phone": {""}},
++		want: http.StatusOK,
++	}.do(ctx, client, "")
++	if err != nil {
++		return guest{}, err
++	}
++	var reply struct {
++		IsAccepted    bool `json:"isAccepted"` //nolint:tagliatelle // the service's wire is camelCase
++		Participation struct {
++			User struct {
++				ID int64 `json:"id"`
++			} `json:"user"`
++		} `json:"participation"`
++	}
++	if json.Unmarshal(raw, &reply) != nil {
++		return guest{}, fmt.Errorf("guestlogin: %w", ErrIncompleteReply)
++	}
++	if !reply.IsAccepted {
++		return guest{}, ErrNotAccepted
++	}
++	if reply.Participation.User.ID <= 0 || len(cookies) == 0 {
++		return guest{}, fmt.Errorf("guestlogin: %w", ErrIncompleteReply)
++	}
++	return guest{
++		cookies: strings.Join(cookies, "; "),
++		userID:  strconv.FormatInt(reply.Participation.User.ID, 10),
++	}, nil
++}
++
++// mediaServer reads the SFU the session lives on out of its configuration.
++func mediaServer(ctx context.Context, client *http.Client, gateway, session string, g guest) (string, error) {
++	raw, _, err := call{
++		name: "configuration", method: http.MethodGet,
++		url:  gateway + "/api/eventsession/" + session + "/configuration",
++		want: http.StatusOK,
++	}.do(ctx, client, g.cookies)
++	if err != nil {
++		return "", err
++	}
++	var reply struct {
++		RTCServer string `json:"rtcServer"` //nolint:tagliatelle // the service's wire is camelCase
++	}
++	if json.Unmarshal(raw, &reply) != nil || !isHost(reply.RTCServer) {
++		return "", fmt.Errorf("configuration: %w", ErrIncompleteReply)
++	}
++	return reply.RTCServer, nil
++}
++
++// conference is the record of one participant's published media.
++type conference struct {
++	id string
++	// publishToken is the record's private key: what lets its owner publish.
++	publishToken string
++}
++
++// newConference makes the guest's conference: a camera and no microphone,
++// which is all the engine publishes.
++func newConference(ctx context.Context, client *http.Client, gateway, session string, g guest) (conference, error) {
++	raw, _, err := call{
++		name: "conferences", method: http.MethodPost,
++		url:  gateway + "/api/eventsessions/" + session + "/conferences",
++		form: url.Values{"hasAudio": {no}, "hasVideo": {yes}},
++		want: http.StatusCreated,
++	}.do(ctx, client, g.cookies)
++	if err != nil {
++		return conference{}, err
++	}
++	var reply struct {
++		ID         int64  `json:"id"`
++		PrivateKey string `json:"privateKey"` //nolint:tagliatelle // the service's wire is camelCase
++	}
++	if json.Unmarshal(raw, &reply) != nil || reply.ID <= 0 || reply.PrivateKey == "" {
++		return conference{}, fmt.Errorf("conferences: %w", ErrIncompleteReply)
++	}
++	return conference{id: strconv.FormatInt(reply.ID, 10), publishToken: reply.PrivateKey}, nil
++}
++
++// joinToken is the ticket the room join presents.
++func joinToken(ctx context.Context, client *http.Client, gateway, session string, g guest) (string, error) {
++	raw, _, err := call{
++		name: "join-token", method: http.MethodGet,
++		url:  gateway + "/api/eventsessions/" + session + "/join-token",
++		want: http.StatusOK,
++	}.do(ctx, client, g.cookies)
++	if err != nil {
++		return "", err
++	}
++	var reply struct {
++		Data struct {
++			JoinToken string `json:"joinToken"` //nolint:tagliatelle // the service's wire is camelCase
++		} `json:"data"`
++	}
++	if json.Unmarshal(raw, &reply) != nil || reply.Data.JoinToken == "" {
++		return "", fmt.Errorf("join-token: %w", ErrIncompleteReply)
++	}
++	return reply.Data.JoinToken, nil
++}
++
++// leave takes a conference back: DELETE /api/conferences/{id} with the cookies
++// of the guest that made it (204, measured). The service drops the record by
++// itself once its publisher has been on the SFU and left; one whose join never
++// reached the SFU stays in the room's list until its guest takes it back. The
++// engine does the same after a join the SFU refused (internal/engine/mtslink).
++func leave(ctx context.Context, client *http.Client, gateway, conferenceID, cookies string) error {
++	if !isID(conferenceID) {
++		return ErrConferenceID
++	}
++	_, _, err := call{
++		name: "leave", method: http.MethodDelete,
++		url:  gateway + "/api/conferences/" + conferenceID,
++		want: http.StatusNoContent,
++	}.do(ctx, client, cookies)
++	return err
++}
+diff --git a/internal/auth/mtslink/mtslink.go b/internal/auth/mtslink/mtslink.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/mtslink/mtslink.go
+@@ -0,0 +1,136 @@
++package mtslink
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"net/http"
++	"net/url"
++
++	"github.com/openlibrecommunity/olcrtc/internal/auth"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++	"github.com/openlibrecommunity/olcrtc/internal/roomhint"
++)
++
++// defaultNickname is what a guest is called when the caller names none; the
++// service refuses an empty one (400 ERROR_BAD_REQUEST).
++const defaultNickname = "Р“РѕСЃС‚СЊ"
++
++// Provider produces mtslink engine credentials for the MTS Link service.
++//
++// gateway overrides the API the provider talks to; empty means the measured
++// production one. Only tests set it.
++type Provider struct {
++	gateway string
++}
++
++// New returns an MTS Link auth provider against the production gateway.
++func New() Provider { return Provider{} }
++
++// Engine reports which engine consumes credentials from this auth provider.
++func (Provider) Engine() string { return "mtslink" }
++
++// DefaultServiceURL returns the MTS Link service URL.
++func (Provider) DefaultServiceURL() string { return webOrigin }
++
++func (Provider) newClient(cfg auth.Config) *http.Client {
++	resolver := cfg.Resolver
++	if resolver == nil {
++		resolver = protect.NewResolver(cfg.DNSServer)
++	}
++	return protect.NewHTTPClient(resolver)
++}
++
++// Issue walks a guest into the room and returns what the mtslink engine joins
++// with:
++//
++//	URL   - the SFU room join (the offer goes in, the answer comes out), with
++//	        everything that names the guest; the engine adds what describes
++//	        its offer.
++//	Token - the guest's cookies, for the gateway only: the SFU reads none.
++//	Extra - gateway, sessionId, userId and conferenceId, for the engine to
++//	        take its conference back with after a join that failed.
++//
++// cfg.RoomURL is the event join link the platform stores. Every call makes a
++// new guest: the cookies of one are of no use to the next process, and a
++// guest that is gone leaves nothing behind in the room.
++func (p Provider) Issue(ctx context.Context, cfg auth.Config) (auth.Credentials, error) {
++	room, ice := roomhint.Split(cfg.RoomURL)
++	// RGA pins explicit ice=tcp in both endpoints of its new MTS locator.
++	event, session, err := parseEventLink(room)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	gateway := p.gateway
++	if gateway == "" {
++		gateway = defaultGateway
++	}
++	client := p.newClient(cfg)
++	defer client.CloseIdleConnections()
++
++	if session == "" {
++		if session, err = eventSession(ctx, client, gateway, event); err != nil {
++			return auth.Credentials{}, err
++		}
++	}
++	nickname := cfg.Name
++	if nickname == "" {
++		nickname = defaultNickname
++	}
++	g, err := guestLogin(ctx, client, gateway, session, nickname)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	server, err := mediaServer(ctx, client, gateway, session, g)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	conf, err := newConference(ctx, client, gateway, session, g)
++	if err != nil {
++		return auth.Credentials{}, err
++	}
++	token, err := joinToken(ctx, client, gateway, session, g)
++	if err != nil {
++		// The conference is made and nothing will join it: take it back
++		// rather than leave it in the room's list for good.
++		_ = leave(ctx, client, gateway, conf.id, g.cookies)
++		return auth.Credentials{}, err
++	}
++
++	extra := map[string]string{
++		"gateway": gateway, "sessionId": session, "userId": g.userID, "conferenceId": conf.id,
++	}
++	if ice != roomhint.ICEDefault {
++		// ai-generated: the link's ICE hint, for the engine (roomhint).
++		extra["ice"] = ice
++	}
++	return auth.Credentials{
++		URL:   roomJoinURL(server, session, g.userID, nickname, token, conf.publishToken),
++		Token: g.cookies,
++		Extra: extra,
++	}, nil
++}
++
++// roomJoinURL is the SFU join the web client issues for a meeting, as far as
++// it names the guest (measured 2026-10-11):
++//
++//	POST https://{rtcServer}/rtc/room/{sessionId}/join
++//	     ?userId=&joinToken=&disableRecording=true&userName=&publishToken=&did=&pid=
++//
++// did and pid are the web client's device and page ids, sixteen hex digits
++// each, the second the first turned by one digit. What describes the offer -
++// twcc, originMid, preferredPublishCodec - is the engine's to add.
++func roomJoinURL(server, session, userID, nickname, joinToken, publishToken string) string {
++	var raw [8]byte
++	_, _ = rand.Read(raw[:])
++	did := hex.EncodeToString(raw[:])
++	q := url.Values{}
++	q.Set("userId", userID)
++	q.Set("joinToken", joinToken)
++	q.Set("disableRecording", yes)
++	q.Set("userName", nickname)
++	q.Set("publishToken", publishToken)
++	q.Set("did", did)
++	q.Set("pid", did[1:]+did[:1])
++	return "https://" + server + "/rtc/room/" + session + "/join?" + q.Encode()
++}
+diff --git a/internal/auth/mtslink/mtslink_test.go b/internal/auth/mtslink/mtslink_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/auth/mtslink/mtslink_test.go
+@@ -0,0 +1,391 @@
++package mtslink
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/openlibrecommunity/olcrtc/internal/auth"
++)
++
++const (
++	testEvent   = "20300400500"
++	testSession = "20300400600"
++	testOwner   = "100200300"
++	testLink    = "https://my.mts-link.ru/j/" + testOwner + "/" + testEvent
++)
++
++// The gateway's own answers, as it gave them on 2026-10-11 (ids kept, tokens
++// replaced). The tests below answer with these and nothing invented.
++const (
++	replyEvent = `{"id":20300400500,"access":1,"type":"meeting","status":"ACTIVE","isEndless":true,` +
++		`"eventSessions":[{"id":20300400600,"access":1,"type":"meeting","status":"START"}]}`
++	replyGuestLogin = `{"isAccepted":true,"participationId":1485424883,"user":{"sessionId":"529e1f7db49244b035d47e8c4eca75f4"},` +
++		`"participation":{"id":1485424883,"name":"","nickname":"cap-a","isOnline":false,"isAccepted":true,"role":"GUEST",` +
++		`"event":{"id":20300400500},"user":{"id":100200999,"type":"GUEST","isDeleted":false,"nickname":"cap-a"},` +
++		`"eventSession":{"id":20300400600},"registerStatus":"INVITED"}}`
++	replyConfiguration = `{"hlsServer":"events-delivery-files.webinar.ru","rtcServer":"sfu.mts-link.ru",` +
++		`"mediaServer":"live-sd.webinar.ru","rtcUrl":"\/\/sfu.mts-link.ru\/event\/20300400600\/rtc",` +
++		`"cometServer":"msg-edge-5.webinar.ru","rtcActiveSpeakerServer":"sfu.mts-link.ru"}`
++	replyConference = `{"id":395296501,"isDeleted":false,"createAt":"2026-10-11T15:46:04+03:00",` +
++		`"privateKey":"vcPRIVATE0000000000000000000000000","publicKey":"vcPUBLIC00000000000000000000000000",` +
++		`"userId":100200999,"user":{"id":100200999,"nickname":"cap-a"},"status":"PUBLISH","size":"SMALL",` +
++		`"hasStream":false,"hasVideo":true,"hasAudio":false,"typeMedia":"conference","participationId":1485424883}`
++	replyJoinToken    = `{"data":{"joinToken":"vcJOIN000000000000000000000000000"}}`
++	replyGone         = `{"error":{"code":406,"message":"Not Acceptable"}}`
++	replyNoToken      = `{"error":{"code":401,"message":"A Token was not found in the TokenStorage."}}`
++	replyAccessDenied = `{"error":{"code":403,"message":"Access denied"}}`
++)
++
++// gateway is the service behind one test server: it answers the measured
++// shapes, sets the guest cookies at the login, and expects them back on every
++// call that needs them. calls records what was asked, in order.
++type gateway struct {
++	t  *testing.T
++	mu sync.Mutex
++	// calls is "METHOD path" of every request, in order.
++	calls []string
++	// forms is the decoded body of every POST, by path.
++	forms map[string]url.Values
++	// answer overrides the reply of a path: status and body.
++	answer map[string]func(w http.ResponseWriter)
++	// rtcServer is what the configuration names; empty keeps the measured one.
++	rtcServer string
++}
++
++func newGateway(t *testing.T) (*gateway, *httptest.Server) {
++	t.Helper()
++	g := &gateway{t: t, forms: map[string]url.Values{}, answer: map[string]func(http.ResponseWriter){}}
++	srv := httptest.NewServer(g)
++	t.Cleanup(srv.Close)
++	return g, srv
++}
++
++func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
++	g.mu.Lock()
++	g.calls = append(g.calls, r.Method+" "+r.URL.Path)
++	if r.Method == http.MethodPost {
++		body, _ := io.ReadAll(r.Body)
++		form, _ := url.ParseQuery(string(body))
++		g.forms[r.URL.Path] = form
++	}
++	override := g.answer[r.URL.Path]
++	g.mu.Unlock()
++	if override != nil {
++		override(w)
++		return
++	}
++
++	guest := func() bool {
++		a, errA := r.Cookie("access")
++		s, errS := r.Cookie("sessionId")
++		return errA == nil && errS == nil && a.Value == "eyJguest.access" && s.Value == "529e1f7db49244b0"
++	}
++	switch r.Method + " " + r.URL.Path {
++	case "GET /api/event/" + testEvent:
++		_, _ = io.WriteString(w, replyEvent)
++	case "POST /api/eventsessions/" + testSession + "/guestlogin":
++		// As the service sets them: Secure, HttpOnly, SameSite=None.
++		for _, pair := range []string{
++			"access=eyJguest.access", "refresh=6074c7a91c56476840728cab1c1b42f5", "sessionId=529e1f7db49244b0",
++		} {
++			w.Header().Add("Set-Cookie", pair+"; Path=/; Domain=.mts-link.ru; Secure; HttpOnly; SameSite=None")
++		}
++		_, _ = io.WriteString(w, replyGuestLogin)
++	case "GET /api/eventsession/" + testSession + "/configuration":
++		if !guest() {
++			w.WriteHeader(http.StatusForbidden)
++			_, _ = io.WriteString(w, replyAccessDenied)
++			return
++		}
++		reply := replyConfiguration
++		if g.rtcServer != "" {
++			reply = strings.ReplaceAll(reply, `"rtcServer":"sfu.mts-link.ru"`, `"rtcServer":"`+g.rtcServer+`"`)
++		}
++		_, _ = io.WriteString(w, reply)
++	case "POST /api/eventsessions/" + testSession + "/conferences":
++		if !guest() {
++			w.WriteHeader(http.StatusUnauthorized)
++			_, _ = io.WriteString(w, replyNoToken)
++			return
++		}
++		w.WriteHeader(http.StatusCreated)
++		_, _ = io.WriteString(w, replyConference)
++	case "GET /api/eventsessions/" + testSession + "/join-token":
++		if !guest() {
++			w.WriteHeader(http.StatusUnauthorized)
++			_, _ = io.WriteString(w, replyNoToken)
++			return
++		}
++		_, _ = io.WriteString(w, replyJoinToken)
++	case "DELETE /api/conferences/395296501":
++		if !guest() {
++			w.WriteHeader(http.StatusUnauthorized)
++			_, _ = io.WriteString(w, replyNoToken)
++			return
++		}
++		w.WriteHeader(http.StatusNoContent)
++	default:
++		g.t.Errorf("the provider asked for %s %s, which the web client never does", r.Method, r.URL.Path)
++		w.WriteHeader(http.StatusNotAcceptable)
++		_, _ = io.WriteString(w, replyGone)
++	}
++}
++
++func (g *gateway) status(path string, code int, body string) {
++	g.answer[path] = func(w http.ResponseWriter) {
++		w.WriteHeader(code)
++		_, _ = io.WriteString(w, body)
++	}
++}
++
++func issue(t *testing.T, srv *httptest.Server, link, name string) (auth.Credentials, error) {
++	t.Helper()
++	return Provider{gateway: srv.URL}.Issue(context.Background(), auth.Config{RoomURL: link, Name: name})
++}
++
++func TestParseEventLink(t *testing.T) {
++	for _, tc := range []struct {
++		link, event, session string
++		ok                   bool
++	}{
++		{testLink, testEvent, "", true},
++		{testLink + "/session/" + testSession, testEvent, testSession, true},
++		{testLink + "/stream-new/" + testSession, testEvent, "", true},
++		{"  " + testLink + "\n", testEvent, "", true},
++		{"https://my.mts-link.ru/j/abc/" + testEvent, "", "", false},
++		{"https://my.mts-link.ru/j/" + testOwner, "", "", false},
++		{"not a url", "", "", false},
++		{"https://my.mts-link.ru/events", "", "", false},
++		{"", "", "", false},
++	} {
++		event, session, err := parseEventLink(tc.link)
++		if tc.ok && (err != nil || event != tc.event || session != tc.session) {
++			t.Errorf("parseEventLink(%q) = %q, %q, %v; want %q, %q", tc.link, event, session, err, tc.event, tc.session)
++		}
++		if !tc.ok && !errors.Is(err, ErrRoomRef) {
++			t.Errorf("parseEventLink(%q) error = %v, want %v", tc.link, err, ErrRoomRef)
++		}
++	}
++}
++
++// The whole guest flow, in the web client's order, with the web client's
++// bodies: the event names its session, the login mints the guest, the
++// configuration names the SFU, the conference is the publish ticket and the
++// join token is the door.
++func TestIssueWalksTheGuestFlowAndBuildsTheRoomJoin(t *testing.T) {
++	g, srv := newGateway(t)
++	creds, err := issue(t, srv, testLink, "Мария Ковалёва")
++	if err != nil {
++		t.Fatalf("Issue: %v", err)
++	}
++
++	wantCalls := []string{
++		"GET /api/event/" + testEvent,
++		"POST /api/eventsessions/" + testSession + "/guestlogin",
++		"GET /api/eventsession/" + testSession + "/configuration",
++		"POST /api/eventsessions/" + testSession + "/conferences",
++		"GET /api/eventsessions/" + testSession + "/join-token",
++	}
++	if strings.Join(g.calls, "\n") != strings.Join(wantCalls, "\n") {
++		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(g.calls, "\n"), strings.Join(wantCalls, "\n"))
++	}
++	if login := g.forms["/api/eventsessions/"+testSession+"/guestlogin"]; login.Get("nickname") != "Мария Ковалёва" {
++		t.Errorf("guestlogin form = %v, want the nickname", login)
++	}
++	conf := g.forms["/api/eventsessions/"+testSession+"/conferences"]
++	if conf.Get("hasVideo") != "true" || conf.Get("hasAudio") != "false" {
++		t.Errorf("conference form = %v, want a camera and no microphone", conf)
++	}
++
++	u, err := url.Parse(creds.URL)
++	if err != nil {
++		t.Fatalf("join URL %q: %v", creds.URL, err)
++	}
++	if u.Scheme != "https" || u.Host != "sfu.mts-link.ru" || u.Path != "/rtc/room/"+testSession+"/join" {
++		t.Errorf("join URL = %s://%s%s, want the configuration's SFU and the session's room", u.Scheme, u.Host, u.Path)
++	}
++	q := u.Query()
++	for key, want := range map[string]string{
++		"userId":           "100200999", // participation.user.id: the login reply's top-level user has no id
++		"joinToken":        "vcJOIN000000000000000000000000000",
++		"publishToken":     "vcPRIVATE0000000000000000000000000",
++		"userName":         "Мария Ковалёва",
++		"disableRecording": "true",
++	} {
++		if q.Get(key) != want {
++			t.Errorf("join URL %s = %q, want %q", key, q.Get(key), want)
++		}
++	}
++	if did, pid := q.Get("did"), q.Get("pid"); len(did) != 16 || len(pid) != 16 || did == pid {
++		t.Errorf("did = %q, pid = %q; want two 16-hex ids", did, pid)
++	}
++
++	if creds.Extra["sessionId"] != testSession || creds.Extra["userId"] != "100200999" ||
++		creds.Extra["conferenceId"] != "395296501" || creds.Extra["gateway"] != srv.URL {
++		t.Errorf("Extra = %v", creds.Extra)
++	}
++	// The cookies are for the gateway (the engine takes its conference back
++	// with them); every one the login set travels, not a pair picked by name.
++	for _, cookie := range []string{"access=eyJguest.access", "refresh=6074c7a91c56476840728cab1c1b42f5", "sessionId=529e1f7db49244b0"} {
++		if !strings.Contains(creds.Token, cookie) {
++			t.Errorf("Token lacks %q", strings.SplitN(cookie, "=", 2)[0])
++		}
++	}
++}
++
++func TestIssueTakesTheSessionALinkNames(t *testing.T) {
++	g, srv := newGateway(t)
++	if _, err := issue(t, srv, testLink+"/session/"+testSession, "a"); err != nil {
++		t.Fatalf("Issue: %v", err)
++	}
++	if g.calls[0] != "POST /api/eventsessions/"+testSession+"/guestlogin" {
++		t.Fatalf("first call = %s: a link that names its session needs no event lookup", g.calls[0])
++	}
++}
++
++func TestIssueJoinsUnderADefaultNameWhenNoneIsGiven(t *testing.T) {
++	g, srv := newGateway(t)
++	creds, err := issue(t, srv, testLink, "")
++	if err != nil {
++		t.Fatalf("Issue: %v", err)
++	}
++	nick := g.forms["/api/eventsessions/"+testSession+"/guestlogin"].Get("nickname")
++	if nick == "" {
++		t.Fatal("an empty nickname is refused by the service (400 ERROR_BAD_REQUEST)")
++	}
++	if u, _ := url.Parse(creds.URL); u.Query().Get("userName") != nick {
++		t.Fatal("the join names another user than the login")
++	}
++}
++
++// The SFU is whatever the configuration names: webinar rooms answered on
++// live-webrtc-ixcN-*.webinar.ru, meetings on sfu.mts-link.ru.
++func TestIssueJoinsTheSFUTheConfigurationNames(t *testing.T) {
++	g, srv := newGateway(t)
++	g.rtcServer = "live-webrtc-ixc1-13.webinar.ru"
++	creds, err := issue(t, srv, testLink, "a")
++	if err != nil {
++		t.Fatalf("Issue: %v", err)
++	}
++	if !strings.HasPrefix(creds.URL, "https://live-webrtc-ixc1-13.webinar.ru/rtc/room/"+testSession+"/join?") {
++		t.Fatalf("join URL = %q", creds.URL)
++	}
++}
++
++func TestIssueRefusesAnSFUNameThatIsNotAHost(t *testing.T) {
++	for _, name := range []string{"", "evil.example/path?x=", "user@host", "a b"} {
++		g, srv := newGateway(t)
++		g.status("/api/eventsession/"+testSession+"/configuration", http.StatusOK,
++			strings.ReplaceAll(replyConfiguration, `"rtcServer":"sfu.mts-link.ru"`, `"rtcServer":"`+name+`"`))
++		if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrIncompleteReply) {
++			t.Errorf("rtcServer %q: error = %v, want %v", name, err, ErrIncompleteReply)
++		}
++	}
++}
++
++// A room the service no longer has answers 406 Not Acceptable, at the event
++// lookup and at the login alike (measured). That is the room, not the guest.
++func TestARoomTheServiceNoLongerHasIsGone(t *testing.T) {
++	g, srv := newGateway(t)
++	g.status("/api/event/"+testEvent, http.StatusNotAcceptable, replyGone)
++	if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrRoomGone) {
++		t.Fatalf("event lookup 406: error = %v, want %v", err, ErrRoomGone)
++	}
++
++	g, srv = newGateway(t)
++	g.status("/api/eventsessions/"+testSession+"/guestlogin", http.StatusNotAcceptable, replyGone)
++	if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrRoomGone) {
++		t.Fatalf("guestlogin 406: error = %v, want %v", err, ErrRoomGone)
++	}
++}
++
++func TestAnEventWithoutASessionIsNotARoom(t *testing.T) {
++	g, srv := newGateway(t)
++	g.status("/api/event/"+testEvent, http.StatusOK, `{"id":20300400500,"eventSessions":[]}`)
++	if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrNoSession) {
++		t.Fatalf("error = %v, want %v", err, ErrNoSession)
++	}
++}
++
++func TestAGuestTheServiceTurnsAwayIsNotAccepted(t *testing.T) {
++	g, srv := newGateway(t)
++	g.status("/api/eventsessions/"+testSession+"/guestlogin", http.StatusOK,
++		strings.Replace(replyGuestLogin, `"isAccepted":true`, `"isAccepted":false`, 1))
++	if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrNotAccepted) {
++		t.Fatalf("error = %v, want %v", err, ErrNotAccepted)
++	}
++}
++
++func TestRepliesThatNameNothingAreIncomplete(t *testing.T) {
++	for path, body := range map[string]string{
++		"/api/eventsessions/" + testSession + "/guestlogin":  `{"isAccepted":true,"user":{"sessionId":"x"}}`,
++		"/api/eventsessions/" + testSession + "/conferences": `{"id":395296501,"publicKey":"vcPUBLIC"}`,
++		"/api/eventsessions/" + testSession + "/join-token":  `{"data":{}}`,
++	} {
++		g, srv := newGateway(t)
++		code := http.StatusOK
++		if strings.HasSuffix(path, "/conferences") {
++			code = http.StatusCreated
++		}
++		g.status(path, code, body)
++		if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrIncompleteReply) {
++			t.Errorf("%s: error = %v, want %v", path, err, ErrIncompleteReply)
++		}
++	}
++}
++
++// What the service answers is never in an error: a body can carry a token.
++func TestAnUnexpectedStatusNamesTheCallAndTheNumberOnly(t *testing.T) {
++	g, srv := newGateway(t)
++	g.status("/api/eventsessions/"+testSession+"/join-token", http.StatusInternalServerError,
++		`{"error":"boom","token":"vcSECRET00000000"}`)
++	_, err := issue(t, srv, testLink, "a")
++	if !errors.Is(err, ErrBadStatus) {
++		t.Fatalf("error = %v, want %v", err, ErrBadStatus)
++	}
++	if msg := err.Error(); !strings.Contains(msg, "join-token") || !strings.Contains(msg, "500") || strings.Contains(msg, "vcSECRET") {
++		t.Fatalf("error text = %q", msg)
++	}
++}
++
++// A conference stays in the room's list until its publisher has been on the
++// SFU and left, or its guest takes it back (measured: one whose join never
++// happened was still listed 45 minutes on). A flow that stops after making
++// one takes it back.
++func TestAConferenceNothingWillJoinIsTakenBack(t *testing.T) {
++	g, srv := newGateway(t)
++	g.status("/api/eventsessions/"+testSession+"/join-token", http.StatusInternalServerError, `{}`)
++	if _, err := issue(t, srv, testLink, "a"); !errors.Is(err, ErrBadStatus) {
++		t.Fatalf("error = %v, want %v", err, ErrBadStatus)
++	}
++	if last := g.calls[len(g.calls)-1]; last != "DELETE /api/conferences/395296501" {
++		t.Fatalf("last call = %s, want the conference taken back", last)
++	}
++}
++
++func TestLeaveTakesTheConferenceBack(t *testing.T) {
++	var got, cookie string
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		got, cookie = r.Method+" "+r.URL.Path, r.Header.Get("Cookie")
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer srv.Close()
++
++	err := leave(context.Background(), srv.Client(), srv.URL, "395296501", "access=a; sessionId=s")
++	if err != nil {
++		t.Fatalf("leave: %v", err)
++	}
++	if got != "DELETE /api/conferences/395296501" || cookie != "access=a; sessionId=s" {
++		t.Fatalf("got %q with cookie %q", got, cookie)
++	}
++	if err := leave(context.Background(), srv.Client(), srv.URL, "39/../5", "c"); !errors.Is(err, ErrConferenceID) {
++		t.Fatal("a conference id that is not a number went into a path")
++	}
++}
+diff --git a/internal/engine/builtin/builtin.go b/internal/engine/builtin/builtin.go
+--- a/internal/engine/builtin/builtin.go
++++ b/internal/engine/builtin/builtin.go
+@@ -14,6 +14,7 @@
+ 
+ 	"github.com/openlibrecommunity/olcrtc/internal/auth"
+ 	authJitsi "github.com/openlibrecommunity/olcrtc/internal/auth/jitsi"
++	authMTS "github.com/openlibrecommunity/olcrtc/internal/auth/mtslink"
+ 	authSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/auth/salutejazz"
+ 	authTelemost "github.com/openlibrecommunity/olcrtc/internal/auth/telemost"
+ 	authVKCalls "github.com/openlibrecommunity/olcrtc/internal/auth/vkcalls"
+@@ -21,6 +22,7 @@
+ 	"github.com/openlibrecommunity/olcrtc/internal/engine"
+ 	"github.com/openlibrecommunity/olcrtc/internal/engine/goolom"
+ 	engineJitsi "github.com/openlibrecommunity/olcrtc/internal/engine/jitsi"
++	engineMTS "github.com/openlibrecommunity/olcrtc/internal/engine/mtslink"
+ 	engineSaluteJazz "github.com/openlibrecommunity/olcrtc/internal/engine/salutejazz"
+ 	engineVKCalls "github.com/openlibrecommunity/olcrtc/internal/engine/vkcalls"
+ 	"github.com/openlibrecommunity/olcrtc/internal/protect"
+@@ -115,11 +117,13 @@
+ 	engine.Register("jitsi", engineJitsi.New)
+ 	engine.Register("salutejazz", engineSaluteJazz.New)
+ 	engine.Register("vkcalls", engineVKCalls.New)
++	engine.Register("mtslink", engineMTS.New)
+ 	register("wbstream", authWBStream.Provider{})
+ 	register("telemost", authTelemost.Provider{})
+ 	register("jitsi", authJitsi.Provider{})
+ 	register("salutejazz", authSaluteJazz.New())
+ 	register("vkcalls", authVKCalls.New())
++	register("mtslink", authMTS.New())
+ 	register("none", nil)
+ }
+ 
+diff --git a/internal/engine/engine.go b/internal/engine/engine.go
+--- a/internal/engine/engine.go
++++ b/internal/engine/engine.go
+@@ -152,6 +152,24 @@
+ 	PublishRateLimit() int
+ }
+ 
++// VideoCodecSelector is implemented by engines whose service forwards video
++// in one codec and not the VP8 a video transport would publish on its own. A
++// transport that dresses its bytes as video asks its session before it builds
++// the track, and builds it in the codec named.
++type VideoCodecSelector interface {
++	// VideoCodec is the MIME type a published track has to carry, e.g.
++	// webrtc.MimeTypeVP9.
++	VideoCodec() string
++}
++
++// KeyframeRequestSource is implemented by engines whose relay asks a
++// publisher for a keyframe (RTCP PLI or FIR) and forwards nothing of its
++// track until one arrives. The handler is called for every request, from the
++// engine's own goroutine; it must not block.
++type KeyframeRequestSource interface {
++	SetKeyframeRequestHandler(cb func())
++}
++
+ // VideoTrackCapable is implemented by engines that can exchange video tracks.
+ type VideoTrackCapable interface {
+ 	AddVideoTrack(track webrtc.TrackLocal) error
+diff --git a/internal/engine/mtslink/mtslink.go b/internal/engine/mtslink/mtslink.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/mtslink/mtslink.go
+@@ -0,0 +1,658 @@
++// Package mtslink is the engine for MTS Link rooms: one peer connection to
++// the service's SFU, negotiated with a single SDP exchange over HTTP, the
++// payload riding the published video track and coming back on the slots the
++// SFU fills with the room's other publishers.
++//
++// What the SFU takes, measured against the live service on 2026-10-11:
++//
++//   - Video in VP9 or H264, never VP8. The engine publishes VP9 and says so
++//     (engine.VideoCodecSelector); the video transport dresses its frames
++//     for it.
++//   - A track is forwarded from a keyframe the SFU recognises, and again
++//     from the next one after a packet it could not repair. It asks for one
++//     with RTCP PLI; the engine passes the request on
++//     (engine.KeyframeRequestSource).
++//   - Nine receive slots, filled with the room's publishers without being
++//     asked: a room of ten is one where everybody sees everybody.
++//   - Every candidate twice: UDP and passive TCP, both on port 443 of the
++//     SFU. The engine offers UDP alone unless the room link asks otherwise
++//     ("вЂ¦?ice=tcp" or "вЂ¦?ice=both", roomhint): over TCP it dials the SFU's
++//     passive candidate itself (pion's active ICE-TCP), the way a browser
++//     gets through a network that starves UDP.
++//   - No data between guests. The data channel the web client opens carries
++//     the SFU's own notes about the slots, one way; this engine leaves it out.
++//
++// The room is an endless meeting, so it never closes under the engine and a
++// rejoin is a new guest in the same room: fresh credentials from the provider,
++// a join from scratch.
++package mtslink
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/pion/interceptor"
++	"github.com/pion/rtcp"
++	"github.com/pion/webrtc/v4"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++	"github.com/openlibrecommunity/olcrtc/internal/logger"
++	"github.com/openlibrecommunity/olcrtc/internal/protect"
++	"github.com/openlibrecommunity/olcrtc/internal/roomhint"
++)
++
++// Session errors.
++var (
++	ErrSessionClosed   = errors.New("mtslink: session closed")
++	ErrConnectBusy     = errors.New("mtslink: connection already owned")
++	ErrNoEndpoint      = errors.New("mtslink: room join URL missing")
++	ErrNoVideoTrack    = errors.New("mtslink: nothing to publish: the engine carries a video transport only")
++	ErrConnectTimeout  = errors.New("mtslink: peer connection did not connect")
++	ErrConnectFailed   = errors.New("mtslink: peer connection failed")
++	ErrSendUnsupported = errors.New("mtslink: send requires the video transport")
++)
++
++const (
++	connectWait   = 30 * time.Second
++	maxReconnects = 10
++	// receiveSlots is how many video m-lines the offer receives on: the web
++	// client's nine, each of which the SFU fills with one publisher.
++	receiveSlots = 9
++	// leaveWait bounds the call that takes a conference back.
++	leaveWait = 5 * time.Second
++
++	videoPayloadType = 98
++	rtxPayloadType   = 99
++	audioPayloadType = 111
++)
++
++// Session is an engine.Session over one MTS Link endless room.
++type Session struct {
++	cfg engine.Config
++
++	mu sync.Mutex
++	// What the provider issued: the room join, and what takes the guest's
++	// conference back when a join comes to nothing.
++	joinURL      string
++	cookies      string
++	gateway      string
++	conferenceID string
++	// ice is the ICE mode the room link asked for (roomhint), empty for UDP.
++	ice string
++	gen *generation
++	// Registered before any startup work. Close cancels and joins this owner,
++	// including the HTTP join and a PC not yet established as s.gen.
++	pending *connectAttempt
++
++	video    engine.VideoTrackState
++	keyframe atomic.Pointer[func()]
++
++	engine.Reconnector
++
++	closed       atomic.Bool
++	reconnecting atomic.Bool
++	closeCh      chan struct{}
++	closeOnce    sync.Once
++	endOnce      sync.Once
++}
++
++// generation is everything one join owns, so tearing it down takes the whole
++// attempt and nothing crosses attempts.
++type generation struct {
++	pc *webrtc.PeerConnection
++	// connected closes when the peer connection first connects, failed when
++	// it fails before it ever did, done when the attempt is torn down.
++	connected     chan struct{}
++	connectedOnce sync.Once
++	failed        chan struct{}
++	failedOnce    sync.Once
++	done          chan struct{}
++	doneOnce      sync.Once
++}
++
++type connectAttempt struct {
++	cancel context.CancelFunc
++	done   chan struct{}
++	gen    *generation // protected by Session.mu
++}
++
++func newGeneration(pc *webrtc.PeerConnection) *generation {
++	return &generation{
++		pc: pc, connected: make(chan struct{}), failed: make(chan struct{}), done: make(chan struct{}),
++	}
++}
++
++func (gen *generation) isDone() bool {
++	select {
++	case <-gen.done:
++		return true
++	default:
++		return false
++	}
++}
++
++func (gen *generation) wasConnected() bool {
++	select {
++	case <-gen.connected:
++		return true
++	default:
++		return false
++	}
++}
++
++func (gen *generation) teardown() {
++	gen.doneOnce.Do(func() { close(gen.done) })
++	_ = gen.pc.Close()
++}
++
++// New builds an MTS Link session from provider credentials: URL is the room
++// join, Token the guest's cookies, Extra the gateway and the conference they
++// take back.
++func New(_ context.Context, cfg engine.Config) (engine.Session, error) {
++	if cfg.URL == "" {
++		return nil, ErrNoEndpoint
++	}
++	s := &Session{cfg: cfg, closeCh: make(chan struct{})}
++	s.adopt(engine.Credentials{URL: cfg.URL, Token: cfg.Token, Extra: cfg.Extra})
++	s.Configure(engine.ReconnectorConfig{
++		MaxAttempts: maxReconnects,
++		Reconnect:   s.reconnect,
++		OnError:     func(err error) { logger.Debugf("mtslink: reconnect failed: %v", err) },
++		OnLimit:     func(string) { s.signalEnded("reconnect limit reached") },
++		LimitReason: "reconnect limit reached",
++	})
++	return s, nil
++}
++
++// adopt makes creds the ones the next join uses.
++func (s *Session) adopt(creds engine.Credentials) {
++	s.mu.Lock()
++	s.joinURL, s.cookies = creds.URL, creds.Token
++	s.gateway, s.conferenceID = creds.Extra["gateway"], creds.Extra["conferenceId"]
++	s.ice = creds.Extra["ice"]
++	s.mu.Unlock()
++}
++
++// VideoCodec implements engine.VideoCodecSelector: the SFU answers a
++// published track with VP9 and H264 only.
++func (s *Session) VideoCodec() string { return webrtc.MimeTypeVP9 }
++
++// SetKeyframeRequestHandler implements engine.KeyframeRequestSource.
++func (s *Session) SetKeyframeRequestHandler(cb func()) {
++	if cb == nil {
++		s.keyframe.Store(nil)
++		return
++	}
++	s.keyframe.Store(&cb)
++}
++
++// AddVideoTrack records the local track the next join publishes.
++func (s *Session) AddVideoTrack(track webrtc.TrackLocal) error { //nolint:unparam // the VideoTrackCapable contract
++	s.video.StoreVideoTrack(track)
++	return nil
++}
++
++// SetVideoTrackHandler registers the callback the room's video arrives on:
++// one track per receive slot, each carrying whichever publisher the SFU put
++// there.
++func (s *Session) SetVideoTrackHandler(cb func(*webrtc.TrackRemote, *webrtc.RTPReceiver)) {
++	s.video.SetVideoTrackHandler(cb)
++}
++
++func (s *Session) httpClient() *http.Client {
++	resolver := s.cfg.Resolver
++	if resolver == nil {
++		resolver = protect.NewResolver(s.cfg.DNSServer)
++	}
++	return protect.NewHTTPClient(resolver)
++}
++
++// newAPI is pion set up as the endpoint the SFU expects: VP9 with its
++// retransmission stream and opus, the feedback a browser offers, and the
++// default interceptors - reports, NACK both ways and transport-wide
++// congestion feedback, which is how a lost packet is repaired before the SFU
++// gives the frame up.
++func (s *Session) newAPI() (*webrtc.API, error) {
++	media := &webrtc.MediaEngine{}
++	feedback := []webrtc.RTCPFeedback{
++		{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"},
++		{Type: "goog-remb"}, {Type: "transport-cc"},
++	}
++	for _, c := range []struct {
++		params webrtc.RTPCodecParameters
++		kind   webrtc.RTPCodecType
++	}{
++		{webrtc.RTPCodecParameters{
++			RTPCodecCapability: webrtc.RTPCodecCapability{
++				MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1",
++			},
++			PayloadType: audioPayloadType,
++		}, webrtc.RTPCodecTypeAudio},
++		{webrtc.RTPCodecParameters{
++			RTPCodecCapability: webrtc.RTPCodecCapability{
++				MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, SDPFmtpLine: "profile-id=0", RTCPFeedback: feedback,
++			},
++			PayloadType: videoPayloadType,
++		}, webrtc.RTPCodecTypeVideo},
++		{webrtc.RTPCodecParameters{
++			RTPCodecCapability: webrtc.RTPCodecCapability{
++				MimeType: webrtc.MimeTypeRTX, ClockRate: 90000, SDPFmtpLine: fmt.Sprintf("apt=%d", videoPayloadType),
++			},
++			PayloadType: rtxPayloadType,
++		}, webrtc.RTPCodecTypeVideo},
++	} {
++		if err := media.RegisterCodec(c.params, c.kind); err != nil {
++			return nil, fmt.Errorf("mtslink: register codec: %w", err)
++		}
++	}
++
++	settings := webrtc.SettingEngine{}
++	apply, err := engine.NewPionSettings(engine.PionSettingsOptions{
++		Resolver:         s.cfg.Resolver,
++		LoggerFactory:    logger.NewPionLoggerFactory(),
++		IPv4Only:         true,
++		DisableMulticast: true,
++	})
++	if err != nil {
++		return nil, err //nolint:wrapcheck // the shared builder already adds context
++	}
++	if apply != nil {
++		apply(&settings)
++	}
++	s.mu.Lock()
++	ice := s.ice
++	s.mu.Unlock()
++	if types := iceNetworkTypes(ice); types != nil {
++		logger.Infof("mtslink: ICE over %s, as the room link or this side asks", ice)
++		settings.SetNetworkTypes(types)
++	}
++	registry := &interceptor.Registry{}
++	if err := webrtc.RegisterDefaultInterceptorsWithOptions(
++		media, registry, engine.DefaultInterceptorOptions()...,
++	); err != nil {
++		return nil, fmt.Errorf("mtslink: interceptors: %w", err)
++	}
++	return webrtc.NewAPI(
++		webrtc.WithMediaEngine(media),
++		webrtc.WithSettingEngine(settings),
++		webrtc.WithInterceptorRegistry(registry),
++	), nil
++}
++
++// iceNetworkTypes is what an ICE mode from the room link (roomhint) asks of
++// pion, nil for the shared settings' UDP. With TCP among them pion dials the
++// SFU's passive TCP candidate itself; the SFU then answers with that one alone
++// when the offer has no UDP.
++//
++// ai-generated: this function.
++func iceNetworkTypes(mode string) []webrtc.NetworkType {
++	switch mode {
++	case roomhint.ICETCP:
++		return []webrtc.NetworkType{webrtc.NetworkTypeTCP4}
++	case roomhint.ICEBoth:
++		return []webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeTCP4}
++	default:
++		return nil
++	}
++}
++
++// buildPeerConnection lays the offer out in the web client's order, less what
++// the SFU does not ask for: the published camera, a microphone line that
++// stays silent, the one line the SFU plays the room's audio on - it refuses
++// an offer with two ("exceeded maximal audio players value 1") - and the
++// receive slots. It returns the audio player, whose mid the join names.
++func (s *Session) buildPeerConnection() (*webrtc.PeerConnection, *webrtc.RTPTransceiver, error) {
++	api, err := s.newAPI()
++	if err != nil {
++		return nil, nil, err
++	}
++	pc, err := api.NewPeerConnection(webrtc.Configuration{})
++	if err != nil {
++		return nil, nil, fmt.Errorf("mtslink: new peer connection: %w", err)
++	}
++
++	var addErr error
++	s.video.RangeVideoTracks(func(track webrtc.TrackLocal, _ bool) {
++		sender, trackErr := pc.AddTrack(track)
++		if trackErr != nil {
++			addErr = trackErr
++			return
++		}
++		go s.readRTCP(sender)
++	})
++	if addErr != nil {
++		_ = pc.Close()
++		return nil, nil, fmt.Errorf("mtslink: add the published track: %w", addErr)
++	}
++
++	add := func(kind webrtc.RTPCodecType, direction webrtc.RTPTransceiverDirection) (*webrtc.RTPTransceiver, error) {
++		return pc.AddTransceiverFromKind(kind, webrtc.RTPTransceiverInit{Direction: direction})
++	}
++	if _, err = add(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverDirectionSendrecv); err != nil {
++		_ = pc.Close()
++		return nil, nil, fmt.Errorf("mtslink: microphone line: %w", err)
++	}
++	player, err := add(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverDirectionRecvonly)
++	if err != nil {
++		_ = pc.Close()
++		return nil, nil, fmt.Errorf("mtslink: audio player line: %w", err)
++	}
++	for range receiveSlots {
++		if _, err = add(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverDirectionRecvonly); err != nil {
++			_ = pc.Close()
++			return nil, nil, fmt.Errorf("mtslink: receive slot: %w", err)
++		}
++	}
++	return pc, player, nil
++}
++
++// readRTCP reads what the SFU says about the published track until the sender
++// closes - which also feeds the interceptors - and passes its keyframe
++// requests on.
++func (s *Session) readRTCP(sender *webrtc.RTPSender) {
++	for {
++		packets, _, err := sender.ReadRTCP()
++		if err != nil {
++			return
++		}
++		for _, packet := range packets {
++			switch packet.(type) {
++			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
++				if cb := s.keyframe.Load(); cb != nil {
++					(*cb)()
++				}
++			}
++		}
++	}
++}
++
++// Connect joins the room: the offer, the SFU's answer, the pin, and the wait
++// for the peer connection to settle.
++func (s *Session) Connect(ctx context.Context) error {
++	ctx, cancel := context.WithCancel(ctx)
++	attempt := &connectAttempt{cancel: cancel, done: make(chan struct{})}
++	s.mu.Lock()
++	if s.closed.Load() {
++		s.mu.Unlock()
++		cancel()
++		return ErrSessionClosed
++	}
++	if s.pending != nil || s.gen != nil {
++		s.mu.Unlock()
++		cancel()
++		return ErrConnectBusy
++	}
++	s.pending = attempt
++	s.mu.Unlock()
++	defer func() {
++		cancel()
++		s.mu.Lock()
++		if s.pending == attempt {
++			s.pending = nil
++		}
++		close(attempt.done)
++		s.mu.Unlock()
++	}()
++	if !s.video.HasVideoTracks() {
++		return ErrNoVideoTrack
++	}
++	client := s.httpClient()
++	defer client.CloseIdleConnections()
++
++	pc, player, err := s.buildPeerConnection()
++	if err != nil {
++		return err
++	}
++	gen := newGeneration(pc)
++	s.mu.Lock()
++	attempt.gen = gen
++	closed := s.closed.Load() || ctx.Err() != nil
++	joinURL := s.joinURL
++	s.mu.Unlock()
++	if closed {
++		gen.teardown()
++		s.leave(ctx, client)
++		return ErrSessionClosed
++	}
++	s.watch(gen)
++
++	if err = s.negotiate(ctx, gen, client, joinURL, player); err == nil {
++		err = s.awaitConnected(ctx, gen)
++	}
++	if err != nil {
++		gen.teardown()
++		s.leave(ctx, client)
++		return err
++	}
++	return nil
++}
++
++// watch wires a generation's peer connection to the session.
++func (s *Session) watch(gen *generation) {
++	gen.pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
++		logger.Debugf("mtslink: remote track kind=%s codec=%s", track.Kind(), track.Codec().MimeType)
++		if handler := s.video.VideoTrackHandler(); handler != nil && track.Kind() == webrtc.RTPCodecTypeVideo {
++			handler(track, receiver)
++			return
++		}
++		go drain(track)
++	})
++	gen.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
++		logger.Debugf("mtslink: peer connection %s", state)
++		switch state {
++		case webrtc.PeerConnectionStateConnected:
++			gen.connectedOnce.Do(func() { close(gen.connected) })
++		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
++			if !gen.wasConnected() {
++				// A join that never connected is Connect's to report; the
++				// caller, or the supervisor running it, decides what next.
++				gen.failedOnce.Do(func() { close(gen.failed) })
++				return
++			}
++			s.reconnectAttempt(gen)
++		case webrtc.PeerConnectionStateNew, webrtc.PeerConnectionStateConnecting,
++			webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateUnknown:
++		}
++	})
++}
++
++// drain reads a track nothing consumes, so its packets do not pile up.
++func drain(track *webrtc.TrackRemote) {
++	buf := make([]byte, 1500)
++	for {
++		if _, _, err := track.Read(buf); err != nil {
++			return
++		}
++	}
++}
++
++// negotiate is the SDP exchange. The offer goes out as soon as it is made,
++// without waiting for candidates, as the web client's does: the answer
++// carries the SFU's, and ours reach it as peer-reflexive ones.
++func (s *Session) negotiate(
++	ctx context.Context, gen *generation, client *http.Client, joinURL string, player *webrtc.RTPTransceiver,
++) error {
++	offer, err := gen.pc.CreateOffer(nil)
++	if err != nil {
++		return fmt.Errorf("mtslink: offer: %w", err)
++	}
++	if err = gen.pc.SetLocalDescription(offer); err != nil {
++		return fmt.Errorf("mtslink: local description: %w", err)
++	}
++	target, err := offerURL(joinURL, player.Mid())
++	if err != nil {
++		return err
++	}
++	answer, err := joinOffer(ctx, client, target, offer.SDP)
++	if err != nil {
++		return err
++	}
++	peer := peerOf(answer)
++	if peer == "" {
++		return ErrNoPeerID
++	}
++	if err = gen.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
++		return fmt.Errorf("mtslink: remote description: %w", err)
++	}
++	if pinErr := pinPeer(ctx, client, target, peer); pinErr != nil {
++		logger.Debugf("mtslink: %v", pinErr)
++	}
++	return nil
++}
++
++// awaitConnected waits for the peer connection to settle and makes the
++// generation the session's once it has.
++func (s *Session) awaitConnected(ctx context.Context, gen *generation) error {
++	timer := time.NewTimer(connectWait)
++	defer timer.Stop()
++	select {
++	case <-gen.connected:
++	case <-gen.failed:
++		return ErrConnectFailed
++	case <-gen.done:
++		return ErrSessionClosed
++	case <-ctx.Done():
++		return fmt.Errorf("mtslink: connect wait: %w", ctx.Err())
++	case <-timer.C:
++		return ErrConnectTimeout
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed.Load() {
++		return ErrSessionClosed
++	}
++	s.gen = gen
++	return nil
++}
++
++// leave takes back the conference of a join that came to nothing. The
++// service drops the conference of a publisher that was on the SFU and left
++// by itself; one whose publisher never arrived stays in the room's list.
++//
++// The join's own context may be the reason it failed, so the call outlives
++// it, for leaveWait at most.
++func (s *Session) leave(ctx context.Context, client *http.Client) {
++	s.mu.Lock()
++	gateway, conference, cookies := s.gateway, s.conferenceID, s.cookies
++	s.mu.Unlock()
++	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaveWait)
++	defer cancel()
++	if err := takeBack(ctx, client, gateway, conference, cookies); err != nil {
++		logger.Debugf("mtslink: %v", err)
++	}
++}
++
++// reconnectAttempt asks the session's supervisor for a rejoin on behalf of
++// one join. A failure raised by a join already torn down says nothing about
++// the session - Close or a superseding join did it deliberately - so it asks
++// nothing.
++func (s *Session) reconnectAttempt(gen *generation) {
++	if s.closed.Load() || gen.isDone() {
++		return
++	}
++	s.Request(s.closed.Load(), s.reconnecting.Load())
++}
++
++// Reconnect asks the session to rejoin the room. Upper layers call it when a
++// liveness probe declares the path dead before the engine has noticed; the
++// supervisor serializes it with the failure-driven rejoins.
++func (s *Session) Reconnect(reason string) {
++	if s.closed.Load() {
++		return
++	}
++	logger.Debugf("mtslink: reconnect requested: %s", reason)
++	s.Request(s.closed.Load(), s.reconnecting.Load())
++}
++
++// reconnect tears the current join down and joins again as a new guest: the
++// old peer goes first, so the room never holds two of ours, then the
++// provider's fresh credentials, then a join from scratch.
++func (s *Session) reconnect(ctx context.Context) error {
++	if s.closed.Load() {
++		return ErrSessionClosed
++	}
++	s.reconnecting.Store(true)
++	defer s.reconnecting.Store(false)
++
++	s.mu.Lock()
++	gen := s.gen
++	s.gen = nil
++	s.mu.Unlock()
++	if gen != nil {
++		gen.teardown()
++	}
++	if s.cfg.Refresh != nil {
++		creds, err := s.cfg.Refresh(ctx)
++		if err != nil {
++			return fmt.Errorf("refresh credentials: %w", err)
++		}
++		s.adopt(creds)
++	}
++	if err := s.Connect(ctx); err != nil {
++		return err
++	}
++	// The transport shakes hands again over the rebuilt carrier when it
++	// hears this, the shared contract's successful-reconnect notice.
++	s.NotifyReconnect()
++	return nil
++}
++
++// Send is unsupported: the room relays no data between guests, so the payload
++// rides the video transport.
++func (s *Session) Send([]byte) error { return ErrSendUnsupported }
++
++// CanSend reports whether the peer connection is connected.
++func (s *Session) CanSend() bool {
++	s.mu.Lock()
++	gen := s.gen
++	s.mu.Unlock()
++	return gen != nil && !gen.isDone() && gen.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
++}
++
++// SubscriberCanSend mirrors CanSend: one peer connection carries both ways.
++func (s *Session) SubscriberCanSend() bool { return s.CanSend() }
++
++// GetBufferedAmount is the video transport's to answer, not a data channel's.
++func (s *Session) GetBufferedAmount() uint64 { return 0 }
++
++// WatchConnection services the session's reconnect requests until ctx ends
++// or the session closes.
++func (s *Session) WatchConnection(ctx context.Context) {
++	s.Watch(ctx, s.closeCh)
++}
++
++// signalEnded ends the session for good: the verdict is reported once,
++// through the shared Reconnector's callback, and everything waiting on the
++// session - the reconnect supervisor included - stops with it.
++func (s *Session) signalEnded(reason string) {
++	s.endOnce.Do(func() { s.SignalEnded(reason) })
++	s.closed.Store(true)
++	s.closeOnce.Do(func() { close(s.closeCh) })
++}
++
++// Close leaves the room and frees the peer connection. A closed session
++// refuses every later reconnect request and stops the supervisor.
++func (s *Session) Close() error {
++	s.closed.Store(true)
++	s.mu.Lock()
++	gen := s.gen
++	pending := s.pending
++	s.gen = nil
++	s.mu.Unlock()
++	s.closeOnce.Do(func() { close(s.closeCh) })
++	if pending != nil {
++		pending.cancel()
++		// The startup owner tears down its PC and bounded guest cleanup before
++		// releasing done. Do not report Close while it may still publish a join.
++		<-pending.done
++	}
++	if gen != nil {
++		gen.teardown()
++	}
++	return nil
++}
+diff --git a/internal/engine/mtslink/mtslink_test.go b/internal/engine/mtslink/mtslink_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/mtslink/mtslink_test.go
+@@ -0,0 +1,599 @@
++package mtslink
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/pion/interceptor"
++	"github.com/pion/rtcp"
++	"github.com/pion/rtp"
++	"github.com/pion/rtp/codecs"
++	"github.com/pion/webrtc/v4"
++	"github.com/pion/webrtc/v4/pkg/media"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++)
++
++const (
++	testSession = "20300400600"
++	testPeer    = "31djU82nnvUp1kyQjpDpPhyWx6eeoD1xs1SrH6HGSrPpwQyR8IgX3REL7"
++	testCookies = "access=eyJguest.access; refresh=6074c7a91c56; sessionId=529e1f7d"
++	testConf    = "395296501"
++)
++
++// blackKeyframe is a real VP9 keyframe (libvpx, a black 320x180 picture): what
++// the test publishes, so pion's own packetizer takes it.
++var blackKeyframe = []byte{
++	0x82, 0x49, 0x83, 0x42, 0x60, 0x13, 0xf0, 0x0b, 0x36, 0x66, 0x38, 0x24, 0x1c, 0x19, 0x92, 0x00,
++	0x00, 0x50, 0x43, 0xe8, 0xbf, 0x40, 0x00, 0x67, 0x3f, 0xfe, 0x2f, 0x20, 0x00, 0x04, 0xee, 0x66,
++	0xa7, 0x89, 0xd3, 0xfb, 0x17, 0xd3, 0x70, 0x4c, 0xc4, 0xe7, 0xd9, 0x1b, 0x5b, 0xe5, 0xac, 0x4c,
++	0x31, 0x1d, 0x90, 0x67, 0xac, 0xb3, 0x74, 0x35, 0x3e, 0x92, 0xab, 0xc1, 0xec, 0x2d, 0xe8, 0x00,
++	0x85, 0x59, 0x2c, 0xf0,
++}
++
++// fakeSFU stands in for MTS Link's SFU and, on the same server, for the one
++// gateway call the engine makes. It answers a join with a real pion peer
++// connection, so the engine's offer is negotiated, not just looked at.
++type fakeSFU struct {
++	t   *testing.T
++	srv *httptest.Server
++
++	mu sync.Mutex
++	// what the join carried
++	joins     int
++	offer     string
++	joinQuery url.Values
++	joinHead  http.Header
++	// refuse makes the next join answer this status and body instead.
++	refuseStatus int
++	refuseBody   string
++	// pins and leaves are the calls after the join, "METHOD path | body | cookie".
++	pins      []string
++	leaves    []string
++	pinStatus int
++
++	pcs []*webrtc.PeerConnection
++	// published is the payload of every video packet a publisher sent.
++	published chan []byte
++	publisher chan *webrtc.TrackRemote
++	// toEngine is the track the relay sends into the engine.
++	toEngine *webrtc.TrackLocalStaticRTP
++}
++
++func newFakeSFU(t *testing.T) *fakeSFU {
++	t.Helper()
++	f := &fakeSFU{t: t, published: make(chan []byte, 256), publisher: make(chan *webrtc.TrackRemote, 4), pinStatus: http.StatusOK}
++	track, err := webrtc.NewTrackLocalStaticRTP(
++		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9, ClockRate: 90000}, "relay-video", "relay")
++	if err != nil {
++		t.Fatal(err)
++	}
++	f.toEngine = track
++	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
++	t.Cleanup(func() {
++		f.srv.Close()
++		f.mu.Lock()
++		defer f.mu.Unlock()
++		for _, pc := range f.pcs {
++			_ = pc.Close()
++		}
++	})
++	return f
++}
++
++func (f *fakeSFU) serve(w http.ResponseWriter, r *http.Request) {
++	body, _ := io.ReadAll(r.Body)
++	switch {
++	case r.Method == http.MethodPost && r.URL.Path == "/rtc/room/"+testSession+"/join":
++		f.join(w, r, string(body))
++	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/rtc/peer/"):
++		f.mu.Lock()
++		f.pins = append(f.pins, r.Method+" "+r.URL.Path+" | "+string(body)+" | "+r.Header.Get("Content-Type")+" | "+r.Header.Get("Cookie"))
++		status := f.pinStatus
++		f.mu.Unlock()
++		w.WriteHeader(status)
++	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/conferences/"):
++		f.mu.Lock()
++		f.leaves = append(f.leaves, r.Method+" "+r.URL.Path+" | "+r.Header.Get("Cookie"))
++		f.mu.Unlock()
++		w.WriteHeader(http.StatusNoContent)
++	default:
++		f.t.Errorf("the engine asked for %s %s", r.Method, r.URL.Path)
++		w.WriteHeader(http.StatusNotFound)
++	}
++}
++
++func (f *fakeSFU) join(w http.ResponseWriter, r *http.Request, offer string) {
++	f.mu.Lock()
++	f.joins++
++	f.offer, f.joinQuery, f.joinHead = offer, r.URL.Query(), r.Header.Clone()
++	status, refusal := f.refuseStatus, f.refuseBody
++	f.mu.Unlock()
++	if status != 0 {
++		w.WriteHeader(status)
++		_, _ = io.WriteString(w, refusal)
++		return
++	}
++
++	me := &webrtc.MediaEngine{}
++	if err := me.RegisterDefaultCodecs(); err != nil {
++		f.t.Error(err)
++	}
++	ir := &interceptor.Registry{}
++	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
++		f.t.Error(err)
++	}
++	se := webrtc.SettingEngine{}
++	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
++	se.SetIncludeLoopbackCandidate(true)
++	pc, err := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se)).
++		NewPeerConnection(webrtc.Configuration{})
++	if err != nil {
++		f.t.Error(err)
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	f.mu.Lock()
++	f.pcs = append(f.pcs, pc)
++	f.mu.Unlock()
++	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
++		if track.Kind() != webrtc.RTPCodecTypeVideo {
++			return
++		}
++		select {
++		case f.publisher <- track:
++		default:
++		}
++		for {
++			pkt, _, readErr := track.ReadRTP()
++			if readErr != nil {
++				return
++			}
++			select {
++			case f.published <- append([]byte(nil), pkt.Payload...):
++			default:
++			}
++		}
++	})
++	if srdErr := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); srdErr != nil {
++		w.WriteHeader(http.StatusBadRequest)
++		_, _ = io.WriteString(w, "SDP validation error: "+srdErr.Error())
++		return
++	}
++	// The relay sends into a slot the guest offered to receive on.
++	for _, tr := range pc.GetTransceivers() {
++		if tr.Kind() == webrtc.RTPCodecTypeVideo && tr.Direction() == webrtc.RTPTransceiverDirectionSendonly {
++			sender, senderErr := webrtc.NewAPI(webrtc.WithMediaEngine(me)).NewRTPSender(f.toEngine, tr.Receiver().Transport())
++			if senderErr == nil {
++				_ = tr.SetSender(sender, f.toEngine)
++			}
++			break
++		}
++	}
++	answer, err := pc.CreateAnswer(nil)
++	if err != nil {
++		f.t.Error(err)
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	gathered := webrtc.GatheringCompletePromise(pc)
++	if sldErr := pc.SetLocalDescription(answer); sldErr != nil {
++		f.t.Error(sldErr)
++		w.WriteHeader(http.StatusInternalServerError)
++		return
++	}
++	<-gathered
++	// The SFU names the peer in the answer's s= line.
++	sdp := strings.Replace(pc.LocalDescription().SDP, "\r\ns=-\r\n", "\r\ns="+testPeer+"\r\n", 1)
++	w.Header().Set("Content-Type", "application/sdp")
++	_, _ = io.WriteString(w, sdp)
++}
++
++// joinURL is the room join as the auth provider hands it over.
++func (f *fakeSFU) joinURL() string {
++	return f.srv.URL + "/rtc/room/" + testSession + "/join?userId=100200999&joinToken=vcJOIN&disableRecording=true" +
++		"&userName=guest&publishToken=vcPRIVATE&did=33d131e5f5194d28&pid=3d131e5f5194d283"
++}
++
++func (f *fakeSFU) config() engine.Config {
++	return engine.Config{
++		URL: f.joinURL(), Token: testCookies,
++		Extra: map[string]string{"gateway": f.srv.URL, "sessionId": testSession, "conferenceId": testConf},
++	}
++}
++
++// newPublishingSession is a session with a VP9 track on it, the way the video
++// transport leaves one before it connects.
++func newPublishingSession(t *testing.T, cfg engine.Config) (*Session, *webrtc.TrackLocalStaticSample) {
++	t.Helper()
++	sess, err := New(context.Background(), cfg)
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	s, ok := sess.(*Session)
++	if !ok {
++		t.Fatalf("New returned %T", sess)
++	}
++	t.Cleanup(func() { _ = s.Close() })
++	track, err := webrtc.NewTrackLocalStaticSample(
++		webrtc.RTPCodecCapability{MimeType: s.VideoCodec(), ClockRate: 90000, SDPFmtpLine: "profile-id=0"}, "video", "olcrtc")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := s.AddVideoTrack(track); err != nil {
++		t.Fatal(err)
++	}
++	return s, track
++}
++
++// mediaSections is the kind and direction of every m-line of an SDP, in order.
++func mediaSections(sdp string) []string {
++	sections := strings.Split(sdp, "\r\nm=")[1:]
++	out := make([]string, 0, len(sections))
++	for _, section := range sections {
++		kind, _, _ := strings.Cut(section, " ")
++		direction := "?"
++		for _, d := range []string{"sendrecv", "sendonly", "recvonly", "inactive"} {
++			if strings.Contains(section, "\r\na="+d) {
++				direction = d
++			}
++		}
++		out = append(out, kind+" "+direction)
++	}
++	return out
++}
++
++func within(t *testing.T, d time.Duration, what string, cond func() bool) {
++	t.Helper()
++	deadline := time.Now().Add(d)
++	for time.Now().Before(deadline) {
++		if cond() {
++			return
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	t.Fatalf("not within %s: %s", d, what)
++}
++
++func TestNewNeedsTheRoomJoin(t *testing.T) {
++	if _, err := New(context.Background(), engine.Config{}); !errors.Is(err, ErrNoEndpoint) {
++		t.Fatalf("New without a URL: error = %v, want %v", err, ErrNoEndpoint)
++	}
++}
++
++// The relay answers H264 and VP9 and no VP8 (measured), and asks for
++// keyframes: the engine says so, and a video transport dresses for it.
++func TestTheEngineNamesItsCodecAndReportsKeyframeRequests(t *testing.T) {
++	sess, err := New(context.Background(), engine.Config{URL: "https://sfu.example/rtc/room/1/join?userId=1"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	selector, ok := sess.(engine.VideoCodecSelector)
++	if !ok || selector.VideoCodec() != webrtc.MimeTypeVP9 {
++		t.Fatal("the engine must name VP9 as the codec a published track carries")
++	}
++	if _, ok := sess.(engine.KeyframeRequestSource); !ok {
++		t.Fatal("the engine must report the relay's keyframe requests")
++	}
++	if _, ok := sess.(engine.VideoTrackCapable); !ok {
++		t.Fatal("the engine must take a video track")
++	}
++	if err := sess.Send([]byte("x")); !errors.Is(err, ErrSendUnsupported) {
++		t.Fatalf("Send error = %v, want %v: the room relays no data between guests", err, ErrSendUnsupported)
++	}
++}
++
++func TestOfferURLAddsWhatDescribesTheOffer(t *testing.T) {
++	got, err := offerURL("https://sfu.mts-link.ru/rtc/room/20300400600/join?userId=1&joinToken=vcJ&userName=%D0%9C", "2")
++	if err != nil {
++		t.Fatal(err)
++	}
++	u, err := url.Parse(got)
++	if err != nil {
++		t.Fatal(err)
++	}
++	q := u.Query()
++	for key, want := range map[string]string{
++		"userId": "1", "joinToken": "vcJ", "userName": "М",
++		"twcc": "true", "originMid": "2", "preferredPublishCodec": "vp9",
++	} {
++		if q.Get(key) != want {
++			t.Errorf("%s = %q, want %q", key, q.Get(key), want)
++		}
++	}
++	if u.Host != "sfu.mts-link.ru" || u.Path != "/rtc/room/20300400600/join" {
++		t.Errorf("the join moved: %s%s", u.Host, u.Path)
++	}
++	if _, err := offerURL("://nothing", "2"); err == nil {
++		t.Error("a join URL that does not parse was taken")
++	}
++}
++
++func TestPeerOfReadsTheSessionNameOfAnAnswer(t *testing.T) {
++	answer := "v=0\r\no=odin 0 0 IN IP4 127.0.0.1\r\ns=" + testPeer + "\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
++	if got := peerOf(answer); got != testPeer {
++		t.Fatalf("peerOf = %q", got)
++	}
++	for _, sdp := range []string{"v=0\r\no=odin 0 0\r\n", "v=0\r\ns=-\r\n", "v=0\r\ns=a/b\r\n", "v=0\r\ns=a b\r\n", ""} {
++		if got := peerOf(sdp); got != "" {
++			t.Errorf("peerOf(%q) = %q, want none: a peer id goes into a path", sdp, got)
++		}
++	}
++}
++
++// The whole join against a relay that negotiates for real.
++func TestSessionJoinsPublishesAndHearsTheRelay(t *testing.T) {
++	sfu := newFakeSFU(t)
++	s, track := newPublishingSession(t, sfu.config())
++
++	remote := make(chan *webrtc.TrackRemote, 4)
++	s.SetVideoTrackHandler(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) { remote <- tr })
++	asked := make(chan struct{}, 16)
++	s.SetKeyframeRequestHandler(func() {
++		select {
++		case asked <- struct{}{}:
++		default:
++		}
++	})
++
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++	if err := s.Connect(ctx); err != nil {
++		t.Fatalf("Connect: %v", err)
++	}
++	if !s.CanSend() || !s.SubscriberCanSend() {
++		t.Fatal("a joined session cannot send")
++	}
++
++	// The join: the offer as the body, nothing of the guest's cookies - the
++	// SFU reads none, and they are the gateway's - and the three things that
++	// describe the offer added to what the provider gave.
++	sfu.mu.Lock()
++	head, query, offer, pins := sfu.joinHead, sfu.joinQuery, sfu.offer, append([]string(nil), sfu.pins...)
++	sfu.mu.Unlock()
++	if ct := head.Get("Content-Type"); ct != "application/sdp" {
++		t.Errorf("join Content-Type = %q", ct)
++	}
++	if head.Get("Cookie") != "" {
++		t.Error("the guest's cookies went to the SFU")
++	}
++	for key, want := range map[string]string{
++		"userId": "100200999", "joinToken": "vcJOIN", "publishToken": "vcPRIVATE", "disableRecording": "true",
++		"twcc": "true", "preferredPublishCodec": "vp9", "originMid": "2",
++	} {
++		if query.Get(key) != want {
++			t.Errorf("join %s = %q, want %q", key, query.Get(key), want)
++		}
++	}
++
++	// The offer: the published camera, a microphone line, the one audio
++	// player the SFU allows, and nine video slots - the web client's layout
++	// less the line it leaves inactive and the data channel, neither of which
++	// the SFU asks for.
++	want := make([]string, 0, 3+receiveSlots)
++	want = append(want, "video sendrecv", "audio sendrecv", "audio recvonly")
++	for range receiveSlots {
++		want = append(want, "video recvonly")
++	}
++	if got := mediaSections(offer); strings.Join(got, ", ") != strings.Join(want, ", ") {
++		t.Errorf("offer sections:\n %s\nwant:\n %s", strings.Join(got, ", "), strings.Join(want, ", "))
++	}
++	if !strings.Contains(offer, "\r\na=mid:2\r\na=") && !strings.Contains(offer, "a=mid:2\r\n") {
++		t.Error("no mid 2 in the offer")
++	}
++	if strings.Contains(offer, "VP8") || strings.Contains(offer, "H264") {
++		t.Error("the offer names a video codec other than the one it publishes")
++	}
++
++	// The pin the web client sends after every join: nothing pinned.
++	if len(pins) != 1 || pins[0] != "POST /rtc/peer/"+testPeer+"/pin | {\"streams\":[\"\"]} | application/json | " {
++		t.Errorf("pins = %q", pins)
++	}
++
++	// What is written to the track reaches the relay as VP9.
++	stop := make(chan struct{})
++	defer close(stop)
++	go func() {
++		for {
++			select {
++			case <-stop:
++				return
++			case <-time.After(20 * time.Millisecond):
++				_ = track.WriteSample(media.Sample{Data: blackKeyframe, Duration: 20 * time.Millisecond})
++			}
++		}
++	}()
++	var published *webrtc.TrackRemote
++	select {
++	case published = <-sfu.publisher:
++	case <-time.After(10 * time.Second):
++		t.Fatal("the relay never saw the published track")
++	}
++	if !strings.EqualFold(published.Codec().MimeType, webrtc.MimeTypeVP9) {
++		t.Fatalf("published as %s", published.Codec().MimeType)
++	}
++	select {
++	case payload := <-sfu.published:
++		var d codecs.VP9Packet
++		if _, err := d.Unmarshal(payload); err != nil {
++			t.Fatalf("the published packet is not VP9: %v", err)
++		}
++	case <-time.After(10 * time.Second):
++		t.Fatal("no packet reached the relay")
++	}
++
++	// The relay asks for a keyframe; the handler hears it.
++	sfu.mu.Lock()
++	relay := sfu.pcs[0]
++	sfu.mu.Unlock()
++	within(t, 10*time.Second, "a keyframe request reaching the handler", func() bool {
++		_ = relay.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(published.SSRC())}})
++		select {
++		case <-asked:
++			return true
++		default:
++			return false
++		}
++	})
++
++	// What the relay sends into a slot reaches the track handler.
++	within(t, 10*time.Second, "the relay's video reaching the handler", func() bool {
++		_ = sfu.toEngine.WriteRTP(&rtp.Packet{
++			Header:  rtp.Header{Version: 2, PayloadType: 98, SequenceNumber: uint16(time.Now().UnixNano()), Timestamp: 1}, //nolint:gosec // any number
++			Payload: append([]byte{0x9f, 0x80, 0x01, 0x10, 0x01, 0x40, 0x00, 0xb4}, blackKeyframe...),
++		})
++		select {
++		case tr := <-remote:
++			return strings.EqualFold(tr.Codec().MimeType, webrtc.MimeTypeVP9)
++		default:
++			return false
++		}
++	})
++
++	// A guest that joined leaves nothing to take back: the service drops the
++	// conference of a publisher that was on the SFU and left.
++	if err := s.Close(); err != nil {
++		t.Fatalf("Close: %v", err)
++	}
++	if s.CanSend() {
++		t.Error("a closed session can send")
++	}
++	sfu.mu.Lock()
++	defer sfu.mu.Unlock()
++	if len(sfu.leaves) != 0 {
++		t.Errorf("leave calls after a join that succeeded: %q", sfu.leaves)
++	}
++}
++
++// A join the SFU refuses says why - its own words, which name the rule the
++// offer broke - and takes back the conference nothing will publish into.
++func TestARefusedJoinSaysWhyAndTakesTheConferenceBack(t *testing.T) {
++	sfu := newFakeSFU(t)
++	sfu.refuseStatus = http.StatusBadRequest
++	sfu.refuseBody = "SDP validation error: exceeded maximal audio players value 1"
++	s, _ := newPublishingSession(t, sfu.config())
++
++	err := s.Connect(context.Background())
++	if !errors.Is(err, ErrJoinRefused) {
++		t.Fatalf("Connect error = %v, want %v", err, ErrJoinRefused)
++	}
++	if msg := err.Error(); !strings.Contains(msg, "400") || strings.Contains(msg, "exceeded maximal audio players") {
++		t.Errorf("error text = %q, want status without untrusted SFU body", msg)
++	}
++	if strings.Contains(err.Error(), "vcJOIN") || strings.Contains(err.Error(), "vcPRIVATE") {
++		t.Error("a token is in the error")
++	}
++	if s.CanSend() {
++		t.Error("a session whose join was refused can send")
++	}
++	sfu.mu.Lock()
++	defer sfu.mu.Unlock()
++	if len(sfu.leaves) != 1 || sfu.leaves[0] != "DELETE /api/conferences/"+testConf+" | "+testCookies {
++		t.Errorf("leaves = %q, want the conference taken back with the guest's cookies", sfu.leaves)
++	}
++}
++
++func TestAnAnswerThatIsNotSDPIsRefused(t *testing.T) {
++	sfu := newFakeSFU(t)
++	sfu.refuseStatus = http.StatusOK
++	sfu.refuseBody = `{"error":"no room"}`
++	s, _ := newPublishingSession(t, sfu.config())
++	if err := s.Connect(context.Background()); !errors.Is(err, ErrNoAnswer) {
++		t.Fatalf("Connect error = %v, want %v", err, ErrNoAnswer)
++	}
++}
++
++// The join works without the pin (measured), so a refused pin is not a
++// refused join.
++func TestARefusedPinDoesNotFailTheJoin(t *testing.T) {
++	sfu := newFakeSFU(t)
++	sfu.pinStatus = http.StatusForbidden
++	s, _ := newPublishingSession(t, sfu.config())
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++	if err := s.Connect(ctx); err != nil {
++		t.Fatalf("Connect with a refused pin: %v", err)
++	}
++}
++
++func TestASessionWithNothingToPublishDoesNotJoin(t *testing.T) {
++	sfu := newFakeSFU(t)
++	sess, err := New(context.Background(), sfu.config())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := sess.Connect(context.Background()); !errors.Is(err, ErrNoVideoTrack) {
++		t.Fatalf("Connect error = %v, want %v", err, ErrNoVideoTrack)
++	}
++	sfu.mu.Lock()
++	defer sfu.mu.Unlock()
++	if sfu.joins != 0 {
++		t.Error("a session with no track asked the SFU for a join")
++	}
++}
++
++// A rejoin is a new guest: the provider's fresh credentials, a join from
++// scratch, and the transport told so it can shake hands again.
++func TestReconnectJoinsAgainWithFreshCredentials(t *testing.T) {
++	sfu := newFakeSFU(t)
++	cfg := sfu.config()
++	refreshed := 0
++	cfg.Refresh = func(context.Context) (engine.Credentials, error) {
++		refreshed++
++		return engine.Credentials{
++			URL:   strings.Replace(sfu.joinURL(), "joinToken=vcJOIN", "joinToken=vcSECOND", 1),
++			Token: testCookies, Extra: cfg.Extra,
++		}, nil
++	}
++	s, _ := newPublishingSession(t, cfg)
++	notified := 0
++	s.SetReconnectCallback(func() { notified++ })
++
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++	if err := s.Connect(ctx); err != nil {
++		t.Fatalf("Connect: %v", err)
++	}
++	if err := s.reconnect(ctx); err != nil {
++		t.Fatalf("reconnect: %v", err)
++	}
++	sfu.mu.Lock()
++	joins, token := sfu.joins, sfu.joinQuery.Get("joinToken")
++	sfu.mu.Unlock()
++	if joins != 2 || token != "vcSECOND" || refreshed != 1 {
++		t.Fatalf("joins = %d with token %q after %d refresh(es), want a second join with the fresh token", joins, token, refreshed)
++	}
++	if notified != 1 || !s.CanSend() {
++		t.Fatalf("reconnect notices = %d, can send = %v", notified, s.CanSend())
++	}
++}
++
++func TestACloseSessionRefusesToConnect(t *testing.T) {
++	sfu := newFakeSFU(t)
++	s, _ := newPublishingSession(t, sfu.config())
++	_ = s.Close()
++	if err := s.Connect(context.Background()); !errors.Is(err, ErrSessionClosed) {
++		t.Fatalf("Connect on a closed session: %v, want %v", err, ErrSessionClosed)
++	}
++}
++
++// ai-generated: what each ICE mode asks of pion.
++func TestICENetworkTypes(t *testing.T) {
++	if iceNetworkTypes("") != nil || iceNetworkTypes("udp") != nil {
++		t.Fatal("no hint and udp keep the shared UDP settings")
++	}
++	if got := iceNetworkTypes("tcp"); len(got) != 1 || got[0] != webrtc.NetworkTypeTCP4 {
++		t.Fatalf("tcp = %v", got)
++	}
++	if got := iceNetworkTypes("both"); len(got) != 2 {
++		t.Fatalf("both = %v", got)
++	}
++}
+diff --git a/internal/engine/mtslink/rga_lifecycle_test.go b/internal/engine/mtslink/rga_lifecycle_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/mtslink/rga_lifecycle_test.go
+@@ -0,0 +1,84 @@
++package mtslink
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/engine"
++)
++
++func TestRGARefusalNeverEchoesGuestCredentials(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusForbidden)
++		io.WriteString(w, "joinToken=fixture-join-secret publishToken=fixture-publish-secret")
++	}))
++	defer srv.Close()
++	_, err := joinOffer(context.Background(), srv.Client(), srv.URL, "v=0")
++	if !errors.Is(err, ErrJoinRefused) || strings.Contains(err.Error(), "fixture-") || strings.Contains(err.Error(), "Token") {
++		t.Fatal("SFU refusal leaked credential-bearing body or lost status category")
++	}
++}
++
++func TestRGACloseCancelsAndJoinsPendingConnect(t *testing.T) {
++	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var once sync.Once
++	defer once.Do(func() { close(release) })
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method == http.MethodDelete {
++			w.WriteHeader(204)
++			return
++		}
++		io.Copy(io.Discard, r.Body)
++		close(entered)
++		select {
++		case <-r.Context().Done():
++			close(cancelled)
++		case <-release:
++			w.WriteHeader(503)
++		}
++	}))
++	defer srv.Close()
++	s, _ := newPublishingSession(t, engine.Config{URL: srv.URL + "/join", Extra: map[string]string{"gateway": srv.URL, "conferenceId": "123"}})
++	connected := make(chan error, 1)
++	go func() { connected <- s.Connect(context.Background()) }()
++	select {
++	case <-entered:
++	case <-time.After(3 * time.Second):
++		t.Fatal("join did not reach barrier")
++	}
++	closed := make(chan struct{})
++	go func() { _ = s.Close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(3 * time.Second):
++		t.Fatal("Close did not settle pending Connect")
++	}
++	select {
++	case <-cancelled:
++	case <-time.After(300 * time.Millisecond):
++		once.Do(func() { close(release) })
++		<-connected
++		t.Fatal("Close returned while pending HTTP join was still active")
++	}
++	select {
++	case err := <-connected:
++		if err == nil {
++			t.Fatal("closed startup succeeded")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("pending Connect worker outlived Close")
++	}
++	if s.CanSend() {
++		t.Fatal("closed generation became usable")
++	}
++	if err := s.Connect(context.Background()); !errors.Is(err, ErrSessionClosed) {
++		t.Fatal("closed session reconnected")
++	}
++}
+diff --git a/internal/engine/mtslink/signal.go b/internal/engine/mtslink/signal.go
+new file mode 100644
+--- /dev/null
++++ b/internal/engine/mtslink/signal.go
+@@ -0,0 +1,160 @@
++package mtslink
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++)
++
++// MTS Link's SFU ("odin" in its answers) speaks SDP over plain HTTP, measured
++// against the live service on 2026-10-11:
++//
++//	POST {join}                      the offer in, the answer out
++//	POST {origin}/rtc/peer/{id}/pin  {"streams":[""]}, the web client's call
++//	                                 after every join; the peer is the
++//	                                 answer's s= line
++//
++// No WebSocket and no trickle: the answer carries the SFU's candidates and
++// the guest's reach it as peer-reflexive ones. The SFU authenticates by the
++// join's own tokens and reads no cookie.
++
++var (
++	// ErrJoinRefused is the SFU answering the join with anything but 200.
++	// Provider/proxy text is untrusted and may echo guest credentials.
++	ErrJoinRefused = errors.New("mtslink: the SFU refused the join")
++	// ErrNoAnswer is a join that answered 200 and no SDP.
++	ErrNoAnswer = errors.New("mtslink: the room join did not answer an SDP")
++	// ErrNoPeerID is an answer that names no peer.
++	ErrNoPeerID = errors.New("mtslink: the answer named no peer")
++)
++
++const (
++	// maxSignalBody bounds a signaling reply: an answer to the fourteen
++	// sections the web client offers is forty kilobytes.
++	maxSignalBody = 1 << 20
++	// pinNothing is the body of the pin the web client sends after a join:
++	// no stream held in a slot, the SFU fills them as it sees fit.
++	pinNothing = `{"streams":[""]}`
++	// publishCodec is what the join asks the SFU to take from the published
++	// track, in the service's own spelling.
++	publishCodec = "vp9"
++)
++
++// offerURL is the provider's room join with what describes the offer added:
++// the transport-wide congestion feedback the offer carries, the m-line the
++// SFU sends the room's audio on, and the codec of the published track.
++func offerURL(join, audioPlayerMid string) (string, error) {
++	u, err := url.Parse(join)
++	if err != nil || u.Scheme == "" || u.Host == "" {
++		return "", fmt.Errorf("%w: the join URL does not parse", ErrNoEndpoint)
++	}
++	q := u.Query()
++	q.Set("twcc", "true")
++	q.Set("originMid", audioPlayerMid)
++	q.Set("preferredPublishCodec", publishCodec)
++	u.RawQuery = q.Encode()
++	return u.String(), nil
++}
++
++// joinOffer POSTs the offer and returns the answer's SDP.
++func joinOffer(ctx context.Context, client *http.Client, joinURL, offer string) (string, error) {
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL, strings.NewReader(offer))
++	if err != nil {
++		return "", fmt.Errorf("mtslink: join request: %w", err)
++	}
++	req.Header.Set("Content-Type", "application/sdp")
++	resp, err := client.Do(req)
++	if err != nil {
++		return "", fmt.Errorf("mtslink: join: %w", redactURL(err))
++	}
++	defer func() { _ = resp.Body.Close() }()
++	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxSignalBody))
++	if resp.StatusCode != http.StatusOK {
++		return "", fmt.Errorf("%w: status %d", ErrJoinRefused, resp.StatusCode)
++	}
++	answer := string(body)
++	if !strings.HasPrefix(answer, "v=0") {
++		return "", ErrNoAnswer
++	}
++	return answer, nil
++}
++
++// redactURL keeps a transport error's reason and drops its URL: the join's
++// carries both of the guest's tokens.
++func redactURL(err error) error {
++	var uerr *url.Error
++	if errors.As(err, &uerr) {
++		return fmt.Errorf("%s: %w", uerr.Op, uerr.Err)
++	}
++	return err
++}
++
++// peerOf is the peer an answer names: its session name, the `s=` line. The id
++// goes into a path, so one that could not be a path segment is none.
++func peerOf(answer string) string {
++	for _, line := range strings.Split(answer, "\n") {
++		id, ok := strings.CutPrefix(strings.TrimSpace(line), "s=")
++		if !ok {
++			continue
++		}
++		if id == "" || id == "-" || strings.ContainsAny(id, "/?#% \t") {
++			return ""
++		}
++		return id
++	}
++	return ""
++}
++
++// pinPeer sends the pin the web client sends after a join. The media flows
++// without it (measured), so the caller treats a failure as a note, not as a
++// join that failed.
++func pinPeer(ctx context.Context, client *http.Client, joinURL, peerID string) error {
++	u, err := url.Parse(joinURL)
++	if err != nil {
++		return fmt.Errorf("mtslink: pin url: %w", err)
++	}
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
++		u.Scheme+"://"+u.Host+"/rtc/peer/"+peerID+"/pin", strings.NewReader(pinNothing))
++	if err != nil {
++		return fmt.Errorf("mtslink: pin request: %w", err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := client.Do(req)
++	if err != nil {
++		return fmt.Errorf("mtslink: pin: %w", redactURL(err))
++	}
++	defer func() { _ = resp.Body.Close() }()
++	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxSignalBody))
++	if resp.StatusCode != http.StatusOK {
++		return fmt.Errorf("mtslink: pin: status %d", resp.StatusCode) //nolint:err113 // a note for the log, matched by nobody
++	}
++	return nil
++}
++
++// takeBack removes the guest's conference from the room's list: DELETE
++// {gateway}/api/conferences/{id} with the guest's cookies (204, measured).
++// The service does it by itself for a publisher that was on the SFU and
++// left; a conference whose join never got there stays until this is called.
++func takeBack(ctx context.Context, client *http.Client, gateway, conferenceID, cookies string) error {
++	if gateway == "" || conferenceID == "" || strings.Trim(conferenceID, "0123456789") != "" {
++		return nil
++	}
++	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, gateway+"/api/conferences/"+conferenceID, http.NoBody)
++	if err != nil {
++		return fmt.Errorf("mtslink: leave request: %w", err)
++	}
++	if cookies != "" {
++		req.Header.Set("Cookie", cookies)
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		return fmt.Errorf("mtslink: leave: %w", redactURL(err))
++	}
++	defer func() { _ = resp.Body.Close() }()
++	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxSignalBody))
++	return nil
++}
+diff --git a/internal/roomhint/roomhint.go b/internal/roomhint/roomhint.go
+new file mode 100644
+--- /dev/null
++++ b/internal/roomhint/roomhint.go
+@@ -0,0 +1,53 @@
++// Package roomhint reads the hint a room link may carry for the client side
++// alone: "…?ice=tcp" asks the engine to reach the relay over ICE-TCP instead
++// of UDP, for a network that lets TCP to the relay through and starves UDP (a
++// mobile network under an allow list). The server joins the same room by its
++// plain link, so the hint is no part of the room's identity: it is cut before
++// the link names the room, the binding token included.
++//
++// ai-generated: the whole package.
++package roomhint
++
++import "strings"
++
++// ICE modes a hint can ask for. ICEDefault is a link without one: the engine
++// does what it always did.
++const (
++	ICEDefault = ""
++	ICEUDP     = "udp"
++	ICETCP     = "tcp"
++	ICEBoth    = "both"
++)
++
++const iceKey = "ice="
++
++// Mode is s when it names an ICE mode this package knows, else ICEDefault: a
++// mode handed in by a caller (auth.Config.DefaultICE) is held to the same words
++// a link's hint is.
++//
++// ai-generated: this function.
++func Mode(s string) string {
++	switch s {
++	case ICEUDP, ICETCP, ICEBoth:
++		return s
++	}
++	return ICEDefault
++}
++
++// Split returns the room link without its hint, and the ICE mode the hint
++// asks for. A link without a hint, or with one this package does not know,
++// comes back byte for byte as it was, so its binding token is unchanged.
++func Split(room string) (string, string) {
++	trimmed := strings.TrimSpace(room)
++	for _, sep := range []string{"?", "&"} {
++		at := strings.LastIndex(trimmed, sep+iceKey)
++		if at < 0 {
++			continue
++		}
++		switch mode := trimmed[at+len(sep)+len(iceKey):]; mode {
++		case ICEUDP, ICETCP, ICEBoth:
++			return trimmed[:at], mode
++		}
++	}
++	return room, ICEDefault
++}
+diff --git a/internal/roomhint/roomhint_test.go b/internal/roomhint/roomhint_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/roomhint/roomhint_test.go
+@@ -0,0 +1,36 @@
++package roomhint
++
++import "testing"
++
++func TestSplit(t *testing.T) {
++	const room = "https://my.mts-link.ru/j/123/456"
++	for _, tc := range []struct{ in, room, mode string }{
++		{room, room, ICEDefault},
++		{room + "?ice=tcp", room, ICETCP},
++		{room + "?ice=both", room, ICEBoth},
++		{room + "?ice=udp", room, ICEUDP},
++		{" " + room + "?ice=tcp ", room, ICETCP},
++		{room + "?x=1&ice=tcp", room + "?x=1", ICETCP},
++		// unknown modes and lookalikes leave the link as it is
++		{room + "?ice=quic", room + "?ice=quic", ICEDefault},
++		{room + "?ice=tcp&x=1", room + "?ice=tcp&x=1", ICEDefault},
++		{"https://telemost.yandex.ru/j/123", "https://telemost.yandex.ru/j/123", ICEDefault},
++	} {
++		gotRoom, gotMode := Split(tc.in)
++		if gotRoom != tc.room || gotMode != tc.mode {
++			t.Errorf("Split(%q) = %q, %q; want %q, %q", tc.in, gotRoom, gotMode, tc.room, tc.mode)
++		}
++	}
++}
++
++// ai-generated: a mode handed in by a caller is held to the words a link's hint is.
++func TestModeKeepsOnlyTheModesThisPackageKnows(t *testing.T) {
++	for _, tc := range []struct{ in, want string }{
++		{ICEUDP, ICEUDP}, {ICETCP, ICETCP}, {ICEBoth, ICEBoth},
++		{"", ICEDefault}, {"TCP", ICEDefault}, {"sideways", ICEDefault}, {"tcp ", ICEDefault},
++	} {
++		if got := Mode(tc.in); got != tc.want {
++			t.Errorf("Mode(%q) = %q, want %q", tc.in, got, tc.want)
++		}
++	}
++}
+diff --git a/internal/transport/common/session.go b/internal/transport/common/session.go
+--- a/internal/transport/common/session.go
++++ b/internal/transport/common/session.go
+@@ -74,6 +74,39 @@
+ 	return limited.PublishRateLimit()
+ }
+ 
++// VideoCodec forwards the codec the engine's service takes, "" when the
++// engine names none and the transport's own applies.
++func (v *EngineVideoSession) VideoCodec() string {
++	return VideoCodec(v.session)
++}
++
++// VideoCodec reads the codec a session names for published video, "" for a
++// session that names none.
++func VideoCodec(session any) string {
++	selector, ok := session.(engine.VideoCodecSelector)
++	if !ok {
++		return ""
++	}
++	return selector.VideoCodec()
++}
++
++// SetKeyframeRequestHandler forwards cb to an engine that reports its relay's
++// keyframe requests, and says whether it does.
++func (v *EngineVideoSession) SetKeyframeRequestHandler(cb func()) bool {
++	return OnKeyframeRequest(v.session, cb)
++}
++
++// OnKeyframeRequest registers cb with a session that reports keyframe
++// requests and says whether it is one.
++func OnKeyframeRequest(session any, cb func()) bool {
++	source, ok := session.(engine.KeyframeRequestSource)
++	if !ok {
++		return false
++	}
++	source.SetKeyframeRequestHandler(cb)
++	return true
++}
++
+ // Connect brings up the underlying engine session.
+ func (v *EngineVideoSession) Connect(ctx context.Context) error {
+ 	if err := v.session.Connect(ctx); err != nil {
+diff --git a/internal/transport/common/track.go b/internal/transport/common/track.go
+--- a/internal/transport/common/track.go
++++ b/internal/transport/common/track.go
+@@ -15,14 +15,19 @@
+ // Track and stream IDs get a random per-peer suffix because Jitsi/Jicofo keys
+ // participant sources by msid (track-id + stream-id) and rejects a
+ // session-accept whose msid collides with one already in the conference.
++//
++// options are pion's own track options; a transport whose carrier brings its
++// own packetizer passes it here.
+ func NewVideoTrack(
+ 	capability webrtc.RTPCodecCapability,
+ 	name string,
++	options ...func(*webrtc.TrackLocalStaticRTP),
+ ) (*webrtc.TrackLocalStaticSample, error) {
+ 	track, err := webrtc.NewTrackLocalStaticSample(
+ 		capability,
+ 		name+"-"+RandomID(),
+ 		"olcrtc-"+RandomID(),
++		options...,
+ 	)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("create local video track: %w", err)
+diff --git a/internal/transport/vp8channel/carrier.go b/internal/transport/vp8channel/carrier.go
+new file mode 100644
+--- /dev/null
++++ b/internal/transport/vp8channel/carrier.go
+@@ -0,0 +1,299 @@
++package vp8channel
++
++import (
++	"crypto/rand"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"strings"
++
++	"github.com/pion/rtp"
++	"github.com/pion/rtp/codecs"
++	"github.com/pion/webrtc/v4"
++)
++
++const mimeTypeRED = "video/red"
++
++// A carrier is the video codec the transport's frames ride as. VP8 is the
++// transport's own: every frame it builds starts with the VP8 keepalive
++// keyframe (wire.go) and goes to the track as it is. A relay that forwards no
++// VP8 (MTS Link's SFU answers H264 and VP9 only) is given the same frames in
++// the codec it does take: the engine names it (engine.VideoCodecSelector), the
++// frames are re-headed where they reach the track and un-headed where they
++// leave it, and nothing in between - KCP, lanes, batching, the epoch header -
++// knows the difference.
++
++// ErrCarrierCodec is an engine asking for a codec the transport cannot dress
++// its frames in.
++var ErrCarrierCodec = errors.New("vp8channel: no carrier for the engine's video codec")
++
++// frameAssembler turns the RTP packets of one track into whole frames in the
++// transport's own layout: the epoch header at tokenOff, the KCP bytes behind
++// it. A frame is returned once, valid until the next call.
++type frameAssembler interface {
++	processRTPPacket(pkt *rtp.Packet) []byte
++}
++
++type carrier struct {
++	// capability is what the published track announces.
++	capability webrtc.RTPCodecCapability
++	// trackOptions are passed to the track; the VP9 carrier brings its own
++	// packetizer.
++	trackOptions []func(*webrtc.TrackLocalStaticRTP)
++	// dress re-heads a frame for the track, into dst when it has the room;
++	// nil when a frame goes out as it is. keyframe asks for a frame the relay
++	// will count as a keyframe, whatever that takes on this carrier.
++	dress func(dst, frame []byte, keyframe bool) []byte
++	// newAssembler makes the reader of one remote track.
++	newAssembler func() frameAssembler
++	// reads lists the MIME types of the remote tracks that are read; the
++	// rest are drained.
++	reads []string
++	// keyframes says the relay asks for keyframes (RTCP PLI) and forwards
++	// nothing of a track until one arrives, so a request is answered at once.
++	keyframes bool
++}
++
++// carrierFor is the carrier for the codec an engine names; none named is VP8.
++func carrierFor(mime string) (*carrier, error) {
++	switch {
++	case mime == "", strings.EqualFold(mime, webrtc.MimeTypeVP8):
++		return &carrier{
++			capability:   webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
++			newAssembler: func() frameAssembler { return &vp8FrameState{} },
++			reads:        []string{webrtc.MimeTypeVP8, mimeTypeRED},
++		}, nil
++	case strings.EqualFold(mime, webrtc.MimeTypeVP9):
++		return &carrier{
++			capability: webrtc.RTPCodecCapability{
++				MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, SDPFmtpLine: "profile-id=0",
++			},
++			trackOptions: []func(*webrtc.TrackLocalStaticRTP){
++				webrtc.WithPayloader(func(webrtc.RTPCodecCapability) (rtp.Payloader, error) {
++					return newVP9Payloader(), nil
++				}),
++			},
++			dress:        vp9Dress,
++			newAssembler: func() frameAssembler { return &vp9FrameState{} },
++			reads:        []string{webrtc.MimeTypeVP9},
++			keyframes:    true,
++		}, nil
++	default:
++		return nil, fmt.Errorf("%w: %q", ErrCarrierCodec, mime)
++	}
++}
++
++// accepts says whether a remote track of this MIME type carries frames. A nil
++// carrier is the transport's own VP8.
++func (c *carrier) accepts(mime string) bool {
++	if c == nil {
++		return strings.EqualFold(mime, webrtc.MimeTypeVP8) || strings.EqualFold(mime, mimeTypeRED)
++	}
++	for _, m := range c.reads {
++		if strings.EqualFold(mime, m) {
++			return true
++		}
++	}
++	return false
++}
++
++// assembler is the reader of one remote track.
++func (c *carrier) assembler() frameAssembler {
++	if c == nil {
++		return &vp8FrameState{}
++	}
++	return c.newAssembler()
++}
++
++// answersKeyframeRequests says whether a relay's keyframe request is answered.
++func (c *carrier) answersKeyframeRequests() bool { return c != nil && c.keyframes }
++
++// vp9Head is a real libvpx keyframe of a black 320x180 picture, what a browser
++// encodes for one (WebCodecs, vp09.00.10.08). MTS Link's SFU forwards a track
++// only from a keyframe it recognises, and what it recognises is a frame that
++// opens with one and spans more than a packet; whatever follows the keyframe
++// inside the frame is forwarded untouched (measured 2026-10-11: a frame cut
++// short of a whole keyframe is not taken, one with our bytes behind it is, at
++// 19 Mbit/s, byte for byte). The picture's size is of no account - 16x16 was
++// taken as readily - so it is a small one of a shape cameras have.
++var vp9Head = []byte{ //nolint:gochecknoglobals // wire constant, like vp8Keepalive
++	0x82, 0x49, 0x83, 0x42, 0x60, 0x13, 0xf0, 0x0b, 0x36, 0x66, 0x38, 0x24, 0x1c, 0x19, 0x92, 0x00,
++	0x00, 0x50, 0x43, 0xe8, 0xbf, 0x40, 0x00, 0x67, 0x3f, 0xfe, 0x2f, 0x20, 0x00, 0x04, 0xee, 0x66,
++	0xa7, 0x89, 0xd3, 0xfb, 0x17, 0xd3, 0x70, 0x4c, 0xc4, 0xe7, 0xd9, 0x1b, 0x5b, 0xe5, 0xac, 0x4c,
++	0x31, 0x1d, 0x90, 0x67, 0xac, 0xb3, 0x74, 0x35, 0x3e, 0x92, 0xab, 0xc1, 0xec, 0x2d, 0xe8, 0x00,
++	0x85, 0x59, 0x2c, 0xf0,
++}
++
++const (
++	// vp9HeadWidth and vp9HeadHeight are the picture vp9Head encodes, which
++	// the packetizer announces in every keyframe's scalability structure.
++	vp9HeadWidth  = 320
++	vp9HeadHeight = 180
++	// vp9TrailerLen is the two bytes that end a VP9 sample: how many bytes of
++	// it, counted from the start, are the carrier's own - the keyframe and
++	// any padding behind it. The reader finds the epoch header by them, so
++	// the keyframe a sender uses is its own business and can change without
++	// the readers changing with it.
++	vp9TrailerLen = 2
++	// vp9KeyframeSpan is how long a sample that has to count as a keyframe is
++	// made: past what one RTP packet holds at pion's 1200-byte MTU.
++	vp9KeyframeSpan = 1400
++	// vp9DescriptorLen is the payload descriptor of every packet (flags and a
++	// 15-bit picture id), vp9StructureLen the scalability structure the first
++	// packet of a keyframe adds (one layer and its size).
++	vp9DescriptorLen = 3
++	vp9StructureLen  = 5
++)
++
++// vp9Padding is what a keyframe is padded with.
++var vp9Padding [vp9KeyframeSpan]byte //nolint:gochecknoglobals // read-only zeros
++
++// vp9Dress re-heads a frame of the transport's own layout for a VP9 track:
++//
++//	vp9Head | padding | token, src, dst, crc | KCP bytes | len(vp9Head + padding)
++//
++// The VP8 keepalive the frame came with is dropped; what follows it is kept
++// as it is. A keyframe is padded to vp9KeyframeSpan, ahead of the epoch header
++// so the padding never reaches KCP.
++func vp9Dress(dst, frame []byte, keyframe bool) []byte {
++	body := frame[min(len(vp8Keepalive), len(frame)):]
++	pad := 0
++	if keyframe {
++		pad = max(vp9KeyframeSpan-len(vp9Head)-len(body)-vp9TrailerLen, 0)
++	}
++	out := dst[:0]
++	out = append(out, vp9Head...)
++	out = append(out, vp9Padding[:pad]...)
++	out = append(out, body...)
++	return binary.BigEndian.AppendUint16(out, uint16(len(vp9Head)+pad)) //nolint:gosec // at most vp9KeyframeSpan
++}
++
++// vp9Undress is the transport's own view of a VP9 sample: the epoch header at
++// tokenOff, as in a VP8 frame, and the KCP bytes behind it. The bytes ahead of
++// the header are the tail of the sender's keyframe and are never read. A
++// sample that is not one of ours - the relay's own placeholder picture, a
++// browser's camera - gives nil or a view whose header does not check.
++func vp9Undress(sample []byte) []byte {
++	n := len(sample)
++	if n < vp9TrailerLen {
++		return nil
++	}
++	head := int(binary.BigEndian.Uint16(sample[n-vp9TrailerLen:]))
++	if head < tokenOff || head+epochHdrLen-tokenOff+vp9TrailerLen > n {
++		return nil
++	}
++	return sample[head-tokenOff : n-vp9TrailerLen]
++}
++
++// vp9Payloader packetizes a sample the way libwebrtc does a single-layer VP9
++// keyframe (read off the SFU's forward of a browser, 2026-10-11): flexible
++// mode, a 15-bit picture id, and on the first packet the scalability
++// structure - one spatial layer and its size. Every sample this transport
++// writes opens with vp9Head, so every frame is announced as a keyframe: the
++// relay starts forwarding again at the next frame after a lost packet,
++// without waiting for an answer to its request.
++type vp9Payloader struct {
++	pictureID uint16
++}
++
++func newVP9Payloader() *vp9Payloader {
++	var b [2]byte
++	_, _ = rand.Read(b[:])
++	return &vp9Payloader{pictureID: binary.BigEndian.Uint16(b[:]) & 0x7fff}
++}
++
++const (
++	vp9FlagPictureID = 0x80   // I: a picture id follows
++	vp9FlagFlexible  = 0x10   // F: flexible mode
++	vp9FlagBegin     = 0x08   // B: first packet of the frame
++	vp9FlagEnd       = 0x04   // E: last packet of the frame
++	vp9FlagStructure = 0x02   // V: the scalability structure follows
++	vp9FlagNotRef    = 0x01   // Z: not a reference for upper spatial layers
++	vp9LongPictureID = 0x8000 // M, on the picture id's two bytes: the id is 15 bits
++	vp9OneLayerSized = 0x10   // N_S=0, Y=1, G=0: one layer, its width and height
++)
++
++// Payload implements rtp.Payloader. Each packet is the sample's next bytes
++// behind a fresh descriptor; the sample is copied, never kept.
++func (p *vp9Payloader) Payload(mtu uint16, sample []byte) [][]byte {
++	if len(sample) == 0 || int(mtu) <= vp9DescriptorLen+vp9StructureLen {
++		return nil
++	}
++	id := p.pictureID
++	p.pictureID = (p.pictureID + 1) & 0x7fff
++
++	packets := make([][]byte, 0, len(sample)/int(mtu)+1)
++	for rest, first := sample, true; len(rest) > 0; first = false {
++		hdrLen := vp9DescriptorLen
++		if first {
++			hdrLen += vp9StructureLen
++		}
++		n := min(len(rest), int(mtu)-hdrLen)
++		pkt := make([]byte, hdrLen, hdrLen+n)
++		pkt[0] = vp9FlagPictureID | vp9FlagFlexible | vp9FlagNotRef
++		binary.BigEndian.PutUint16(pkt[1:], vp9LongPictureID|id)
++		if first {
++			pkt[0] |= vp9FlagBegin | vp9FlagStructure
++			pkt[3] = vp9OneLayerSized
++			binary.BigEndian.PutUint16(pkt[4:], vp9HeadWidth)
++			binary.BigEndian.PutUint16(pkt[6:], vp9HeadHeight)
++		}
++		if n == len(rest) {
++			pkt[0] |= vp9FlagEnd
++		}
++		packets = append(packets, append(pkt, rest[:n]...))
++		rest = rest[n:]
++	}
++	return packets
++}
++
++// vp9FrameState assembles the packets of one VP9 track into frames, with the
++// same strictness as vp8FrameState: a sequence gap inside a frame drops the
++// frame, and a frame that never ends is dropped at maxAssembledFrameSize.
++type vp9FrameState struct {
++	pkt         codecs.VP9Packet
++	frameBuf    []byte
++	lastSeq     uint16
++	haveLastSeq bool
++	frameValid  bool
++}
++
++func (s *vp9FrameState) drop() {
++	s.frameValid = false
++	s.frameBuf = s.frameBuf[:0]
++}
++
++// processRTPPacket returns a whole frame in the transport's layout when pkt
++// completes one, nil otherwise.
++func (s *vp9FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
++	if s.haveLastSeq && pkt.SequenceNumber != s.lastSeq+1 {
++		s.drop()
++	}
++	s.lastSeq, s.haveLastSeq = pkt.SequenceNumber, true
++
++	body, err := s.pkt.Unmarshal(pkt.Payload)
++	if err != nil {
++		s.drop()
++		return nil
++	}
++	if s.pkt.B {
++		s.frameBuf = s.frameBuf[:0]
++		s.frameValid = true
++	}
++	if !s.frameValid {
++		return nil
++	}
++	if len(s.frameBuf)+len(body) > maxAssembledFrameSize {
++		s.drop()
++		return nil
++	}
++	s.frameBuf = append(s.frameBuf, body...)
++	if !s.pkt.E && !pkt.Marker {
++		return nil
++	}
++
++	frame := s.frameBuf
++	s.frameBuf = s.frameBuf[:0]
++	s.frameValid = false
++	return vp9Undress(frame)
++}
+diff --git a/internal/transport/vp8channel/carrier_test.go b/internal/transport/vp8channel/carrier_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/transport/vp8channel/carrier_test.go
+@@ -0,0 +1,437 @@
++package vp8channel
++
++import (
++	"bytes"
++	"encoding/binary"
++	"errors"
++	"testing"
++
++	"github.com/pion/rtp"
++	"github.com/pion/rtp/codecs"
++	"github.com/pion/rtp/codecs/vp9"
++	"github.com/pion/webrtc/v4"
++)
++
++// pionVideoMTU is what pion hands a payloader for one packet: its outbound
++// MTU of 1200 less the RTP header.
++const pionVideoMTU = 1188
++
++// frameOf builds a frame the way the rest of the transport does: the VP8
++// keepalive, the epoch header, the payload.
++func frameOf(token, src, dst uint32, payload []byte) []byte {
++	hdr := buildEpochHeaderTo(token, src, dst)
++	return append(hdr[:], payload...)
++}
++
++func TestTheVP9HeadIsARealKeyframe(t *testing.T) {
++	var h vp9.Header
++	if err := h.Unmarshal(vp9Head); err != nil {
++		t.Fatalf("the head does not parse as a VP9 frame: %v", err)
++	}
++	if h.NonKeyFrame {
++		t.Fatal("the head is not a keyframe")
++	}
++	if h.Width() != vp9HeadWidth || h.Height() != vp9HeadHeight {
++		t.Fatalf("the head is %dx%d, the descriptor announces %dx%d", h.Width(), h.Height(), vp9HeadWidth, vp9HeadHeight)
++	}
++}
++
++func TestCarrierForNamesTheCodecAnEngineAsksFor(t *testing.T) {
++	for _, mime := range []string{"", webrtc.MimeTypeVP8, "video/vp8"} {
++		c, err := carrierFor(mime)
++		if err != nil || c.capability.MimeType != webrtc.MimeTypeVP8 || c.dress != nil {
++			t.Fatalf("carrierFor(%q) = %+v, %v; want the transport's own VP8, undressed", mime, c, err)
++		}
++	}
++	c, err := carrierFor("video/vp9")
++	if err != nil {
++		t.Fatalf("carrierFor(vp9): %v", err)
++	}
++	if c.capability.MimeType != webrtc.MimeTypeVP9 || c.dress == nil || !c.keyframes {
++		t.Fatalf("carrierFor(vp9) = %+v; want VP9, dressed, keyframes on request", c)
++	}
++	if !c.accepts("video/VP9") || c.accepts(webrtc.MimeTypeVP8) || c.accepts(webrtc.MimeTypeH264) {
++		t.Fatal("a VP9 carrier reads VP9 tracks and nothing else")
++	}
++	if _, err := carrierFor(webrtc.MimeTypeH264); !errors.Is(err, ErrCarrierCodec) {
++		t.Fatalf("carrierFor(h264) error = %v, want %v", err, ErrCarrierCodec)
++	}
++}
++
++func TestTheVP8CarrierReadsVP8AndRED(t *testing.T) {
++	c, err := carrierFor("")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !c.accepts(webrtc.MimeTypeVP8) || !c.accepts("video/red") || c.accepts(webrtc.MimeTypeVP9) {
++		t.Fatal("the VP8 carrier reads VP8 and its RED wrapper, not VP9")
++	}
++}
++
++func TestVP9DressPutsTheFrameBehindTheHeadAndUndressFindsItAgain(t *testing.T) {
++	payload := bytes.Repeat([]byte{0xab}, 3000)
++	frame := frameOf(0x11223344, 0x00000005, 0x00000007, payload)
++
++	sample := vp9Dress(nil, frame, false)
++	if !bytes.HasPrefix(sample, vp9Head) {
++		t.Fatal("a dressed sample starts with the VP9 keyframe")
++	}
++	if bytes.Contains(sample, vp8Keepalive) {
++		t.Fatal("the VP8 keepalive rides a VP9 sample")
++	}
++	if got, want := len(sample), len(vp9Head)+len(frame)-len(vp8Keepalive)+vp9TrailerLen; got != want {
++		t.Fatalf("dressed %d bytes, want %d: a frame with a payload is not padded", got, want)
++	}
++
++	view := vp9Undress(sample)
++	if view == nil {
++		t.Fatal("undress refused a dressed sample")
++	}
++	token, src, dst, ok := parseEpochHeader(view)
++	if !ok || token != 0x11223344 || src != 5 || dst != 7 {
++		t.Fatalf("header after the round trip = %08x %d %d ok=%v", token, src, dst, ok)
++	}
++	if !bytes.Equal(view[epochHdrLen:], payload) {
++		t.Fatal("payload changed in the round trip")
++	}
++}
++
++// A keyframe the relay is to recognise has to span two packets (measured:
++// MTS Link's SFU never counts a single-packet keyframe), so the frame that
++// answers a keyframe request is padded past one.
++func TestVP9DressPadsAKeyframePastOnePacket(t *testing.T) {
++	bare := frameOf(1, 2, 0, nil)
++	sample := vp9Dress(nil, bare, true)
++	if len(sample) < vp9KeyframeSpan {
++		t.Fatalf("bare keepalive dressed to %d bytes, want at least %d", len(sample), vp9KeyframeSpan)
++	}
++	if packets := newVP9Payloader().Payload(pionVideoMTU, sample); len(packets) < 2 {
++		t.Fatalf("a bare keepalive went out in %d packet(s), want two or more", len(packets))
++	}
++	view := vp9Undress(sample)
++	if len(view) != epochHdrLen {
++		t.Fatalf("a padded keepalive undresses to %d bytes, want the bare %d: padding must not reach KCP", len(view), epochHdrLen)
++	}
++	if _, src, _, ok := parseEpochHeader(view); !ok || src != 2 {
++		t.Fatal("the padded keepalive lost its header")
++	}
++
++	// The idle beacon is the same bare frame ten times a second: it stays small.
++	if beacon := vp9Dress(nil, bare, false); len(beacon) != len(vp9Head)+epochHdrLen-len(vp8Keepalive)+vp9TrailerLen {
++		t.Fatalf("an idle keepalive dressed to %d bytes: only a keyframe is padded", len(beacon))
++	}
++	// A keyframe that is long enough on its own gets no padding.
++	long := frameOf(1, 2, 0, bytes.Repeat([]byte{1}, 2*vp9KeyframeSpan))
++	if got, want := len(vp9Dress(nil, long, true)), len(vp9Dress(nil, long, false)); got != want {
++		t.Fatalf("a long keyframe dressed to %d bytes, want the unpadded %d", got, want)
++	}
++}
++
++func TestVP9DressReusesTheBufferItIsHanded(t *testing.T) {
++	frame := frameOf(1, 2, 3, []byte("payload"))
++	buf := make([]byte, 0, 4096)
++	sample := vp9Dress(buf, frame, false)
++	if &sample[0] != &buf[:1][0] {
++		t.Fatal("dress allocated although the buffer had room")
++	}
++}
++
++func TestVP9UndressRefusesWhatIsNotADressedSample(t *testing.T) {
++	good := vp9Dress(nil, frameOf(1, 2, 3, []byte("payload")), false)
++	for name, sample := range map[string][]byte{
++		"empty":                    nil,
++		"shorter than a header":    good[:10],
++		"the relay's own keyframe": append(append([]byte(nil), vp9Head...), make([]byte, 141)...),
++		"head length past the end": binary.BigEndian.AppendUint16(append([]byte(nil), good[:len(good)-2]...), 60000),
++		"head length under the header offset": binary.BigEndian.AppendUint16(
++			append([]byte(nil), good[:len(good)-2]...), tokenOff-1),
++	} {
++		view := vp9Undress(sample)
++		if view == nil {
++			continue
++		}
++		if _, _, _, ok := parseEpochHeader(view); ok {
++			t.Errorf("%s: undressed to a frame with a valid header", name)
++		}
++	}
++}
++
++// What libwebrtc sent for a single-layer VP9 stream, read off the SFU's
++// forward of a browser (2026-10-11): 9b 90 9a 10 02 80 01 68 on the first
++// packet of a 640x360 keyframe with picture id 0x109a, 91 90 9a on the next,
++// 95 90 9a on its last.
++func TestVP9PayloaderPacketizesLikeABrowser(t *testing.T) {
++	p := newVP9Payloader()
++	p.pictureID = 0x109a
++	sample := vp9Dress(nil, frameOf(1, 2, 3, bytes.Repeat([]byte{0x5a}, 3000)), false)
++
++	packets := p.Payload(pionVideoMTU, sample)
++	if len(packets) != 3 {
++		t.Fatalf("%d packets for a %d-byte sample, want 3", len(packets), len(sample))
++	}
++	first := binary.BigEndian.AppendUint16(
++		binary.BigEndian.AppendUint16([]byte{0x9b, 0x90, 0x9a, 0x10}, vp9HeadWidth), vp9HeadHeight)
++	if !bytes.HasPrefix(packets[0], first) {
++		t.Fatalf("first packet starts % x, want % x", packets[0][:len(first)], first)
++	}
++	if !bytes.HasPrefix(packets[1], []byte{0x91, 0x90, 0x9a}) {
++		t.Fatalf("middle packet starts % x, want 91 90 9a", packets[1][:3])
++	}
++	if !bytes.HasPrefix(packets[2], []byte{0x95, 0x90, 0x9a}) {
++		t.Fatalf("last packet starts % x, want 95 90 9a", packets[2][:3])
++	}
++
++	var whole []byte
++	for i, pkt := range packets {
++		if len(pkt) > pionVideoMTU {
++			t.Fatalf("packet %d is %d bytes, over the %d it was given", i, len(pkt), pionVideoMTU)
++		}
++		var d codecs.VP9Packet
++		body, err := d.Unmarshal(pkt)
++		if err != nil {
++			t.Fatalf("packet %d does not parse as VP9: %v", i, err)
++		}
++		if d.P || !d.F || d.PictureID != 0x109a || d.B != (i == 0) || d.E != (i == len(packets)-1) {
++			t.Fatalf("packet %d descriptor = %+v", i, d)
++		}
++		whole = append(whole, body...)
++	}
++	if !bytes.Equal(whole, sample) {
++		t.Fatal("the packets do not add up to the sample")
++	}
++}
++
++func TestVP9PayloaderCountsPicturesAndWraps(t *testing.T) {
++	p := newVP9Payloader()
++	p.pictureID = 0x7fff
++	sample := vp9Dress(nil, frameOf(1, 2, 3, []byte("x")), false)
++	first := p.Payload(pionVideoMTU, sample)
++	second := p.Payload(pionVideoMTU, sample)
++	if !bytes.HasPrefix(first[0][1:], []byte{0xff, 0xff}) || !bytes.HasPrefix(second[0][1:], []byte{0x80, 0x00}) {
++		t.Fatalf("picture ids % x then % x, want 0xffff then 0x8000", first[0][1:3], second[0][1:3])
++	}
++	if got := p.Payload(pionVideoMTU, nil); len(got) != 0 {
++		t.Fatal("an empty sample makes no packet")
++	}
++	if got := p.Payload(4, sample); len(got) != 0 {
++		t.Fatal("an MTU the descriptor does not fit makes no packet")
++	}
++}
++
++// packetsOf is a sample on the wire: the payloader's packets with rising
++// sequence numbers and the marker on the last.
++func packetsOf(p *vp9Payloader, seq uint16, sample []byte) []*rtp.Packet {
++	payloads := p.Payload(pionVideoMTU, sample)
++	out := make([]*rtp.Packet, len(payloads))
++	for i, payload := range payloads {
++		if i > 0 {
++			seq++
++		}
++		out[i] = &rtp.Packet{
++			Header:  rtp.Header{SequenceNumber: seq, Marker: i == len(payloads)-1},
++			Payload: payload,
++		}
++	}
++	return out
++}
++
++func TestVP9FrameStateAssemblesWhatThePayloaderSent(t *testing.T) {
++	p := newVP9Payloader()
++	payload := bytes.Repeat([]byte{0xc3}, 5000)
++	frame := frameOf(9, 8, 7, payload)
++	state := &vp9FrameState{}
++
++	var got []byte
++	packets := packetsOf(p, 100, vp9Dress(nil, frame, false))
++	for i, pkt := range packets {
++		got = state.processRTPPacket(pkt)
++		if (got != nil) != (i == len(packets)-1) {
++			t.Fatalf("packet %d of %d: frame delivered = %v", i, len(packets), got != nil)
++		}
++	}
++	token, src, dst, ok := parseEpochHeader(got)
++	if !ok || token != 9 || src != 8 || dst != 7 || !bytes.Equal(got[epochHdrLen:], payload) {
++		t.Fatal("the assembled frame is not the one sent")
++	}
++
++	// The next frame assembles on the same state.
++	small := frameOf(9, 8, 7, []byte("next"))
++	for _, pkt := range packetsOf(p, 100+uint16(len(packets)), vp9Dress(nil, small, false)) { //nolint:gosec // test sizes
++		got = state.processRTPPacket(pkt)
++	}
++	if got == nil || string(got[epochHdrLen:]) != "next" {
++		t.Fatalf("second frame = %q", got)
++	}
++}
++
++func TestVP9FrameStateDropsAFrameWithAHole(t *testing.T) {
++	p := newVP9Payloader()
++	state := &vp9FrameState{}
++	packets := packetsOf(p, 10, vp9Dress(nil, frameOf(1, 2, 3, bytes.Repeat([]byte{1}, 4000)), false))
++	if len(packets) < 3 {
++		t.Fatalf("want a frame of three packets or more, got %d", len(packets))
++	}
++	for i, pkt := range packets {
++		if i == 1 {
++			continue // lost
++		}
++		if got := state.processRTPPacket(pkt); got != nil {
++			t.Fatal("a frame with a lost packet was delivered")
++		}
++	}
++	// and the frame after it is whole again
++	var got []byte
++	for _, pkt := range packetsOf(p, 10+uint16(len(packets)), vp9Dress(nil, frameOf(1, 2, 3, []byte("after")), false)) { //nolint:gosec // test sizes
++		got = state.processRTPPacket(pkt)
++	}
++	if got == nil || string(got[epochHdrLen:]) != "after" {
++		t.Fatal("the frame after a lost one did not assemble")
++	}
++}
++
++// An idle slot carries a keyframe of the relay's own every few seconds (209
++// bytes, measured): a VP9 frame that is not one of ours. The bytes here are a
++// stand-in of that size, not the relay's.
++func TestVP9FrameStateIgnoresAFrameThatIsNotOurs(t *testing.T) {
++	state := &vp9FrameState{}
++	placeholder := append([]byte{0x9f, 0x80, 0x01, 0x10, 0x02, 0x80, 0x01, 0x68}, bytes.Repeat([]byte{0x82}, 201)...)
++	got := state.processRTPPacket(&rtp.Packet{
++		Header:  rtp.Header{SequenceNumber: 1, Marker: true},
++		Payload: placeholder,
++	})
++	if got != nil {
++		if _, _, _, ok := parseEpochHeader(got); ok {
++			t.Fatal("a foreign VP9 frame passed as a frame of ours")
++		}
++	}
++}
++
++func TestVP9FrameStateBoundsAFrameThatNeverEnds(t *testing.T) {
++	state := &vp9FrameState{}
++	chunk := append([]byte{0x91, 0x80, 0x01}, bytes.Repeat([]byte{7}, 1100)...)
++	start := append([]byte{0x99, 0x80, 0x01}, bytes.Repeat([]byte{7}, 1100)...)
++	_ = state.processRTPPacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: 0}, Payload: start})
++	for seq := uint16(1); seq < 400; seq++ {
++		if got := state.processRTPPacket(&rtp.Packet{Header: rtp.Header{SequenceNumber: seq}, Payload: chunk}); got != nil {
++			t.Fatal("a frame with no end was delivered")
++		}
++		if len(state.frameBuf) > maxAssembledFrameSize {
++			t.Fatalf("the buffer grew to %d bytes, over the %d cap", len(state.frameBuf), maxAssembledFrameSize)
++		}
++	}
++}
++
++// A sample reaches the track dressed for the carrier, and the rate limiter
++// and the caller's buffer see none of it.
++func TestWriteSampleDressesForTheCarrier(t *testing.T) {
++	var written [][]byte
++	c, err := carrierFor("video/vp9")
++	if err != nil {
++		t.Fatal(err)
++	}
++	tr := &streamTransport{carrier: c}
++	tr.sampleWriter = func(data []byte) bool {
++		written = append(written, append([]byte(nil), data...))
++		return true
++	}
++	frame := frameOf(4, 5, 6, []byte("hello"))
++	before := append([]byte(nil), frame...)
++	if !tr.writeSampleLocked(frame) {
++		t.Fatal("write refused")
++	}
++	if !bytes.Equal(frame, before) {
++		t.Fatal("the caller's frame was changed")
++	}
++	if len(written) != 1 || !bytes.HasPrefix(written[0], vp9Head) {
++		t.Fatal("the track did not get a VP9 sample")
++	}
++	if view := vp9Undress(written[0]); view == nil || string(view[epochHdrLen:]) != "hello" {
++		t.Fatal("the sample does not undress to the frame")
++	}
++
++	// The idle beacon is a bare header through the same door: not padded.
++	written = nil
++	bare := tr.epochHeader()
++	_ = tr.writeSampleLocked(bare[:])
++	if len(written) != 1 || len(written[0]) >= vp9KeyframeSpan {
++		t.Fatalf("an idle keepalive went out as %d bytes", len(written[0]))
++	}
++
++	vp8, err := carrierFor("")
++	if err != nil {
++		t.Fatal(err)
++	}
++	tr.carrier, written = vp8, nil
++	_ = tr.writeSampleLocked(frame)
++	if len(written) != 1 || !bytes.Equal(written[0], frame) {
++		t.Fatal("the VP8 carrier must write a frame as it is")
++	}
++}
++
++// A relay that asked for a keyframe forwards nothing of the track until one
++// comes: the writer answers on its next tick, not at the next two-second beat.
++func TestAKeyframeRequestIsAnsweredOnTheNextTick(t *testing.T) {
++	var written [][]byte
++	c, err := carrierFor("video/vp9")
++	if err != nil {
++		t.Fatal(err)
++	}
++	tr := &streamTransport{carrier: c, bindingToken: 7, localEpoch: 9}
++	tr.sampleWriter = func(data []byte) bool {
++		written = append(written, append([]byte(nil), data...))
++		return true
++	}
++	w := &writerState{p: tr, forceKeepaliveEvery: 1000}
++
++	w.forceKeepalive()
++	if len(written) != 0 {
++		t.Fatal("a keepalive went out with no request and no beat due")
++	}
++	tr.requestKeyframe()
++	w.forceKeepalive()
++	if len(written) != 1 {
++		t.Fatalf("%d samples after a keyframe request, want 1", len(written))
++	}
++	if len(written[0]) < vp9KeyframeSpan {
++		t.Fatalf("the answer is %d bytes, under the %d a keyframe has to span", len(written[0]), vp9KeyframeSpan)
++	}
++	w.forceKeepalive()
++	if len(written) != 1 {
++		t.Fatal("one request was answered twice")
++	}
++}
++
++// A relay that takes none of our keyframes asks without end; the answers are
++// spaced, so that state costs a keyframe a gap and not one a tick.
++func TestKeyframeRequestsAreAnsweredAGapApart(t *testing.T) {
++	writes := 0
++	c, err := carrierFor("video/vp9")
++	if err != nil {
++		t.Fatal(err)
++	}
++	tr := &streamTransport{carrier: c}
++	tr.sampleWriter = func([]byte) bool { writes++; return true }
++	w := &writerState{p: tr, forceKeepaliveEvery: 1000, keyframeGap: 5}
++
++	for range 20 {
++		tr.requestKeyframe()
++		w.forceKeepalive()
++	}
++	if writes != 4 {
++		t.Fatalf("%d keyframes for 20 ticks of requests with a gap of 5 ticks, want 4", writes)
++	}
++}
++
++// The VP8 relays never ask this way and their frames need no answer: a request
++// on the transport's own carrier changes nothing.
++func TestAKeyframeRequestOnTheVP8CarrierIsIgnored(t *testing.T) {
++	writes := 0
++	tr := &streamTransport{}
++	tr.sampleWriter = func([]byte) bool { writes++; return true }
++	w := &writerState{p: tr, forceKeepaliveEvery: 1000}
++	tr.requestKeyframe()
++	w.forceKeepalive()
++	if writes != 0 {
++		t.Fatal("a keyframe request changed what the VP8 carrier writes")
++	}
++}
+diff --git a/internal/transport/vp8channel/rtp_reader.go b/internal/transport/vp8channel/rtp_reader.go
+--- a/internal/transport/vp8channel/rtp_reader.go
++++ b/internal/transport/vp8channel/rtp_reader.go
+@@ -234,7 +234,7 @@
+ }
+ 
+ func (p *streamTransport) handleRemoteTrack(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+-	if !isVP8CarrierCodec(track.Codec().MimeType) {
++	if !p.carrier.accepts(track.Codec().MimeType) {
+ 		go p.drainTrack(track)
+ 		return
+ 	}
+@@ -311,6 +311,7 @@
+ 
+ func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote, codecs map[uint8]string) {
+ 	var state vp8FrameState
++	frames := p.carrier.assembler()
+ 	reorder := newReorderBuffer()
+ 	buf := make([]byte, rtpBufSize)
+ 	var rtpCount, frameCount int
+@@ -332,7 +333,13 @@
+ 		// Restore sequence order before assembly so SFU reordering is not
+ 		// mistaken for loss.
+ 		reorder.push(pkt, func(ordered *rtp.Packet) {
+-			frame := state.processCarrierPacket(track.Codec().MimeType, ordered, codecs)
++			var frame []byte
++			if isVP8CarrierCodec(track.Codec().MimeType) {
++				// Preserve the qualified negotiated-RED/FEC validation unchanged.
++				frame = state.processCarrierPacket(track.Codec().MimeType, ordered, codecs)
++			} else {
++				frame = frames.processRTPPacket(ordered)
++			}
+ 			if frame == nil {
+ 				return
+ 			}
+diff --git a/internal/transport/vp8channel/transport.go b/internal/transport/vp8channel/transport.go
+--- a/internal/transport/vp8channel/transport.go
++++ b/internal/transport/vp8channel/transport.go
+@@ -95,6 +95,7 @@
+ 	// is injected even while bulk data flows, so the SFU decoder never times
+ 	// out and stops forwarding the track.
+ 	forceKeepalivePeriod = 2 * time.Second
++	keyframeRequestGap   = 100 * time.Millisecond
+ 	// ai-generated: publishBurstBytes and this comment (olcrtc#26).
+ 	// publishBurstBytes is what the writer's token bucket holds when the
+ 	// engine's service polices how fast a participant may publish (see
+@@ -130,6 +131,14 @@
+ 
+ 	stream videoSession
+ 	track  *webrtc.TrackLocalStaticSample
++	// carrier is the codec the frames ride as; nil is the transport's own VP8
++	// (carrier.go). dressBuf is the sample a carrier that re-heads its frames
++	// builds, reused under writeMu.
++	carrier  *carrier
++	dressBuf []byte
++	// keyframeWanted is a relay's request for a keyframe, answered by the
++	// writer on its next tick (requestKeyframe).
++	keyframeWanted atomic.Bool
+ 	// writeMu serializes all track.WriteSample calls. pion's WriteSample is
+ 	// not safe for concurrent use (see writeSampleLocked); the server writes
+ 	// bulk data from per-peer pumps while writerLoop writes control frames
+@@ -252,15 +261,24 @@
+ 		return nil, fmt.Errorf("open video session: %w", err)
+ 	}
+ 
+-	track, err := common.NewVideoTrack(webrtc.RTPCodecCapability{
+-		MimeType:  webrtc.MimeTypeVP8,
+-		ClockRate: 90000,
+-	}, "vp8channel")
++	// The relay behind the engine decides what the frames ride as: VP8 unless
++	// the engine names another codec.
++	ride, err := carrierFor(stream.VideoCodec())
++	if err != nil {
++		_ = stream.Close()
++		return nil, err
++	}
++
++	track, err := common.NewVideoTrack(ride.capability, "vp8channel", ride.trackOptions...)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("build video track: %w", err)
+ 	}
+ 
+-	tr := newStreamTransport(stream, track, cfg, opts, loaddiag.FromContext(ctx)) // ai-generated: owner attachment.
++	tr := newStreamTransport(stream, track, cfg, opts, loaddiag.FromContext(ctx))
++	tr.carrier = ride
++	if ride.answersKeyframeRequests() {
++		stream.SetKeyframeRequestHandler(tr.requestKeyframe)
++	}
+ 
+ 	if err := stream.AddTrack(track); err != nil {
+ 		return nil, fmt.Errorf("attach local video track: %w", err)
+diff --git a/internal/transport/vp8channel/writer.go b/internal/transport/vp8channel/writer.go
+--- a/internal/transport/vp8channel/writer.go
++++ b/internal/transport/vp8channel/writer.go
+@@ -17,6 +17,7 @@
+ 	idleTicks           int
+ 	forceKeepaliveEvery int
+ 	ticksSinceKeepalive int
++	keyframeGap         int
+ 	// pendingControl holds a control frame that failed WriteSample and must be
+ 	// retried on the next tick before consuming more frames.
+ 	pendingControl *packetBuffer
+@@ -35,6 +36,7 @@
+ 		p:                   p,
+ 		keepaliveEvery:      max(int(keepaliveIdlePeriod/p.frameInterval), 1),
+ 		forceKeepaliveEvery: max(int(forceKeepalivePeriod/p.frameInterval), 1),
++		keyframeGap:         max(int(keyframeRequestGap/p.frameInterval), 1),
+ 		data: dataLane{
+ 			out: p.data.out, acks: p.data.acks, conn: p.dataConn, window: p.dataWindow, name: "data",
+ 		},
+@@ -66,12 +68,18 @@
+ // sample's packetize+send atomic and keeps sequence numbers monotonic. Pion's
+ // VP8 payloader copies sample.Data into RTP payloads during Packetize, before
+ // WriteSample returns, so the writer can release its packet buffer afterward.
+-func (p *streamTransport) writeSampleLocked(data []byte) bool {
++func (p *streamTransport) writeSampleLocked(data []byte) bool   { return p.writeLocked(data, false) }
++func (p *streamTransport) writeKeyframeLocked(data []byte) bool { return p.writeLocked(data, true) }
++func (p *streamTransport) writeLocked(data []byte, keyframe bool) bool {
+ 	// ai-generated: observe mutex wait without changing its ownership/order.
+ 	wait := p.loadDiagnostics.Begin(loaddiag.TrackMutex, loaddiag.Other, loaddiag.Shared)
+ 	p.writeMu.Lock()
+ 	wait.End(loaddiag.OK)
+ 	defer p.writeMu.Unlock()
++	if p.carrier != nil && p.carrier.dress != nil {
++		p.dressBuf = p.carrier.dress(p.dressBuf, data, keyframe)
++		data = p.dressBuf
++	}
+ 	// ai-generated: the charge and the written result (olcrtc#26). Every
+ 	// sample this transport publishes passes here, so this is where the rate
+ 	// the relay sees is counted - control frames and keepalives included,
+@@ -112,10 +120,25 @@
+ // satisfied.
+ func (w *writerState) forceKeepalive() {
+ 	w.ticksSinceKeepalive++
+-	if w.ticksSinceKeepalive >= w.forceKeepaliveEvery {
+-		w.ticksSinceKeepalive = 0
+-		hdr := w.p.epochHeader()
+-		_ = w.writeSample(hdr[:])
++	due := w.ticksSinceKeepalive >= w.forceKeepaliveEvery
++	if !due && w.ticksSinceKeepalive >= w.keyframeGap && w.p.keyframeWanted.Load() {
++		due = true
++	}
++	if !due {
++		return
++	}
++	w.p.keyframeWanted.Store(false)
++	w.ticksSinceKeepalive = 0
++	hdr := w.p.epochHeader()
++	_ = w.p.writeKeyframeLocked(hdr[:])
++}
++
++// requestKeyframe is the relay asking for a keyframe. Only a carrier whose
++// relay asks this way answers; on the others the two-second beat is all there
++// is, as before.
++func (p *streamTransport) requestKeyframe() {
++	if p.carrier.answersKeyframeRequests() {
++		p.keyframeWanted.Store(true)
+ 	}
+ }
+ 
+diff --git a/mobile/config.go b/mobile/config.go
+--- a/mobile/config.go
++++ b/mobile/config.go
+@@ -657,7 +657,7 @@
+ // here cannot be selected at all.
+ func supportedProvider(provider string) bool {
+ 	switch provider {
+-	case "jitsi", "telemost", "wbstream", "salutejazz", "vkcalls", providerNone:
++	case "jitsi", "telemost", "wbstream", "salutejazz", "vkcalls", "mtslink", providerNone:
+ 		return true
+ 	default:
+ 		return false

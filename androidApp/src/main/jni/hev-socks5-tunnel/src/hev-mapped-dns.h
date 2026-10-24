@@ -13,6 +13,7 @@
 #include <hev-list.h>
 #include <hev-rbtree.h>
 #include <hev-object.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +54,15 @@ HevMappedDNS *hev_mapped_dns_new (int net, int mask, int max);
 
 HevMappedDNS *hev_mapped_dns_get (void);
 void hev_mapped_dns_put (HevMappedDNS *self);
+
+/* Optional Android held-TUN owner, distinct from a bridge-worker epoch.
+ * Close requests retain an active worker's map until detach + leave. */
+uint64_t hev_mapped_dns_scope_begin (void);
+int hev_mapped_dns_scope_enter (uint64_t scope);
+int hev_mapped_dns_scope_leave (uint64_t scope);
+int hev_mapped_dns_scope_close (uint64_t scope);
+int hev_mapped_dns_attach (int net, int mask, int max);
+void hev_mapped_dns_detach (void);
 
 int hev_mapped_dns_handle (HevMappedDNS *self, void *req, int qlen, void *res,
                            int slen);

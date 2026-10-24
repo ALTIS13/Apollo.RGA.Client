@@ -1,0 +1,1234 @@
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 4f2d8378..1d97118b 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -98,16 +98,19 @@ const (
+ // Client handles local SOCKS5 connections and tunnels them to the server.
+ type Client struct {
+ 	// ai-generated: optional owner-local diagnostics; zero is disabled.
+-	loadDiagnostics loaddiag.Handle
+-	ln              transport.Transport
+-	keys            *crypto.KeySet
+-	pair            *tunnelcore.SessionPair
+-	conn            *muxconn.Conn
+-	controlConn     *muxconn.Conn
+-	session         *smux.Session
+-	controlSess     *smux.Session
+-	controlStrm     *smux.Stream
+-	controlStop     context.CancelFunc
++	loadDiagnostics     loaddiag.Handle
++	ln                  transport.Transport
++	keys                *crypto.KeySet
++	pair                *tunnelcore.SessionPair
++	conn                *muxconn.Conn
++	controlConn         *muxconn.Conn
++	session             *smux.Session
++	controlSess         *smux.Session
++	controlStrm         *smux.Stream
++	transportStream33   *smux.Stream
++	transportSeen33     time.Time
++	transportInterval33 time.Duration
++	controlStop         context.CancelFunc
+ 	// controlNotify tells the peer this side is leaving, on the control
+ 	// stream of the current session, once; see startControlLoop.
+ 	controlNotify func()
+@@ -117,20 +120,23 @@ type Client struct {
+ 
+ 	// controlLastPong is independent corroboration for the transport's fast
+ 	// peer-restart heuristic, not a second session reconnect detector.
+-	controlLastPong  atomic.Value // time.Time
+-	deviceID         string
+-	sessionID        string
+-	claims           map[string]any
+-	dnsServer        string
+-	socksUser        string
+-	socksPass        string
+-	sessionReady     chan struct{}
+-	wg               sync.WaitGroup
+-	socksMu          sync.Mutex
+-	socksConns       map[net.Conn]struct{}
+-	socksClosed      bool
+-	livenessFallback time.Duration
+-	shutdownGrace    time.Duration
++	controlLastPong atomic.Value // time.Time
++	deviceID        string
++	sessionID       string
++	claims          map[string]any
++	// ai-generated: explicit managed mode signs once per control handshake.
++	managedJoin       bool
++	managedJoinClaims func(context.Context) (map[string]any, error)
++	dnsServer         string
++	socksUser         string
++	socksPass         string
++	sessionReady      chan struct{}
++	wg                sync.WaitGroup
++	socksMu           sync.Mutex
++	socksConns        map[net.Conn]struct{}
++	socksClosed       bool
++	livenessFallback  time.Duration
++	shutdownGrace     time.Duration
+ 
+ 	// ai-generated: recovery, handshakeTimeout and retryDelay (olcrtc#19).
+ 	// recovery is the attempt re-establishing the session, if one is (see
+@@ -252,7 +258,12 @@ type Config struct {
+ 	DeviceID         string
+ 	DeviceIDPath     string
+ 	Claims           map[string]any
+-	OnHealth         HealthFunc
++	// ai-generated: source is local signing, not a network grant or payload RPC.
++	ManagedJoin       bool
++	ManagedJoinClaims func(context.Context) (map[string]any, error)
++	OnHealth          HealthFunc
++	// OnTransportHealthReader publishes an observation-only live reader.
++	OnTransportHealthReader func(func() string)
+ 	// UDPDisabled turns the SOCKS5 UDP ASSOCIATE relay off; UDPMaxFlows caps
+ 	// concurrent flows (0 means the default).
+ 	UDPDisabled bool
+@@ -294,6 +305,9 @@ func RunWithReady(ctx context.Context, cfg Config, onReady func()) error {
+ 
+ // RunWithAddress starts the client and reports the actual SOCKS listener address.
+ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr string)) error {
++	if cfg.ManagedJoin && (cfg.ManagedJoinClaims == nil || len(cfg.Claims) != 0) || !cfg.ManagedJoin && cfg.ManagedJoinClaims != nil {
++		return errManagedJoin
++	}
+ 	runCtx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+ 	keys, err := tunnelcore.SetupKeySet(cfg.KeyHex, crypto.Client)
+@@ -307,6 +321,7 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
+ 	client := &Client{
+ 		loadDiagnostics: loaddiag.FromContext(runCtx), // ai-generated: same runtime owner.
+ 		keys:            keys, deviceID: deviceID, claims: cfg.Claims, dnsServer: cfg.DNSServer,
++		managedJoin: cfg.ManagedJoin, managedJoinClaims: cfg.ManagedJoinClaims,
+ 		socksUser: cfg.SOCKSUser, socksPass: cfg.SOCKSPass,
+ 		health: runtime.NewHealthTracker(cfg.OnHealth), sessionReady: make(chan struct{}),
+ 		udpFlows: make(map[uint64]clientUDPFlow), udpFlowIndex: make(map[clientUDPFlowKey]uint64),
+@@ -322,6 +337,9 @@ func RunWithAddress(ctx context.Context, cfg Config, onReady func(actualAddr str
+ 		cancel()
+ 		client.shutdown()
+ 	}()
++	if cfg.OnTransportHealthReader != nil {
++		cfg.OnTransportHealthReader(client.TransportHealth)
++	}
+ 	if bringUpErr := client.bringUpLink(runCtx, cfg, cancel); bringUpErr != nil {
+ 		return bringUpErr
+ 	}
+diff --git a/internal/client/health.go b/internal/client/health.go
+index ce794db1..551ff0a7 100644
+--- a/internal/client/health.go
++++ b/internal/client/health.go
+@@ -38,6 +38,15 @@ func (c *Client) startControlLoop(
+ 	if pingInterval <= 0 {
+ 		pingInterval = control.DefaultInterval
+ 	}
++	// Observation belongs to this installed control stream, not the health
++	// tracker's previous session pong. No liveness policy is changed here.
++	c.sessMu.Lock()
++	if c.controlStrm == stream {
++		c.transportStream33 = stream
++		c.transportSeen33 = time.Now()
++		c.transportInterval33 = pingInterval
++	}
++	c.sessMu.Unlock()
+ 	runner := tunnelcore.ControlRunner{
+ 		Transport: c.ln, Config: cfg.Liveness, Health: c.health,
+ 		BeforeClose: notify,
+@@ -48,6 +57,7 @@ func (c *Client) startControlLoop(
+ 		},
+ 		OnPong: func(control.Health) {
+ 			c.controlLastPong.Store(time.Now())
++			c.recordTransportPong33(stream, time.Now())
+ 			c.notifyLinkHealth(false)
+ 		},
+ 		// A peer that closes the control stream on purpose says this
+diff --git a/internal/client/link.go b/internal/client/link.go
+index 347a05b4..0a9c91d0 100644
+--- a/internal/client/link.go
++++ b/internal/client/link.go
+@@ -105,7 +105,7 @@ func (c *Client) bringUpLink(ctx context.Context, cfg Config, cancel context.Can
+ 		return fmt.Errorf("create smux sessions: %w", err)
+ 	}
+ 	// ai-generated: consume the winning full welcome, not a side channel.
+-	control, welcome, err := openManagedControlStreamTimeout(ctx, pair.ControlSession, c.deviceID, c.claims, handshake.ClientOptions{UDPContract: c.udpContract}, handshake.DefaultTimeout)
++	control, welcome, err := c.controlHandshake(ctx, pair.ControlSession, handshake.DefaultTimeout)
+ 	if err != nil {
+ 		err = c.classifyHandshakeFailure(err, conn, controlConn)
+ 		_ = pair.Close()
+@@ -203,9 +203,16 @@ func openControlStreamTimeout(
+ 
+ // ai-generated: options and copied welcome travel in the actual hello winner.
+ func openManagedControlStreamTimeout(ctx context.Context, session *smux.Session, deviceID string, claims map[string]any, options handshake.ClientOptions, timeout time.Duration) (*smux.Stream, handshake.SessionWelcome, error) {
++	return openControlAttempt(ctx, session, deviceID, claims, options, timeout, false)
++}
++
++// ai-generated: managed joins use one admission attempt; legacy hello racing
++// remains unchanged and cannot consume the same one-use proof in parallel.
++func openControlAttempt(ctx context.Context, session *smux.Session, deviceID string, claims map[string]any, options handshake.ClientOptions, timeout time.Duration, single bool) (*smux.Stream, handshake.SessionWelcome, error) {
+ 	race := &helloRace{
+ 		session: session, deviceID: deviceID, claims: claims,
+ 		options: options,
++		single:  single,
+ 		replies: make(chan helloResult, maxHelloAttempts),
+ 	}
+ 	first, err := race.openFirst(ctx, timeout)
+@@ -214,14 +221,18 @@ func openManagedControlStreamTimeout(ctx context.Context, session *smux.Session,
+ 	}
+ 	race.deadline = time.Now().Add(timeout)
+ 	race.start(first)
+-	resend := time.NewTicker(helloResendInterval)
+-	defer resend.Stop()
++	var resendC <-chan time.Time
++	if !single {
++		resend := time.NewTicker(helloResendInterval)
++		defer resend.Stop()
++		resendC = resend.C
++	}
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+ 			race.closeAllBut(nil)
+ 			return nil, handshake.SessionWelcome{}, fmt.Errorf("handshake client: %w", ctx.Err())
+-		case <-resend.C:
++		case <-resendC:
+ 			race.resend()
+ 		case r := <-race.replies:
+ 			if result, done := race.settle(ctx, r); done {
+@@ -251,6 +262,7 @@ type helloRace struct {
+ 	replies  chan helloResult
+ 	streams  []*smux.Stream
+ 	pending  int
++	single   bool // ai-generated: immutable one-use admission selection.
+ }
+ 
+ // openFirst opens the first hello's stream, waiting at most timeout for this
+@@ -308,7 +320,7 @@ func (h *helloRace) start(stream *smux.Stream) {
+ // resend sends another hello when the cap and the deadline allow it; a hello
+ // that would time out half an interval later is not worth sending.
+ func (h *helloRace) resend() bool {
+-	if len(h.streams) >= maxHelloAttempts || time.Until(h.deadline) <= helloResendInterval/2 {
++	if h.single || len(h.streams) >= maxHelloAttempts || time.Until(h.deadline) <= helloResendInterval/2 {
+ 		return false
+ 	}
+ 	if err := h.send(); err != nil {
+@@ -745,9 +757,7 @@ func (c *Client) tryReopenSession(
+ 		return roundSilent
+ 	}
+ 	// ai-generated: retain the winning copied binding through reconnect.
+-	control, welcome, err := openManagedControlStreamTimeout(
+-		run, pair.ControlSession, c.deviceID, c.claims, handshake.ClientOptions{UDPContract: c.udpContract}, c.helloTimeout(),
+-	)
++	control, welcome, err := c.controlHandshake(run, pair.ControlSession, c.helloTimeout())
+ 	if err != nil {
+ 		classified := c.classifyHandshakeFailure(err, conn, controlConn)
+ 		if run.Err() == nil {
+diff --git a/internal/client/managed_health_test.go b/internal/client/managed_health_test.go
+new file mode 100644
+index 00000000..aeb0516c
+--- /dev/null
++++ b/internal/client/managed_health_test.go
+@@ -0,0 +1,83 @@
++package client
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/control"
++	runtimecfg "github.com/openlibrecommunity/olcrtc/internal/runtime"
++	"github.com/xtaci/smux"
++)
++
++// ai-generated: real smux control closure and stream identity, not lifecycle
++// readiness or previous HealthTracker.LastPong, determine transport health.
++func TestManagedHealthActualClosedAndReplacement(t *testing.T) {
++	c := &Client{health: runtimecfg.NewHealthTracker(nil)}
++	reader, ok := any(c).(interface {
++		TransportHealth() string
++		recordTransportPong33(*smux.Stream, time.Time)
++	})
++	if !ok {
++		t.Fatal("MANAGED_HEALTH_ACTUAL_READER_MISSING")
++	}
++	server, session := newSmuxPair(t)
++	stream, err := session.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = server.AcceptStream(); err != nil {
++		t.Fatal(err)
++	}
++	replacement, err := session.OpenStream()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = server.AcceptStream(); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	c.runCtx = ctx
++	c.session, c.controlSess, c.controlStrm = session, session, stream
++	c.reconnectMu.Lock() // Delayed OnDeath must not conceal the closed stream.
++	t.Cleanup(func() {
++		cancel()
++		_ = stream.Close()
++		_ = replacement.Close()
++		c.reconnectMu.Unlock()
++		joined := make(chan struct{})
++		go func() { c.wg.Wait(); close(joined) }()
++		select {
++		case <-joined:
++		case <-time.After(3 * time.Second):
++			t.Error("health fixture control workers not joined")
++		}
++	})
++	c.startControlLoop(ctx, Config{Liveness: control.Config{Interval: time.Hour, Timeout: time.Hour, Failures: 4}}, cancel, stream)
++	if got := reader.TransportHealth(); got != "HEALTHY" {
++		t.Fatalf("actual installed control=%s", got)
++	}
++	reader.recordTransportPong33(stream, time.Now().Add(-3*time.Hour))
++	if got := reader.TransportHealth(); got != "STALE" {
++		t.Fatalf("same-stream stale evidence=%s", got)
++	}
++	c.sessMu.Lock()
++	c.controlStrm = replacement
++	c.sessMu.Unlock()
++	c.health.RecordPong(control.Health{LastSeen: time.Now()})
++	reader.recordTransportPong33(stream, time.Now())
++	if got := reader.TransportHealth(); got != "MISSING" {
++		t.Fatalf("previous stream pong revived replacement=%s", got)
++	}
++	c.sessMu.Lock()
++	c.controlStrm = stream
++	c.sessMu.Unlock()
++	_ = stream.Close()
++	if got := reader.TransportHealth(); got != "MISSING" {
++		t.Fatalf("closed control treated as stale/healthy=%s", got)
++	}
++	cancel()
++	if got := reader.TransportHealth(); got != "CLOSED" {
++		t.Fatalf("cancelled actual run=%s", got)
++	}
++}
+diff --git a/internal/client/managed_join.go b/internal/client/managed_join.go
+new file mode 100644
+index 00000000..45b9dc34
+--- /dev/null
++++ b/internal/client/managed_join.go
+@@ -0,0 +1,54 @@
++package client
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"time"
++	"unicode/utf8"
++
++	"github.com/openlibrecommunity/olcrtc/internal/handshake"
++	"github.com/xtaci/smux"
++)
++
++//nolint:gochecknoglobals // immutable redacted sentinel; no proof/source error escapes.
++var errManagedJoin = errors.New("managed join denied")
++
++// ai-generated: local claims are refreshed before each initial/reconnect
++// handshake under the same attempt context. This function is never called by
++// a payload CONNECT. Callback ownership transfers its returned map to us.
++func (c *Client) controlHandshake(ctx context.Context, session *smux.Session, timeout time.Duration) (*smux.Stream, handshake.SessionWelcome, error) {
++	if !c.managedJoin {
++		return openManagedControlStreamTimeout(ctx, session, c.deviceID, c.claims, handshake.ClientOptions{UDPContract: c.udpContract}, timeout)
++	}
++	if ctx == nil || ctx.Err() != nil || c.managedJoinClaims == nil || timeout <= 0 {
++		return nil, handshake.SessionWelcome{}, errManagedJoin
++	}
++	attempt, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++	claims, err := c.managedJoinClaims(attempt)
++	if err != nil || attempt.Err() != nil || !validManagedClaims(claims) {
++		return nil, handshake.SessionWelcome{}, errManagedJoin
++	}
++	// Do not retain this proof in Client or use it on another reconnect.
++	return openControlAttempt(attempt, session, c.deviceID, claims, handshake.ClientOptions{UDPContract: c.udpContract}, time.Until(deadlineOf(attempt)), true)
++}
++
++// ai-generated: every managed attempt above has a finite derived deadline.
++func deadlineOf(ctx context.Context) time.Time { end, _ := ctx.Deadline(); return end }
++
++// ai-generated: source callbacks cannot smuggle arbitrary structured claims,
++// unbounded allocations or malformed text into a managed handshake.
++func validManagedClaims(claims map[string]any) bool {
++	if len(claims) < 1 || len(claims) > 8 {
++		return false
++	}
++	for key, value := range claims {
++		text, ok := value.(string)
++		if !ok || key == "" || len(key) > 64 || text == "" || len(text) > 1024 || !utf8.ValidString(key) || !utf8.ValidString(text) {
++			return false
++		}
++	}
++	b, err := json.Marshal(claims)
++	return err == nil && len(b) <= 4096
++}
+diff --git a/internal/client/managed_join_test.go b/internal/client/managed_join_test.go
+new file mode 100644
+index 00000000..cf770bf5
+--- /dev/null
++++ b/internal/client/managed_join_test.go
+@@ -0,0 +1,126 @@
++package client
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/internal/handshake"
++)
++
++// ai-generated: a second control handshake must sign a new nonce, not replay
++// a static proof from the previous native generation/connection.
++func TestManagedJoinSignsEachControlHandshake(t *testing.T) {
++	server, client := newSmuxPair(t)
++	var signed int
++	c := &Client{deviceID: "installation-00001", managedJoin: true,
++		managedJoinClaims: func(context.Context) (map[string]any, error) {
++			signed++
++			return map[string]any{"nonce": fmt.Sprintf("nonce-%d", signed)}, nil
++		}}
++	served := make(chan error, 1)
++	go func() {
++		for _, want := range []string{"nonce-1", "nonce-2"} {
++			s, err := server.AcceptStream()
++			if err != nil {
++				served <- err
++				return
++			}
++			_, _, err = handshake.Server(s, func(_ string, claims map[string]any) (string, error) {
++				if claims["nonce"] != want {
++					return "", errors.New("replayed proof")
++				}
++				return "session-00000001", nil
++			}, "")
++			if err != nil {
++				served <- err
++				return
++			}
++		}
++		served <- nil
++	}()
++	for range 2 {
++		s, _, err := c.controlHandshake(context.Background(), client, time.Second)
++		if err != nil {
++			t.Fatal(err)
++		}
++		s.Close()
++	}
++	if err := <-served; err != nil {
++		t.Fatal(err)
++	}
++	if signed != 2 {
++		t.Fatalf("sign calls=%d", signed)
++	}
++}
++
++// ai-generated: fail before opening any stream if the fresh source is missing,
++// fails, produces malformed claims, or completes after its context was cancelled.
++func TestManagedJoinCannotFallbackToCachedClaims(t *testing.T) {
++	for _, kind := range []string{"missing", "error", "invalid", "cancelled-before", "cancelled-after"} {
++		t.Run(kind, func(t *testing.T) {
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			calls := 0
++			c := &Client{managedJoin: true, claims: map[string]any{"nonce": "OLD"}}
++			c.managedJoinClaims = func(context.Context) (map[string]any, error) {
++				calls++
++				if kind == "error" {
++					return nil, errors.New("PRIVATE proof must not escape")
++				}
++				if kind == "invalid" {
++					return map[string]any{"nonce": 42}, nil
++				}
++				if kind == "cancelled-after" {
++					cancel()
++				}
++				return map[string]any{"nonce": "fresh"}, nil
++			}
++			if kind == "missing" {
++				c.managedJoinClaims = nil
++			}
++			if kind == "cancelled-before" {
++				cancel()
++			}
++			// nil smux proves failure occurs before the legacy cached path opens it.
++			if _, _, err := c.controlHandshake(ctx, nil, time.Second); err == nil {
++				t.Fatal("fresh proof failure granted handshake")
++			}
++			if kind == "cancelled-before" && calls != 0 {
++				t.Fatal("cancelled owner called signer")
++			}
++		})
++	}
++}
++
++// ai-generated: one signed nonce may be redeemed only once; no parallel hello
++// resend is allowed for managed joins, even while a response is lost/delayed.
++func TestManagedJoinDoesNotRaceNonceRedemption(t *testing.T) {
++	server, client := newSmuxPair(t)
++	setHelloResend(t, 10*time.Millisecond)
++	var count atomic.Int32
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		for {
++			s, err := server.AcceptStream()
++			if err != nil {
++				return
++			}
++			count.Add(1)
++			_ = s
++		}
++	}()
++	c := &Client{managedJoin: true, managedJoinClaims: func(context.Context) (map[string]any, error) { return map[string]any{"nonce": "one-use"}, nil }}
++	if _, _, err := c.controlHandshake(context.Background(), client, 120*time.Millisecond); err == nil {
++		t.Fatal("silent server admitted client")
++	}
++	server.Close()
++	<-done
++	if count.Load() != 1 {
++		t.Fatalf("parallel one-use hello count=%d", count.Load())
++	}
++}
+diff --git a/internal/client/transport_health33.go b/internal/client/transport_health33.go
+new file mode 100644
+index 00000000..293469b4
+--- /dev/null
++++ b/internal/client/transport_health33.go
+@@ -0,0 +1,43 @@
++package client
++
++import (
++	"time"
++
++	"github.com/xtaci/smux"
++)
++
++// TransportHealth is the R33 observation-only reader. Neither ready nor a
++// previous control stream's pong is evidence for the currently installed one.
++func (c *Client) TransportHealth() string {
++	c.sessMu.RLock()
++	defer c.sessMu.RUnlock()
++	if c.runCtx != nil && c.runCtx.Err() != nil {
++		return "CLOSED"
++	}
++	if c.session == nil || c.controlSess == nil || c.controlStrm == nil {
++		return "MISSING"
++	}
++	if c.session.IsClosed() || c.controlSess.IsClosed() {
++		return "MISSING"
++	}
++	select {
++	case <-c.controlStrm.GetDieCh():
++		return "MISSING"
++	default:
++	}
++	if c.transportStream33 != c.controlStrm || c.transportSeen33.IsZero() || c.transportInterval33 <= 0 {
++		return "MISSING"
++	}
++	if time.Since(c.transportSeen33) > 2*c.transportInterval33 {
++		return "STALE"
++	}
++	return "HEALTHY"
++}
++
++func (c *Client) recordTransportPong33(stream *smux.Stream, seen time.Time) {
++	c.sessMu.Lock()
++	defer c.sessMu.Unlock()
++	if c.controlStrm == stream && c.transportStream33 == stream {
++		c.transportSeen33 = seen
++	}
++}
+diff --git a/mobile/config.go b/mobile/config.go
+index 60f1c45a..146f44c4 100644
+--- a/mobile/config.go
++++ b/mobile/config.go
+@@ -76,14 +76,17 @@ type runtimeConfig struct {
+ 	deviceID      string
+ 	deviceIDPath  string
+ 	claims        map[string]string
+-	engine        string
+-	serviceURL    string
+-	engineToken   string
+-	liveness      client.LivenessConfig
+-	traffic       client.TrafficConfig
+-	vp8           client.VP8Options
+-	sei           client.SEIOptions
+-	video         client.VideoOptions
++	// ai-generated: explicit managed mode survives invalid setters fail closed.
++	managedJoin       bool
++	managedJoinSigner ManagedJoinSigner
++	engine            string
++	serviceURL        string
++	engineToken       string
++	liveness          client.LivenessConfig
++	traffic           client.TrafficConfig
++	vp8               client.VP8Options
++	sei               client.SEIOptions
++	video             client.VideoOptions
+ 	// udpDisabled turns the SOCKS5 UDP relay off; SetUDP steers it.
+ 	udpDisabled bool
+ 	// ai-generated: next-Start protocol selector, separate from socket enable.
+@@ -146,6 +149,10 @@ func (r *Runtime) SetRoom(roomURL string) error {
+ 		return fmt.Errorf("%w: room is required", ErrInvalidConfig)
+ 	}
+ 	r.mu.Lock()
++	if r.defaults.managedJoin && r.isActiveLocked() && roomURL != r.defaults.roomURL {
++		r.mu.Unlock()
++		return ErrInvalidConfig
++	}
+ 	r.defaults.roomURL = roomURL
+ 	r.mu.Unlock()
+ 	return nil
+@@ -166,6 +173,9 @@ func (r *Runtime) AddFailoverRoom(roomURL string) error {
+ 	}
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
++	if r.defaults.managedJoin {
++		return ErrInvalidConfig
++	}
+ 	if roomURL == r.defaults.roomURL || slices.Contains(r.defaults.failoverRooms, roomURL) {
+ 		return nil
+ 	}
+@@ -306,6 +316,10 @@ func (r *Runtime) SetClaimsJSON(value string) error {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+ 	r.defaults.claims = nil
++	if r.defaults.managedJoin {
++		r.defaults.managedJoinSigner = nil
++		return ErrInvalidConfig
++	}
+ 	if value == "" {
+ 		return nil
+ 	}
+@@ -514,6 +528,7 @@ func (cfg *runtimeConfig) clientConfig() client.Config {
+ 		DNSServer: cfg.dnsServer, Resolver: cfg.lookup(),
+ 		TransportOptions: cfg.transportOptions(), Liveness: cfg.liveness, Traffic: cfg.traffic,
+ 		DeviceID: cfg.deviceID, DeviceIDPath: cfg.deviceIDPath, Claims: claims,
++		ManagedJoin: cfg.managedJoin, ManagedJoinClaims: managedClaimsSource(cfg.managedJoin, cfg.managedJoinSigner),
+ 		UDPDisabled: cfg.udpDisabled, DirectRules: cfg.directRules,
+ 		UDPContract: cfg.udpContract, // ai-generated: next-Start runner snapshot.
+ 	}
+@@ -541,6 +556,9 @@ func (cfg runtimeConfig) transportOptions() client.TransportOptions {
+ }
+ 
+ func validateRuntimeConfig(cfg runtimeConfig) error {
++	if cfg.managedJoin && (cfg.managedJoinSigner == nil || len(cfg.claims) != 0 || len(cfg.failoverRooms) != 0) {
++		return ErrInvalidConfig
++	}
+ 	if !supportedProvider(cfg.provider) {
+ 		return fmt.Errorf("%w: provider %q", ErrInvalidConfig, cfg.provider)
+ 	}
+diff --git a/mobile/managed_health.go b/mobile/managed_health.go
+new file mode 100644
+index 00000000..09607cbf
+--- /dev/null
++++ b/mobile/managed_health.go
+@@ -0,0 +1,69 @@
++package mobile
++
++// transportHealthRun33 identifies one actual client runner, independently of
++// the generation ready latch and of any earlier room in that generation.
++type transportHealthRun33 struct {
++	read func() string
++}
++
++func (r *Runtime) captureTransportHealthReader33(gen *runGeneration, run *transportHealthRun33, read func() string) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.isCurrentGenerationLocked(gen) && gen.healthRun33 == run && !gen.stopRequested && run.read == nil {
++		run.read = read
++	}
++}
++
++func (r *Runtime) retireTransportHealthReader33(gen *runGeneration, run *transportHealthRun33) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if gen.healthRun33 == run {
++		gen.healthRun33 = nil
++	}
++}
++
++// TransportHealth reports live native control evidence, never authorization.
++// Detached generations whose shutdown has not joined cannot be hidden by a
++// replacement generation's readiness or reader. State/Start remain unchanged.
++func (r *Runtime) TransportHealth() string {
++	r.mu.Lock()
++	if r.healthUnjoined != 0 {
++		r.mu.Unlock()
++		return "UNKNOWN"
++	}
++	gen := r.current
++	if gen == nil || r.state == stateIdle || r.state == stateStopped {
++		r.mu.Unlock()
++		return "STOPPED"
++	}
++	if gen.stopRequested || r.state == stateStopping {
++		r.mu.Unlock()
++		return "STOPPING"
++	}
++	if r.state != stateRunning || channelClosed(gen.done) {
++		r.mu.Unlock()
++		return "MISSING"
++	}
++	run := gen.healthRun33
++	if run == nil || run.read == nil {
++		r.mu.Unlock()
++		return "UNKNOWN"
++	}
++	read := run.read
++	r.mu.Unlock()
++	value := read()
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.healthUnjoined != 0 || !r.isCurrentGenerationLocked(gen) || gen.healthRun33 != run {
++		return "UNKNOWN"
++	}
++	if gen.stopRequested || r.state != stateRunning || channelClosed(gen.done) {
++		return "STOPPING"
++	}
++	switch value {
++	case "HEALTHY", "MISSING", "STALE", "CLOSED":
++		return value
++	default:
++		return "UNKNOWN"
++	}
++}
+diff --git a/mobile/managed_health_test.go b/mobile/managed_health_test.go
+new file mode 100644
+index 00000000..834fa9e1
+--- /dev/null
++++ b/mobile/managed_health_test.go
+@@ -0,0 +1,213 @@
++package mobile
++
++import (
++	"context"
++	"errors"
++	"reflect"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/client"
++)
++
++// ai-generated: reflection keeps the pre-API RED executable. The observed
++// boundary remains the public Config projection used by the real Start runner.
++func managedHealthAPI(t *testing.T, r *Runtime) interface{ TransportHealth() string } {
++	t.Helper()
++	h, ok := any(r).(interface{ TransportHealth() string })
++	if !ok {
++		t.Fatal("MANAGED_HEALTH_RUNTIME_API_MISSING")
++	}
++	return h
++}
++func managedHealthPublish(t *testing.T, cfg client.Config, read func() string) {
++	t.Helper()
++	f := reflect.ValueOf(cfg).FieldByName("OnTransportHealthReader")
++	if !f.IsValid() || f.Kind() != reflect.Func || f.IsNil() {
++		t.Fatal("MANAGED_HEALTH_PUBLIC_READER_NOT_PROJECTED")
++	}
++	callback, ok := f.Interface().(func(func() string))
++	if !ok {
++		t.Fatal("MANAGED_HEALTH_PUBLIC_READER_WRONG_CONTRACT")
++	}
++	callback(read)
++}
++
++// ai-generated: real mobile Start/ready latch cannot fabricate live health.
++func TestManagedHealthReadyRequiresLiveReader(t *testing.T) {
++	configs := make(chan client.Config, 1)
++	r := configuredRuntime(t, func(ctx context.Context, cfg client.Config, ready func(string)) error {
++		configs <- cfg
++		ready(cfg.LocalAddr)
++		<-ctx.Done()
++		return ctx.Err()
++	})
++	h := managedHealthAPI(t, r)
++	defer r.Stop(1000)
++	if got := h.TransportHealth(); got != "STOPPED" {
++		t.Fatal(got)
++	}
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	cfg := <-configs
++	if err := r.WaitReady(1000); err != nil {
++		t.Fatal(err)
++	}
++	if got := h.TransportHealth(); got != "UNKNOWN" {
++		t.Fatalf("ready with no native reader=%s", got)
++	}
++	var value atomic.Value
++	value.Store("HEALTHY")
++	managedHealthPublish(t, cfg, func() string { return value.Load().(string) })
++	for _, want := range []string{"HEALTHY", "STALE", "MISSING", "CLOSED", "untrusted"} {
++		value.Store(want)
++		expected := want
++		if want == "untrusted" {
++			expected = "UNKNOWN"
++		}
++		if got := h.TransportHealth(); got != expected {
++			t.Fatalf("live reader=%s want=%s", got, expected)
++		}
++	}
++}
++
++// ai-generated: no callback from the old run/generation or delayed read may
++// turn a stopped or replacement generation healthy.
++func TestManagedHealthGenerationAndStopFence(t *testing.T) {
++	configs := make(chan client.Config, 2)
++	r := configuredRuntime(t, func(ctx context.Context, cfg client.Config, ready func(string)) error {
++		configs <- cfg
++		ready(cfg.LocalAddr)
++		<-ctx.Done()
++		return ctx.Err()
++	})
++	h := managedHealthAPI(t, r)
++	defer r.Stop(1000)
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	old := <-configs
++	if err := r.WaitReady(1000); err != nil {
++		t.Fatal(err)
++	}
++	entered, release := make(chan struct{}), make(chan struct{})
++	managedHealthPublish(t, old, func() string { close(entered); <-release; return "HEALTHY" })
++	result := make(chan string, 1)
++	go func() { result <- h.TransportHealth() }()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("reader not entered")
++	}
++	if err := r.Stop(1000); err != nil {
++		close(release)
++		t.Fatal(err)
++	}
++	if got := h.TransportHealth(); got != "STOPPED" {
++		close(release)
++		t.Fatal(got)
++	}
++	if err := r.Start(); err != nil {
++		close(release)
++		t.Fatal(err)
++	}
++	current := <-configs
++	if err := r.WaitReady(1000); err != nil {
++		close(release)
++		t.Fatal(err)
++	}
++	managedHealthPublish(t, old, func() string { return "HEALTHY" })
++	close(release)
++	select {
++	case got := <-result:
++		if got != "UNKNOWN" {
++			t.Fatalf("late old read=%s", got)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("old reader unjoined")
++	}
++	if got := h.TransportHealth(); got != "UNKNOWN" {
++		t.Fatalf("old callback revived replacement=%s", got)
++	}
++	managedHealthPublish(t, current, func() string { return "MISSING" })
++	if got := h.TransportHealth(); got != "MISSING" {
++		t.Fatal(got)
++	}
++}
++
++// ai-generated: a real runner still blocked after cancellation must not be
++// laundered to STOPPED, or by the next ready callback to HEALTHY.
++func TestManagedHealthUnjoinedOwnerRemainsUnknown(t *testing.T) {
++	configs := make(chan client.Config, 2)
++	release := make(chan struct{})
++	var calls atomic.Int32
++	r := configuredRuntime(t, func(ctx context.Context, cfg client.Config, ready func(string)) error {
++		first := calls.Add(1) == 1
++		configs <- cfg
++		ready(cfg.LocalAddr)
++		if first {
++			<-release
++		} else {
++			<-ctx.Done()
++		}
++		return ctx.Err()
++	})
++	h := managedHealthAPI(t, r)
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	<-configs
++	if err := r.WaitReady(1000); err != nil {
++		t.Fatal(err)
++	}
++	r.mu.Lock()
++	old := r.current
++	r.mu.Unlock()
++	released := false
++	defer func() {
++		if !released {
++			close(release)
++		}
++		select {
++		case <-old.done:
++		case <-time.After(time.Second):
++			t.Error("old runner unjoined")
++		}
++		_ = r.Stop(1000)
++	}()
++	if err := r.Stop(1); !errors.Is(err, ErrStopTimeout) {
++		t.Fatalf("stop=%v", err)
++	}
++	if got := h.TransportHealth(); got != "UNKNOWN" {
++		t.Fatalf("detached owner=%s", got)
++	}
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	current := <-configs
++	if err := r.WaitReady(1000); err != nil {
++		t.Fatal(err)
++	}
++	managedHealthPublish(t, current, func() string { return "HEALTHY" })
++	if got := h.TransportHealth(); got != "UNKNOWN" {
++		t.Fatalf("replacement hid old owner=%s", got)
++	}
++	if err := r.Stop(1000); err != nil {
++		t.Fatal(err)
++	}
++	if got := h.TransportHealth(); got != "UNKNOWN" {
++		t.Fatalf("new finish hid old owner=%s", got)
++	}
++	close(release)
++	released = true
++	select {
++	case <-old.done:
++	case <-time.After(time.Second):
++		t.Fatal("old runner unjoined")
++	}
++	if got := h.TransportHealth(); got != "STOPPED" {
++		t.Fatalf("joined old owner=%s", got)
++	}
++}
+diff --git a/mobile/managed_join.go b/mobile/managed_join.go
+new file mode 100644
+index 00000000..57e7a94f
+--- /dev/null
++++ b/mobile/managed_join.go
+@@ -0,0 +1,58 @@
++package mobile
++
++import (
++	"context"
++	"unicode/utf8"
++)
++
++// ManagedJoinSigner is a local installation-key callback, not an admission
++// authority. Native invokes it once for every new control handshake, including
++// reconnect, and the RU server independently redeems the resulting proof.
++type ManagedJoinSigner interface{ SignManagedJoin() (string, error) }
++
++// SetManagedJoinSigner explicitly selects managed-v2 admission for this Runtime.
++// A nil/invalid source cannot fall back to previously stored one-shot claims.
++// ai-generated: immutable-per-running-generation mobile callback composition.
++func (r *Runtime) SetManagedJoinSigner(signer ManagedJoinSigner) error {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.isActiveLocked() {
++		return ErrAlreadyRunning
++	}
++	r.defaults.managedJoin = true
++	r.defaults.claims = nil
++	r.defaults.managedJoinSigner = signer
++	if signer == nil || len(r.defaults.failoverRooms) != 0 {
++		return ErrInvalidConfig
++	}
++	return nil
++}
++
++// ai-generated: capture the source in the Start snapshot. No setter or Start
++// signs a reusable proof, and no external callback error/text escapes native.
++func managedClaimsSource(enabled bool, signer ManagedJoinSigner) func(context.Context) (map[string]any, error) {
++	if !enabled {
++		return nil
++	}
++	return func(ctx context.Context) (map[string]any, error) {
++		if ctx == nil || ctx.Err() != nil || signer == nil {
++			return nil, ErrInvalidConfig
++		}
++		value, err := signer.SignManagedJoin()
++		if err != nil || ctx.Err() != nil || len(value) == 0 || len(value) > maxClaimsJSONBytes || !utf8.ValidString(value) {
++			return nil, ErrInvalidConfig
++		}
++		flat, err := parseClaimsJSON(value)
++		if err != nil || len(flat) == 0 || len(flat) > 8 {
++			return nil, ErrInvalidConfig
++		}
++		claims := make(map[string]any, len(flat))
++		for key, value := range flat {
++			if key == "" || len(key) > 64 || value == "" || len(value) > 1024 {
++				return nil, ErrInvalidConfig
++			}
++			claims[key] = value
++		}
++		return claims, nil
++	}
++}
+diff --git a/mobile/managed_join_test.go b/mobile/managed_join_test.go
+new file mode 100644
+index 00000000..53bbd446
+--- /dev/null
++++ b/mobile/managed_join_test.go
+@@ -0,0 +1,138 @@
++package mobile
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"testing"
++
++	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/client"
++)
++
++type joinSigner struct {
++	calls int
++	value string
++	err   error
++}
++
++// ai-generated: test-only external mobile callback boundary.
++func (s *joinSigner) SignManagedJoin() (string, error) {
++	s.calls++
++	if s.value != "" || s.err != nil {
++		return s.value, s.err
++	}
++	return fmt.Sprintf(`{"nonce":"fresh-%d"}`, s.calls), nil
++}
++
++// ai-generated: the real Start snapshot must keep an explicit fresh callback,
++// not evaluate it once during setters/start and then replay static claims.
++func TestManagedJoinMobileStartProjectsFreshSource(t *testing.T) {
++	configs := make(chan client.Config, 1)
++	r := configuredRuntime(t, func(ctx context.Context, cfg client.Config, ready func(string)) error {
++		configs <- cfg
++		ready(cfg.LocalAddr)
++		<-ctx.Done()
++		return ctx.Err()
++	})
++	defer r.Stop(1000)
++	s := &joinSigner{}
++	if err := r.SetManagedJoinSigner(s); err != nil {
++		t.Fatal(err)
++	}
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	cfg := <-configs
++	if !cfg.ManagedJoin || cfg.ManagedJoinClaims == nil || cfg.Claims != nil || s.calls != 0 {
++		t.Fatal("Start lost fresh mode or eagerly signed a reusable proof")
++	}
++	a, err := cfg.ManagedJoinClaims(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	b, err := cfg.ManagedJoinClaims(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if a["nonce"] != "fresh-1" || b["nonce"] != "fresh-2" || s.calls != 2 {
++		t.Fatal("mobile source reused nonce")
++	}
++	if err := r.SetManagedJoinSigner(&joinSigner{}); !errors.Is(err, ErrAlreadyRunning) {
++		t.Fatal("live signer was hot-swapped")
++	}
++}
++
++// ai-generated: nil/error/invalid proof and cancelled owners cannot fall back
++// to earlier one-shot JSON; invalid mode configuration remains fail closed.
++func TestManagedJoinMobileRejectsFallbackAndMalformedSource(t *testing.T) {
++	for _, kind := range []string{"nil", "error", "duplicate", "nested", "invalid-utf8", "cancelled", "static-after-managed", "failover"} {
++		t.Run(kind, func(t *testing.T) {
++			r := configuredRuntime(t, blockingReadyRunner)
++			defer r.Stop(1000)
++			s := &joinSigner{}
++			switch kind {
++			case "error":
++				s.err = errors.New("PRIVATE signing failure")
++			case "duplicate":
++				s.value = `{"nonce":"a","nonce":"b"}`
++			case "nested":
++				s.value = `{"nonce":{"nested":"x"}}`
++			case "invalid-utf8":
++				s.value = string([]byte{'{', '"', 'n', '"', ':', '"', 0xff, '"', '}'})
++			}
++			if kind == "nil" {
++				_ = r.SetClaimsJSON(`{"nonce":"OLD"}`)
++				if r.SetManagedJoinSigner(nil) == nil || r.Start() == nil {
++					t.Fatal("nil signer silently used static claims")
++				}
++				return
++			}
++			if err := r.SetManagedJoinSigner(s); err != nil {
++				t.Fatal(err)
++			}
++			if kind == "static-after-managed" {
++				if r.SetClaimsJSON(`{"nonce":"OLD"}`) == nil || r.Start() == nil {
++					t.Fatal("static setter downgraded managed mode")
++				}
++				return
++			}
++			if kind == "failover" {
++				if r.AddFailoverRoom("other-room") == nil {
++					t.Fatal("unsigned room switching accepted")
++				}
++				return
++			}
++			cfg := r.defaults.clientConfig()
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			if kind == "cancelled" {
++				cancel()
++			}
++			claims, err := cfg.ManagedJoinClaims(ctx)
++			if err == nil || claims != nil {
++				t.Fatal("invalid/cancelled proof returned")
++			}
++			if kind == "cancelled" && s.calls != 0 {
++				t.Fatal("cancelled owner called signer")
++			}
++		})
++	}
++}
++
++// ai-generated: the supervisor re-reads profiles; a live SetRoom must not send
++// the next hop to another room with the old captured installation proof scope.
++func TestManagedJoinRoomScopeSurvivesSupervisorHop(t *testing.T) {
++	r := configuredRuntime(t, blockingReadyRunner)
++	defer r.Stop(1000)
++	if err := r.SetManagedJoinSigner(&joinSigner{}); err != nil {
++		t.Fatal(err)
++	}
++	if err := r.Start(); err != nil {
++		t.Fatal(err)
++	}
++	_ = r.SetRoom("https://other.example.org/unbound")
++	profiles := r.profilesSnapshot()
++	if len(profiles) != 1 || profiles[0].Config.RoomID != testRoom {
++		t.Fatal("captured signer followed unsigned room replacement")
++	}
++}
+diff --git a/mobile/runtime.go b/mobile/runtime.go
+index d930e45a..e8bf2e16 100644
+--- a/mobile/runtime.go
++++ b/mobile/runtime.go
+@@ -60,6 +60,9 @@ type runGeneration struct {
+ 	doneOnce        sync.Once
+ 	stopRequested   bool
+ 	err             error
++	healthRun33     *transportHealthRun33
++	finished        bool
++	healthUnjoined  bool
+ }
+ 
+ // Runtime owns one independently configured mobile client lifecycle.
+@@ -71,7 +74,9 @@ type Runtime struct {
+ 	state           runtimeState
+ 	nextGeneration  uint64
+ 	current         *runGeneration
+-	runner          clientRunner
++	// Diagnostic only: detached work stays UNKNOWN until its actual finish.
++	healthUnjoined uint64
++	runner         clientRunner
+ 	// listener hears each session open; see SetSessionListener.
+ 	listener SessionListener
+ }
+@@ -179,6 +184,16 @@ func (r *Runtime) run(ctx context.Context, gen *runGeneration) {
+ 		// generation's configuration snapshot, exactly as before failover.
+ 		cfg := gen.cfg
+ 		cfg.RoomURL = profile.RoomID
++		healthRun := &transportHealthRun33{}
++		r.mu.Lock()
++		if r.isCurrentGenerationLocked(gen) && !gen.stopRequested {
++			gen.healthRun33 = healthRun
++		}
++		r.mu.Unlock()
++		cfg.OnTransportHealthReader = func(read func() string) {
++			r.captureTransportHealthReader33(gen, healthRun, read)
++		}
++		defer r.retireTransportHealthReader33(gen, healthRun)
+ 		cfg.OnSessionOpen = func(sessionID string) { r.notifySessionOpened(gen, profile.RoomID, sessionID) }
+ 		// A room nobody is in ends this run so the next one is tried, but
+ 		// only while there is a next one: with a single room, giving up
+@@ -244,6 +259,11 @@ func (r *Runtime) finish(gen *runGeneration, runErr error) {
+ 		runErr = nil
+ 	}
+ 	gen.err = runErr
++	gen.finished = true
++	if gen.healthUnjoined {
++		gen.healthUnjoined = false
++		r.healthUnjoined--
++	}
+ 	if r.isCurrentGenerationLocked(gen) {
+ 		r.state = stateStopped
+ 	}
+@@ -355,6 +375,10 @@ func (r *Runtime) abandon(gen *runGeneration) {
+ 	if !r.isCurrentGenerationLocked(gen) {
+ 		return
+ 	}
++	if !gen.finished && !gen.healthUnjoined {
++		gen.healthUnjoined = true
++		r.healthUnjoined++
++	}
+ 	r.current = nil
+ 	r.state = stateStopped
+ }
+diff --git a/pkg/olcrtc/client/client.go b/pkg/olcrtc/client/client.go
+index 2d1cd7a4..bdc9b020 100644
+--- a/pkg/olcrtc/client/client.go
++++ b/pkg/olcrtc/client/client.go
+@@ -105,7 +105,12 @@ type Config struct {
+ 	DeviceID         string
+ 	DeviceIDPath     string
+ 	Claims           map[string]any
+-	OnHealth         HealthFunc
++	// ai-generated: explicit one-use managed proof callback for each handshake.
++	ManagedJoin       bool
++	ManagedJoinClaims func(context.Context) (map[string]any, error)
++	OnHealth          HealthFunc
++	// OnTransportHealthReader publishes an observation-only live reader.
++	OnTransportHealthReader func(func() string)
+ 	// UDPDisabled turns the SOCKS5 UDP ASSOCIATE relay off (it is on by
+ 	// default for library users); UDPMaxFlows caps its flows, 0 = default.
+ 	UDPDisabled bool
+@@ -183,10 +188,12 @@ func toClientConfig(cfg Config) internalclient.Config {
+ 			MinDelay:       cfg.Traffic.MinDelay, MaxDelay: cfg.Traffic.MaxDelay,
+ 		},
+ 		DeviceID: cfg.DeviceID, DeviceIDPath: cfg.DeviceIDPath, Claims: cfg.Claims,
+-		OnHealth:       internalclient.HealthFunc(cfg.OnHealth),
+-		OnSessionOpen:  internalclient.SessionOpenFunc(cfg.OnSessionOpen),
+-		EndOnEmptyRoom: cfg.EndOnEmptyRoom,
+-		UDPDisabled:    cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
++		ManagedJoin: cfg.ManagedJoin, ManagedJoinClaims: cfg.ManagedJoinClaims,
++		OnHealth:                internalclient.HealthFunc(cfg.OnHealth),
++		OnTransportHealthReader: cfg.OnTransportHealthReader,
++		OnSessionOpen:           internalclient.SessionOpenFunc(cfg.OnSessionOpen),
++		EndOnEmptyRoom:          cfg.EndOnEmptyRoom,
++		UDPDisabled:             cfg.UDPDisabled, UDPMaxFlows: cfg.UDPMaxFlows,
+ 		UDPContract: cfg.UDPContract, // ai-generated: actual runner projection.
+ 	}
+ }

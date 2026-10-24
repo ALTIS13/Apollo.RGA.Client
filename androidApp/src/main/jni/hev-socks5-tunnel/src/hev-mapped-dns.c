@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <limits.h>
 
 #include <hev-compiler.h>
 #include <hev-memory-allocator.h>
@@ -20,6 +22,123 @@
 #include "hev-mapped-dns.h"
 
 static HevMappedDNS *singleton;
+static pthread_mutex_t scope_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t next_scope, current_scope, retired_scope;
+static int scope_active, scope_closing;
+static HevMappedDNS *scope_cache;
+
+static void
+scope_retire_locked (void)
+{
+    if (scope_cache)
+        hev_object_unref (HEV_OBJECT (scope_cache));
+    scope_cache = NULL;
+    retired_scope = current_scope;
+    current_scope = 0;
+    scope_closing = 0;
+}
+
+uint64_t
+hev_mapped_dns_scope_begin (void)
+{
+    uint64_t result = 0;
+    pthread_mutex_lock (&scope_lock);
+    if (!current_scope && !singleton && next_scope < INT64_MAX) {
+        result = current_scope = ++next_scope;
+        scope_closing = scope_active = 0;
+    }
+    pthread_mutex_unlock (&scope_lock);
+    return result;
+}
+
+int
+hev_mapped_dns_scope_enter (uint64_t scope)
+{
+    int result;
+    pthread_mutex_lock (&scope_lock);
+    result = scope && scope == current_scope && !scope_active &&
+             !scope_closing && !singleton;
+    if (result)
+        scope_active = 1;
+    pthread_mutex_unlock (&scope_lock);
+    return result;
+}
+
+int
+hev_mapped_dns_scope_leave (uint64_t scope)
+{
+    int result;
+    pthread_mutex_lock (&scope_lock);
+    result = scope && scope == current_scope && scope_active && !singleton;
+    if (result) {
+        scope_active = 0;
+        if (scope_closing)
+            scope_retire_locked ();
+    }
+    pthread_mutex_unlock (&scope_lock);
+    return result;
+}
+
+int
+hev_mapped_dns_scope_close (uint64_t scope)
+{
+    int result = 0;
+    pthread_mutex_lock (&scope_lock);
+    if (scope && scope == current_scope) {
+        scope_closing = 1;
+        if (!scope_active)
+            scope_retire_locked ();
+        result = 1;
+    } else if (scope && !current_scope && scope == retired_scope) {
+        result = 1;
+    }
+    pthread_mutex_unlock (&scope_lock);
+    return result;
+}
+
+int
+hev_mapped_dns_attach (int net, int mask, int max)
+{
+    HevMappedDNS *dns = NULL;
+    int result = -1;
+    pthread_mutex_lock (&scope_lock);
+    if (singleton || (current_scope && (!scope_active || scope_closing)))
+        goto done;
+    if (!max) {
+        result = scope_cache ? -1 : 0;
+        goto done;
+    }
+    if (current_scope && scope_cache) {
+        if (scope_cache->net != net || scope_cache->mask != mask ||
+            scope_cache->max != max)
+            goto done;
+        dns = scope_cache;
+    } else {
+        dns = hev_mapped_dns_new (net, mask, max);
+        if (!dns)
+            goto done;
+        if (current_scope)
+            scope_cache = dns;
+    }
+    if (current_scope)
+        hev_object_ref (HEV_OBJECT (dns)); /* bridge borrow; owner keeps one ref */
+    singleton = dns;
+    result = 0;
+done:
+    pthread_mutex_unlock (&scope_lock);
+    return result;
+}
+
+void
+hev_mapped_dns_detach (void)
+{
+    pthread_mutex_lock (&scope_lock);
+    if (singleton) {
+        hev_object_unref (HEV_OBJECT (singleton));
+        singleton = NULL;
+    }
+    pthread_mutex_unlock (&scope_lock);
+}
 
 typedef struct _DNSHdr DNSHdr;
 
@@ -47,13 +166,17 @@ hev_mapped_dns_new (int net, int mask, int max)
     HevMappedDNS *self;
     int res;
 
-    self = hev_malloc0 (sizeof (HevMappedDNS) + sizeof (void *) * max);
+    /* This map may outlive a HEV worker and its thread-local slice allocator.
+     * Its object/nodes must use the same process-heap allocator on every thread. */
+    if (max <= 0 || (unsigned int)max > ~(unsigned int)mask)
+        return NULL;
+    self = calloc (1, sizeof (HevMappedDNS) + sizeof (void *) * (size_t)max);
     if (!self)
         return NULL;
 
     res = hev_mapped_dns_construct (self, net, mask, max);
     if (res < 0) {
-        hev_free (self);
+        free (self);
         return NULL;
     }
 
@@ -79,11 +202,15 @@ hev_mapped_dns_node_alloc (const char *name)
 {
     HevMappedDNSNode *node;
 
-    node = hev_malloc0 (sizeof (HevMappedDNSNode));
+    node = calloc (1, sizeof (HevMappedDNSNode));
     if (!node)
         return NULL;
 
     node->name = strdup (name);
+    if (!node->name) {
+        free (node);
+        return NULL;
+    }
 
     return node;
 }
@@ -92,7 +219,7 @@ static void
 hev_mapped_dns_node_free (HevMappedDNSNode *node)
 {
     free (node->name);
-    hev_free (node);
+    free (node);
 }
 
 static int
@@ -311,7 +438,7 @@ hev_mapped_dns_destruct (HevObject *base)
     }
 
     HEV_OBJECT_TYPE->destruct (base);
-    hev_free (base);
+    free (base);
 }
 
 HevObjectClass *

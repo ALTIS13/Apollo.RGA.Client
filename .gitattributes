@@ -1,1 +1,5 @@
 scripts/patches/olcrtc-rga-managed-guard.patch text eol=lf
+scripts/patches/olcrtc-rga-managed-overlay.patch text eol=lf
+scripts/patches/olcrtc-rga-managed-client.patch text eol=lf
+scripts/patches/olcrtc-rga-vkcalls-provider.patch text eol=lf
+scripts/patches/olcrtc-rga-mtslink-provider.patch text eol=lf
