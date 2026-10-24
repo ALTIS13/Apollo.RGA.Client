@@ -63,6 +63,12 @@ class AndroidVpnManager(private val context: Context) : VpnManager {
     override val logs: StateFlow<List<String>> = OlcboxVpnState.logs
     override val status: StateFlow<VpnStatus> = OlcboxVpnState.status
     override val isConnected: StateFlow<Boolean> = OlcboxVpnState.isConnected
+    override val personalTunnel: StateFlow<PersonalTunnelUiState> =
+        if (appContext.packageName == "tech.gatealtas.rga.personal") {
+            OlcboxVpnState.personalTunnel
+        } else {
+            MutableStateFlow(PersonalTunnelUiState())
+        }
     override val connectedSince: StateFlow<Long?> = OlcboxVpnState.connectedSince
     override val traffic: StateFlow<TrafficCounters?> = OlcboxVpnState.traffic
     val connectionMode: StateFlow<AndroidConnectionMode> = _connectionMode.asStateFlow()

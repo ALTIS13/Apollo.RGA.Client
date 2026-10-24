@@ -91,6 +91,7 @@ import org.olcbox.app.ui.SubscriptionPresenter
 import org.olcbox.app.update.currentUpdatePlatform
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.nowMillis
+import org.olcbox.app.vpn.PersonalTunnelPhase
 
 /**
  * The board, and the two pinned things that frame it.
@@ -184,6 +185,7 @@ fun HomeScreen(
 
     val isAndroid = remember { currentUpdatePlatform().os == "android" }
     val state by viewModel.state.collectAsState()
+    val personalTunnel by viewModel.personalTunnel.collectAsState()
     val connectedSince by viewModel.connectedSince.collectAsState()
     val channelLatency by viewModel.channelLatency.collectAsState()
     val subscriptionSettings by viewModel.subscriptionSettings.collectAsState()
@@ -598,6 +600,7 @@ fun HomeScreen(
 
     fun handlePrimaryAction() {
         when {
+            isAndroid && personalTunnel.phase != PersonalTunnelPhase.Inactive -> viewModel.stopPersonalVpn()
             requiresSetup -> isAddSheetOpen = true
             requiresVpnDisclosure(isAndroid, vpnDisclosureAccepted, apolloVpnDisclosureAccepted == true,
                 state.isVpnConnected, state.isVpnLoading) -> showVpnDisclosure = true
@@ -668,6 +671,7 @@ fun HomeScreen(
             ),
             isConnected = state.isVpnConnected,
             isConnecting = state.isVpnLoading,
+            personalTunnel = personalTunnel,
             canStartVpn = state.canStartVpn,
             notice = when {
                 state.failure != null -> ApolloConnectionNotice.FAILED

@@ -36,6 +36,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -60,15 +61,27 @@ import org.olcbox.app.data.datasource.LocationsDataSourceImpl
 import org.olcbox.app.data.datasource.LocationsRepositoryImpl
 import org.olcbox.app.data.identity.PersistentDeviceIdentityProvider
 import org.olcbox.app.data.model.LocationConfig
+import org.olcbox.app.data.model.LocationBundleV4
 import org.olcbox.app.data.model.RoutingMode
 import org.olcbox.app.net.UpstreamDns
 import org.olcbox.app.data.repository.LocationsRepository
 import org.olcbox.app.net.AndroidSingBoxController
 import org.olcbox.app.net.AndroidPhysicalNetworkSnapshots
+import org.olcbox.app.net.AndroidRestrictedNetworkCoordinator
+import org.olcbox.app.net.AndroidSelectedPathProbe
+import org.olcbox.app.net.AndroidPersonalBootstrapCache
+import org.olcbox.app.net.AndroidVerifiedPersonalBootstrapProducer
+import org.olcbox.app.net.PersonalBootstrapV1
+import org.olcbox.app.net.AndroidKeystoreInstallationIdentity
+import org.olcbox.app.net.PersonalJoinProofFactory
+import org.olcbox.app.net.RemnawavePersonalBearer
 import org.olcbox.app.net.AndroidXrayController
 import org.olcbox.app.net.DirectDns
 import org.olcbox.app.net.PhysicalNetworkSnapshot
 import org.olcbox.app.net.PhysicalNetworkSnapshotLedger
+import org.olcbox.app.net.ProbeOutcome
+import org.olcbox.app.net.RestrictedNetworkCandidate
+import org.olcbox.app.net.SelectedPathEvidence
 import org.olcbox.app.net.ExactXrayChainPlan
 import org.olcbox.app.net.LinkParser
 import org.olcbox.app.net.LocationKind
@@ -87,17 +100,21 @@ import org.olcbox.app.net.XrayConfig
 import org.olcbox.app.net.XrayJsonRuntimeConfig
 import org.olcbox.app.net.SubscriptionTunnelAccess
 import org.olcbox.app.net.ApolloVpnDisclosureGate
+import org.olcbox.app.data.repository.SubscriptionFetchProxy
 import org.olcbox.app.vpn.AndroidConnectionMode
 import org.olcbox.app.vpn.AndroidSocksProxySettings
 import org.olcbox.app.vpn.AndroidSplitTunnelMode
 import org.olcbox.app.vpn.HevTunnelConfig
 import org.olcbox.app.vpn.OlcRtcUdpRelay
 import org.olcbox.app.vpn.AndroidOlcRtcRuntimeProvider
+import org.olcbox.app.vpn.AndroidOlcRtcRuntime
 import org.olcbox.app.vpn.UpstreamCandidate
 import org.olcbox.app.vpn.UpstreamNetworkSelector
 import org.olcbox.app.vpn.UpstreamTransport
 import org.olcbox.app.vpn.NetworkRefreshDecision
 import org.olcbox.app.vpn.OrdinaryNetworkRefreshPolicy
+import org.olcbox.app.vpn.PersonalActivePath
+import org.olcbox.app.vpn.PersonalTunnelPhase
 import org.olcbox.app.vpn.VpnStatus
 import org.olcbox.app.vpn.data.KEY_ANDROID_CONNECTION_MODE
 import org.olcbox.app.vpn.data.KEY_ANDROID_SPLIT_TUNNEL_BYPASS_APPS
@@ -141,7 +158,23 @@ class OlcboxVpnService : VpnService() {
     private var startupJob: Job? = null
     private var watchdogJob: Job? = null
     private var connectedStorageId: String? = null
+    private var connectedPersonalSubscriptionUrl: String? = null
+    private var personalBootstrapPrefetchJob: Job? = null
+    private var personalBootstrapInspectionJob: Job? = null
+    private var personalHandoffJob: Job? = null
+    private var personalReturnJob: Job? = null
+    private var personalOrdinaryLocation: LocationConfig? = null
+    private var personalActiveBootstrap: PersonalBootstrapV1? = null
+    private var lastPersonalPrefetchAtElapsedMs = 0L
+    private var personalBootstrapPrefetcher: suspend (String) -> Boolean = { url ->
+        val producer = AndroidVerifiedPersonalBootstrapProducer.forPersonalUsbTest(applicationContext)
+        producer != null && AndroidPersonalBootstrapCache.forApp(applicationContext).prefetch(url, producer)
+    }
+    private var personalBootstrapReader: (String) -> PersonalBootstrapV1? = { url ->
+        AndroidPersonalBootstrapCache.forApp(applicationContext).read(url)
+    }
     private var cleanupJob: Job? = null
+    @Volatile private var stopCleanupPending = false
     private var networkLossJob: Job? = null
     private var recoveryJob: Job? = null
     private var reconnectAttempt = 0
@@ -176,6 +209,9 @@ class OlcboxVpnService : VpnService() {
     private val physicalNetworkLedger = PhysicalNetworkSnapshotLedger()
     private var physicalNetworkSnapshots: AndroidPhysicalNetworkSnapshots? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val selectedPathProbe = AndroidSelectedPathProbe()
+    private var restrictedNetworkCoordinator: AndroidRestrictedNetworkCoordinator? = null
+    private var restrictedNoticeActive = false
     private var lastConnectedOrdinaryNetwork: Network? = null
     private var lastConnectedOrdinaryNetworkId: Long? = null
     private var lastConnectedOrdinaryTransport: UpstreamTransport? = null
@@ -295,6 +331,13 @@ class OlcboxVpnService : VpnService() {
                     ) return@withLock
                     if (denyConnectedSubscriptionIfNeeded()) return@withLock
                     handleAllowedNetworkChange(network, snapshot, reason)
+                    if (network == findActiveUpstreamNetwork()) {
+                        if (packageName == PERSONAL_TEST_PACKAGE) {
+                            addLog("Physical path: ${snapshot.transport}, probeReady=${snapshot.isProbeReady}, " +
+                                "usable=${snapshot.usable}, captive=${snapshot.captive}")
+                        }
+                        restrictedNetworkCoordinator?.onNetworkEvent(network, snapshot)
+                    }
                 }
             }
         }
@@ -303,7 +346,13 @@ class OlcboxVpnService : VpnService() {
     private fun handleAllowedNetworkChange(network: Network, snapshot: PhysicalNetworkSnapshot, reason: String) {
         val upstream = findActiveUpstreamNetwork() ?: return
         if (network != upstream || !snapshot.usable) return
+        if (snapshot.transport == UpstreamTransport.Wifi) restrictedNoticeActive = false
         if (OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc) {
+            if (personalOrdinaryLocation != null) {
+                if (currentNetwork != upstream) updateUnderlyingNetwork(upstream)
+                if (snapshot.transport == UpstreamTransport.Wifi) schedulePersonalReturn()
+                return
+            }
             if (currentNetwork != upstream && recoveryJob?.isActive != true) {
                 updateUnderlyingNetwork(upstream)
                 requestTransportRecovery("Upstream network changed", fullRestart = false,
@@ -328,7 +377,7 @@ class OlcboxVpnService : VpnService() {
         if (recoveryJob?.isActive == true || startupJob?.isActive == true) return
         addLog("Network $reason: recovering selected transport")
         requestTransportRecovery("Upstream network changed", fullRestart = false,
-            delayMs = NETWORK_STABILITY_GRACE_MS)
+            delayMs = personalRestrictedRecoveryDelay(NETWORK_STABILITY_GRACE_MS, snapshot.transport))
     }
 
     override fun onCreate() {
@@ -368,6 +417,12 @@ class OlcboxVpnService : VpnService() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+        }
+
+        if (stopCleanupPending) {
+            addLog("Previous VPN stop is incomplete; retrying cleanup before start")
+            cleanup()
+            return START_NOT_STICKY
         }
 
         val options = loadStartOptions(startIntent)
@@ -488,11 +543,14 @@ class OlcboxVpnService : VpnService() {
             .toSet()
     }
 
+    @Synchronized
     private fun startTunnel(
         isMigration: Boolean,
         forceFullRestart: Boolean = false,
         isRestart: Boolean = false
     ) {
+        if (stopCleanupPending || OlcboxVpnState.status.value is VpnStatus.Stopping) return
+        val previousPersonalSubscriptionUrl = connectedPersonalSubscriptionUrl
         val previousStartupJob = startupJob
         val hadPendingStartup = previousStartupJob?.isActive == true
         previousStartupJob?.cancel()
@@ -500,6 +558,13 @@ class OlcboxVpnService : VpnService() {
         networkLossJob?.cancel()
         recoveryJob?.cancel()
         recoveryJob = null
+        personalBootstrapPrefetchJob?.cancel()
+        personalBootstrapInspectionJob?.cancel()
+        personalHandoffJob?.cancel()
+        personalReturnJob?.cancel()
+        personalOrdinaryLocation = null
+        personalActiveBootstrap = null
+        connectedPersonalSubscriptionUrl = null
         if (hadPendingStartup) {
             addLog("Canceling pending olcRTC start")
             stopMobile()
@@ -561,6 +626,12 @@ class OlcboxVpnService : VpnService() {
                     }
                     OlcboxVpnState.activeLocation = location.normalized()
                     connectedStorageId = active.storageId
+                    connectedPersonalSubscriptionUrl = selectPersonalSubscriptionUrl(
+                        packageName, runtimePolicy, connectionMode, bundle, active.storageId
+                    )
+                    if (connectedPersonalSubscriptionUrl != previousPersonalSubscriptionUrl) {
+                        lastPersonalPrefetchAtElapsedMs = 0L
+                    }
                     val routingSettings = repository.getRoutingSettings()
                     routingMode = routingSettings.mode
                     this@OlcboxVpnService.routingSettings = routingSettings
@@ -594,9 +665,13 @@ class OlcboxVpnService : VpnService() {
         }
 
         updateUnderlyingNetwork(upstream)
-        stopMobileAndWait()
+        val previousStopped = stopMobileAndWait()
         coroutineContext.ensureActive()
         if (requestedGeneration != generation) return
+        if (!previousStopped) {
+            failIncompleteTransportStop()
+            return
+        }
 
         if (startTransport(location, upstream, requestedGeneration, setErrorOnFailure = false, reuseBridge = true)) {
             if (connectionMode == AndroidConnectionMode.Tun &&
@@ -641,9 +716,13 @@ class OlcboxVpnService : VpnService() {
     ) {
         setStatus(if (isMigration || isRestart) VpnStatus.Reconnecting else VpnStatus.Connecting)
         updateNotification("Connecting...")
-        stopTransportProcesses(closeTun = true, waitForSocksPort = true)
+        val previousStopped = stopTransportProcesses(closeTun = true, waitForSocksPort = true)
         coroutineContext.ensureActive()
         if (requestedGeneration != generation) return
+        if (!previousStopped) {
+            failIncompleteTransportStop()
+            return
+        }
 
         val upstream = findActiveUpstreamNetwork()
         if (upstream == null) {
@@ -807,7 +886,8 @@ class OlcboxVpnService : VpnService() {
         upstream: Network,
         requestedGeneration: Long,
         setErrorOnFailure: Boolean,
-        reuseBridge: Boolean = false
+        reuseBridge: Boolean = false,
+        personalClaimsJson: String? = null
     ): Boolean {
         runtimePolicy.denial(location.kind)?.let { denial ->
             if (setErrorOnFailure) setStatus(VpnStatus.Error(denial))
@@ -838,7 +918,7 @@ class OlcboxVpnService : VpnService() {
         return if (location.kind == LocationKind.Olcrtc) {
             activeCorePort = null
             activeCoreLogin = null
-            startMobile(location, upstream, requestedGeneration, setErrorOnFailure, routing)
+            startMobile(location, upstream, requestedGeneration, setErrorOnFailure, routing, personalClaimsJson)
         } else {
             startCore(location, setErrorOnFailure, routing, reuseBridge)
         }
@@ -1115,7 +1195,8 @@ class OlcboxVpnService : VpnService() {
         upstream: Network,
         requestedGeneration: Long,
         setErrorOnFailure: Boolean,
-        routing: Routing
+        routing: Routing,
+        personalClaimsJson: String?
     ): Boolean {
         val keepProcessBound = shouldKeepProcessBound(upstream)
         val config = location.normalized()
@@ -1147,10 +1228,18 @@ class OlcboxVpnService : VpnService() {
             olcrtc.setKey(config.key)
             olcrtc.setSocksPort(targetSocksPort.toLong())
             olcrtc.setSocksCredentials(socksUsername, socksPassword)
-            olcrtc.start()
+            if (personalClaimsJson != null) {
+                PersonalManagedJoinStarter.start(olcrtc, personalClaimsJson)
+            } else {
+                olcrtc.start()
+            }
             olcrtc.waitReady(OLCRTC_READY_TIMEOUT_MS)
             if (requestedGeneration != generation) {
                 addLog("olcRTC start superseded")
+                withContext(NonCancellable) {
+                    unbindProcessFromNetwork()
+                    stopMobileAndWait()
+                }
                 return false
             }
             coroutineContext.ensureActive()
@@ -1169,7 +1258,10 @@ class OlcboxVpnService : VpnService() {
             throw e
         } catch (e: Exception) {
             val staleRequest = requestedGeneration != generation
-            val message = e.message ?: "Transport failed"
+            // Managed admission errors may embed a token/room in a native
+            // exception. The personal path never forwards that text to logs.
+            val message = if (personalClaimsJson != null) "Personal transport unavailable"
+                else e.message ?: "Transport failed"
             if (staleRequest) {
                 addLog("olcRTC start canceled: $message")
             } else {
@@ -1391,9 +1483,30 @@ class OlcboxVpnService : VpnService() {
         watchdogStalledSamples = 0
         val mode = connectionMode
         watchdogJob = scope.launch {
-            while (isActive && OlcboxVpnState.status.value is VpnStatus.Connected) {
+            while (isActive && (OlcboxVpnState.status.value is VpnStatus.Connected ||
+                    (personalOrdinaryLocation != null && OlcboxVpnState.status.value is VpnStatus.Reconnecting))) {
                 delay(WATCHDOG_INTERVAL_MS)
                 if (tunnelMutex.withLock { denyConnectedSubscriptionIfNeeded() }) return@launch
+                if (personalOrdinaryLocation != null && OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc) {
+                    val upstream = findActiveUpstreamNetwork()
+                    if (upstream != null && physicalNetworkSnapshots?.current(upstream)?.transport == UpstreamTransport.Wifi) {
+                        updateUnderlyingNetwork(upstream)
+                        schedulePersonalReturn()
+                    }
+                    if (!isActiveTransportRunning() || !isTunBridgeReadyForActiveTransport()) {
+                        val observedGeneration = generation
+                        val observedPfd = vpnInterface
+                        tunnelMutex.withLock {
+                            if (generation == observedGeneration && observedPfd != null &&
+                                vpnInterface === observedPfd && personalOrdinaryLocation != null
+                            ) {
+                                settlePersonalFailure(observedPfd, "Personal transport stopped", RESTRICTED_ALTERNATE_UNAVAILABLE)
+                            }
+                        }
+                        return@launch
+                    }
+                    continue
+                }
                 when {
                     !isActiveTransportRunning() -> {
                         val what = activeTransportLabel()
@@ -1456,7 +1569,11 @@ class OlcboxVpnService : VpnService() {
                     // "connected but nothing loads" and "the exit is unreachable"
                     // look identical from here. The core knows which it is.
                     addLog(activeCoreDiagnostics())
-                    requestTransportRecovery("TUN traffic stalled", fullRestart = false)
+                    physicalNetworkSnapshots?.current(upstream)?.let { snapshot ->
+                        restrictedNetworkCoordinator?.onNetworkEvent(upstream, snapshot)
+                    }
+                    requestTransportRecovery("TUN traffic stalled", fullRestart = false,
+                        delayMs = personalRestrictedRecoveryDelay(0L, snapshot?.transport))
                     return@launch
                 }
             }
@@ -1480,27 +1597,44 @@ class OlcboxVpnService : VpnService() {
         val status = OlcboxVpnState.status.value
         if (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) return false
         val id = connectedStorageId ?: return false
-        val denial = SubscriptionTunnelAccess.denial(repository.getBundle(), id, System.currentTimeMillis(), runtimePolicy) ?: return false
+        val bundle = repository.getBundle()
+        val denial = SubscriptionTunnelAccess.denial(bundle, id, System.currentTimeMillis(), runtimePolicy)
+        val selectedDrift = personalOrdinaryLocation != null &&
+            (bundle.activeLocationId != id ||
+                bundle.locations.singleOrNull { it.storageId == id }?.subscriptionUrl != connectedPersonalSubscriptionUrl)
+        if (denial == null && !selectedDrift) return false
+        val reason = denial ?: "Selected subscription changed; reconnect"
         ++generation
         startupJob?.cancel()
         recoveryJob?.cancel()
         recoveryJob = null
         networkLossJob?.cancel()
-        setStatus(VpnStatus.Error(denial))
-        updateNotification(denial)
-        addLog(denial)
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Unknown)
+        setStatus(VpnStatus.Error(reason))
+        updateNotification(reason)
+        addLog(reason)
         stopTransportProcesses(closeTun = true, waitForSocksPort = false)
         return true
     }
 
+    @Synchronized
     private fun cleanup(stopService: Boolean = true) {
         if (cleanupJob?.isActive == true) return
 
+        personalBootstrapPrefetchJob?.cancel()
+        personalBootstrapInspectionJob?.cancel()
+        personalHandoffJob?.cancel()
+        personalReturnJob?.cancel()
+        personalOrdinaryLocation = null
+        personalActiveBootstrap = null
+        connectedPersonalSubscriptionUrl = null
+
         val status = OlcboxVpnState.status.value
-        if (status is VpnStatus.Disconnected &&
+        if (!stopCleanupPending && status is VpnStatus.Disconnected &&
             vpnInterface == null &&
             tun2socksThread == null &&
             socksProxy == null &&
+            runCatching { !isActiveTransportRunning() }.getOrDefault(false) &&
             cleanupJob?.isActive != true
         ) {
             if (stopService) stopSelf()
@@ -1508,6 +1642,7 @@ class OlcboxVpnService : VpnService() {
         }
         if (status is VpnStatus.Stopping && cleanupJob?.isActive == true) return
 
+        stopCleanupPending = true
         val cleanupGeneration = ++generation
         setStatus(VpnStatus.Stopping)
         startupJob?.cancel()
@@ -1523,41 +1658,66 @@ class OlcboxVpnService : VpnService() {
         lastConnectedOrdinaryTransport = null
         lastConnectedOrdinaryDns = null
         ordinaryRoutingFacts = null
-        stopAuthenticatedSocksProxy()
-        updateUnderlyingNetwork(null)
-        unbindProcessFromNetwork()
-
         cleanupJob = scope.launch {
+            var stopped = false
             try {
-                stopVisibleVpnProcesses()
-                if (generation == cleanupGeneration) {
-                    setStatus(VpnStatus.Disconnected)
-                    addLog("${activeModeLabel()} stopped")
+                tunnelMutex.withLock {
+                    stopAuthenticatedSocksProxy()
+                    updateUnderlyingNetwork(null)
+                    unbindProcessFromNetwork()
+                    val visibleStopped = try {
+                        stopVisibleVpnProcesses()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        addLog("VPN bridge stop failed (${error.javaClass.simpleName})")
+                        false
+                    }
+                    val mobileStopped = stopMobileAndWait()
+                    resetRecoveryState()
+                    if (generation == cleanupGeneration) {
+                        if (visibleStopped && mobileStopped) {
+                            stopCleanupPending = false
+                            setStatus(VpnStatus.Disconnected)
+                            addLog("${activeModeLabel()} stopped")
+                            stopped = true
+                        } else {
+                            setStatus(VpnStatus.Error("VPN stop incomplete"))
+                            updateNotification("VPN stop incomplete")
+                            addLog("VPN stop incomplete; retry Stop")
+                        }
+                    }
                 }
-
-                stopMobileAndWait()
-                resetRecoveryState()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (generation == cleanupGeneration) {
+                    setStatus(VpnStatus.Error("VPN stop incomplete"))
+                    updateNotification("VPN stop incomplete")
+                    addLog("VPN cleanup failed (${error.javaClass.simpleName}); retry Stop")
+                }
             } finally {
-                if (stopService && generation == cleanupGeneration) stopSelf()
+                if (stopService && stopped && generation == cleanupGeneration) stopSelf()
             }
         }
     }
 
-    private suspend fun stopVisibleVpnProcesses() {
+    private suspend fun stopVisibleVpnProcesses(): Boolean {
         val tunThread = tun2socksThread
         stopAuthenticatedSocksProxy()
         stopTun2socks()
-        cleanupVpnInterface()
+        val tunnelClosed = cleanupVpnInterface()
         tunThread?.interrupt()
-        waitForTun2socksStopped(tunThread)
-        if (tun2socksThread == tunThread) {
+        val bridgeStopped = waitForTun2socksStopped(tunThread)
+        if (bridgeStopped && tun2socksThread == tunThread) {
             tun2socksThread = null
         }
         unbindProcessFromNetwork()
+        return bridgeStopped && tunnelClosed
     }
 
-    private suspend fun waitForTun2socksStopped(thread: Thread?) {
-        if (thread == null) return
+    private suspend fun waitForTun2socksStopped(thread: Thread?): Boolean {
+        if (thread == null) return true
         val stopped = withTimeoutOrNull(TUN2SOCKS_STOP_WAIT_MS) {
             while (thread.isAlive) {
                 delay(SOCKS_RELEASE_POLL_MS)
@@ -1567,28 +1727,31 @@ class OlcboxVpnService : VpnService() {
         if (!stopped) {
             addLog("tun2socks cleanup is still pending")
         }
+        return stopped
+    }
+
+    private fun failIncompleteTransportStop() {
+        setStatus(VpnStatus.Error("Previous VPN stop incomplete"))
+        updateNotification("Previous VPN stop incomplete")
+        addLog("Previous VPN stop incomplete; retry connection after stopping")
     }
 
     private suspend fun stopTransportProcesses(
         closeTun: Boolean,
         waitForSocksPort: Boolean = true,
         stopMobileBeforeTun: Boolean = false
-    ) {
+    ): Boolean {
         val tunThread = tun2socksThread
         stopAuthenticatedSocksProxy()
-        if (stopMobileBeforeTun) {
-            stopMobile()
-        }
+        val earlyMobileStopped = !stopMobileBeforeTun || stopMobile()
         stopTun2socks()
-        if (closeTun) cleanupVpnInterface()
+        val tunnelClosed = !closeTun || cleanupVpnInterface()
         tunThread?.interrupt()
-        if (closeTun) {
-            waitForTun2socksStopped(tunThread)
-        }
-        if (tun2socksThread == tunThread) {
+        val bridgeStopped = !closeTun || waitForTun2socksStopped(tunThread)
+        if (bridgeStopped && tun2socksThread == tunThread) {
             tun2socksThread = null
         }
-        if (waitForSocksPort) {
+        val mobileStopped = if (waitForSocksPort) {
             if (stopMobileBeforeTun) {
                 waitForSocksPortReleased()
             } else {
@@ -1596,10 +1759,11 @@ class OlcboxVpnService : VpnService() {
             }
         } else if (!stopMobileBeforeTun) {
             stopMobile()
-        }
+        } else true
         if (closeTun) {
             unbindProcessFromNetwork()
         }
+        return earlyMobileStopped && bridgeStopped && mobileStopped && tunnelClosed
     }
 
     private fun stopTun2socks() {
@@ -1610,24 +1774,26 @@ class OlcboxVpnService : VpnService() {
         }
     }
 
-    private fun stopMobile() {
+    private fun stopMobile(): Boolean {
         val provider = lastMobileProvider
         val runtime = olcrtc
-        val wasRunning = runtime?.isRunning() == true
+        val wasRunning = runCatching { runtime?.isRunning() == true }.getOrDefault(true)
         // Logged rather than swallowed. A stop that misses its deadline is the
         // difference between the next room joining and "olcRTC runtime is
         // already active", and for one whole debugging session this line threw
         // that away: the phone reported a start refused by a runtime nobody
         // could see had failed to stop.
-        if (runtime != null) {
-            runCatching { runtime.stop(MOBILE_STOP_TIMEOUT_MS) }
-                .onFailure { addLog("olcRTC stop did not finish in time: ${it.message ?: it}") }
-        }
+        val mobileStopped = runtime == null || runCatching { runtime.stop(MOBILE_STOP_TIMEOUT_MS) }
+            .onFailure { addLog("olcRTC stop failed (${it.javaClass.simpleName})") }
+            .isSuccess
         // Also tear down any active sing-box / Xray core (no-op if none running).
-        runCatching { stopCoreProcesses() }
+        val coresStopped = runCatching { stopCoreProcesses() }
+            .onFailure { addLog("Core stop failed (${it.javaClass.simpleName})") }
+            .isSuccess
         if (wasRunning && provider == LocationConfig.PROVIDER_JITSI) {
             lastJitsiStopCompletedAtMs = System.currentTimeMillis()
         }
+        return mobileStopped && coresStopped
     }
 
     private fun stopAuthenticatedSocksProxy() {
@@ -1635,23 +1801,27 @@ class OlcboxVpnService : VpnService() {
         socksProxy = null
     }
 
-    private suspend fun stopMobileAndWait() {
+    private suspend fun stopMobileAndWait(): Boolean {
         val socksPort = socksListenPort
-        stopMobile()
-        if (!awaitRetiredCorePorts()) addLog("Previous core listener still active")
-        waitForSocksPortReleased(socksPort)
+        val stopReturned = stopMobile()
+        val corePortsReleased = awaitRetiredCorePorts()
+        if (!corePortsReleased) addLog("Previous core listener still active")
+        val socksReleased = waitForSocksPortReleased(socksPort)
+        val runtimeStopped = runCatching { olcrtc?.isRunning() != true }.getOrDefault(false)
+        return stopReturned && corePortsReleased && socksReleased && runtimeStopped
     }
 
     private suspend fun waitForSocksPortReleased(
         port: Int = socksListenPort,
         timeoutMs: Long = SOCKS_RELEASE_TIMEOUT_MS
-    ) {
+    ): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (!isLocalSocksPortOpen(port)) return
+            if (!isLocalSocksPortOpen(port)) return true
             delay(SOCKS_RELEASE_POLL_MS)
         }
         addLog("SOCKS port $port is still busy after stop")
+        return false
     }
 
     private fun isLocalSocksPortOpen(port: Int): Boolean {
@@ -1829,6 +1999,17 @@ class OlcboxVpnService : VpnService() {
         }
     }
 
+    private fun personalRestrictedRecoveryDelay(baseMs: Long, transport: UpstreamTransport?): Long =
+        PersonalRestrictedRecoveryDelay.apply(
+            baseMs,
+            packageName == "tech.gatealtas.rga.personal" &&
+                runtimePolicy == RuntimeLocationPolicy.ExperimentalDebug &&
+                connectionMode == AndroidConnectionMode.Tun &&
+                connectedPersonalSubscriptionUrl != null && vpnInterface != null &&
+                restrictedNetworkCoordinator != null,
+            transport
+        )
+
     private fun refreshWakeLock(force: Boolean = false) {
         val lock = wakeLock ?: return
         val now = System.currentTimeMillis()
@@ -1891,9 +2072,16 @@ class OlcboxVpnService : VpnService() {
         return connectionMode == AndroidConnectionMode.Tun
     }
 
-    private fun cleanupVpnInterface() {
-        runCatching { vpnInterface?.close() }
-        vpnInterface = null
+    private fun cleanupVpnInterface(): Boolean {
+        val descriptor = vpnInterface ?: return true
+        return runCatching {
+            descriptor.close()
+            if (vpnInterface === descriptor) vpnInterface = null
+            true
+        }.getOrElse {
+            addLog("VPN tunnel descriptor close failed")
+            false
+        }
     }
 
     private fun canReconnectTransportInPlace(location: LocationConfig? = null): Boolean {
@@ -1962,6 +2150,20 @@ class OlcboxVpnService : VpnService() {
             connectivityManager.registerNetworkCallback(request, callback)
             physicalNetworkSnapshots = snapshots
             networkCallback = callback
+            if (runtimePolicy == RuntimeLocationPolicy.ExperimentalDebug &&
+                connectionMode == AndroidConnectionMode.Tun
+            ) {
+                restrictedNetworkCoordinator = AndroidRestrictedNetworkCoordinator(
+                    snapshots = snapshots,
+                    scope = scope,
+                    selectedPath = ::selectedOrdinaryPathEvidence,
+                    onCandidate = { candidate ->
+                        scope.launch {
+                            tunnelMutex.withLock { reviewRestrictedCandidate(candidate) }
+                        }
+                    }
+                )
+            }
             addLog("Network monitor registered")
         } catch (e: Exception) {
             snapshots.close()
@@ -1970,12 +2172,519 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun unregisterNetworkMonitor() {
+        restrictedNetworkCoordinator?.cancel()
+        restrictedNetworkCoordinator = null
         physicalNetworkSnapshots?.close()
         physicalNetworkSnapshots = null
         networkCallback?.let { callback ->
             runCatching { connectivityManager.unregisterNetworkCallback(callback) }
         }
         networkCallback = null
+    }
+
+    /** A SOCKS bulk answer is selected-core evidence; it is not a full-TUN proof. */
+    private suspend fun selectedOrdinaryPathEvidence(network: Network): SelectedPathEvidence {
+        data class ProbeContext(
+            val generation: Long,
+            val snapshot: PhysicalNetworkSnapshot,
+            val frontPort: Int,
+            val backendPort: Int?,
+            val hasRoutingFront: Boolean,
+            val storageId: String,
+            val proxy: SubscriptionFetchProxy,
+            val bridgeReady: Boolean
+        )
+        val context = tunnelMutex.withLock {
+            val snapshot = physicalNetworkSnapshots?.current(network) ?: return@withLock null
+            val storageId = connectedStorageId ?: return@withLock null
+            val frontPort = activeCorePort ?: return@withLock null
+            val backendPort = activeCoreBackendPort
+            val hasRoutingFront = routingSettings.needsRules
+            val probePort = AndroidSelectedPathProbe.transportPort(
+                frontPort, backendPort, hasRoutingFront
+            ) ?: return@withLock null
+            val status = OlcboxVpnState.status.value
+            if (connectionMode != AndroidConnectionMode.Tun ||
+                (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) ||
+                OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc ||
+                network != currentNetwork || network != findActiveUpstreamNetwork()
+            ) return@withLock null
+            val applied = ordinaryRoutingFacts
+            val currentAttempt = applied?.generation == generation && applied.network == network &&
+                applied.networkId == snapshot.networkId && applied.dnsServers == snapshot.dnsServers
+            val connectedHere = lastConnectedOrdinaryNetwork == network &&
+                lastConnectedOrdinaryNetworkId == snapshot.networkId &&
+                lastConnectedOrdinaryDns == snapshot.dnsServers
+            if (!currentAttempt && !connectedHere) return@withLock null
+            val (username, password) = upstreamLogin()
+            ProbeContext(
+                generation, snapshot, frontPort, backendPort, hasRoutingFront, storageId,
+                SubscriptionFetchProxy(socksConnectHost(), probePort, username, password),
+                vpnInterface != null && isTunBridgeReadyForActiveTransport()
+            )
+        } ?: return SelectedPathEvidence(ProbeOutcome.Unknown, ProbeOutcome.Unknown)
+
+        val evidence = selectedPathProbe.collect(
+            selectedOnCurrentNetwork = true,
+            coreRunning = isActiveTransportRunning(),
+            bridgeReady = context.bridgeReady,
+            proxy = context.proxy
+        )
+        return tunnelMutex.withLock {
+            if (generation != context.generation ||
+                physicalNetworkSnapshots?.current(network) != context.snapshot ||
+                currentNetwork != network || activeCorePort != context.frontPort ||
+                activeCoreBackendPort != context.backendPort ||
+                routingSettings.needsRules != context.hasRoutingFront ||
+                connectedStorageId != context.storageId ||
+                !isActiveTransportRunning()
+            ) SelectedPathEvidence(ProbeOutcome.Unknown, ProbeOutcome.Unknown)
+            else evidence
+        }
+    }
+
+    /** A classifier result is only a trigger; the cached room is not admission. */
+    private fun reviewRestrictedCandidate(candidate: RestrictedNetworkCandidate): Boolean {
+        val status = OlcboxVpnState.status.value
+        if (packageName != PERSONAL_TEST_PACKAGE ||
+            runtimePolicy != RuntimeLocationPolicy.ExperimentalDebug ||
+            connectionMode != AndroidConnectionMode.Tun || connectedStorageId == null ||
+            connectedPersonalSubscriptionUrl == null || vpnInterface == null ||
+            OlcboxVpnState.activeLocation?.kind == LocationKind.Olcrtc ||
+            (status !is VpnStatus.Connected && status !is VpnStatus.Reconnecting) ||
+            candidate.generation != generation
+        ) return false
+        val snapshots = physicalNetworkSnapshots ?: return false
+        val network = findActiveUpstreamNetwork() ?: return false
+        val snapshot = snapshots.current(network) ?: return false
+        if (snapshot.generation != candidate.generation ||
+            snapshot.networkId != candidate.networkId ||
+            snapshot.revision != candidate.revision || !snapshot.isProbeReady ||
+            snapshot.transport != UpstreamTransport.Cellular || snapshot.captive ||
+            currentNetwork != network
+        ) return false
+
+        // Keep the selected subscription and the established TUN. Only the
+        // personal package can attempt a managed join, and only with a fresh
+        // server-side admission checked by the native node.
+        restrictedNoticeActive = true
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Ordinary)
+        setStatus(VpnStatus.Reconnecting)
+        updateNotification(RESTRICTED_ALTERNATE_UNAVAILABLE)
+        addLog("Restricted mobile network suspected")
+        connectedPersonalSubscriptionUrl?.let { url ->
+            personalBootstrapInspectionJob?.cancel()
+            val inspectedGeneration = generation
+            personalBootstrapInspectionJob = scope.launch(Dispatchers.IO) {
+                val cached = runCatching { personalBootstrapReader(url) }.getOrNull()
+                if (cached == null) {
+                    tunnelMutex.withLock {
+                        if (generation == inspectedGeneration && connectedPersonalSubscriptionUrl == url &&
+                            isCurrentRestrictedCandidate(candidate)
+                        ) {
+                            addLog("Restricted mobile network: personal bootstrap unavailable")
+                            abortPersonalPreflight()
+                        }
+                    }
+                    return@launch
+                }
+                tunnelMutex.withLock {
+                    if (generation != inspectedGeneration || connectedPersonalSubscriptionUrl != url ||
+                        !isCurrentRestrictedCandidate(candidate) ||
+                        packageName != PERSONAL_TEST_PACKAGE || vpnInterface == null ||
+                        personalHandoffJob?.isActive == true
+                    ) return@withLock
+                    recoveryJob?.cancel()
+                    recoveryJob = null
+                    OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Switching, PersonalActivePath.OlcRtc)
+                    personalHandoffJob = scope.launch {
+                        tunnelMutex.withLock { handoffToPersonal(candidate, cached, url) }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private fun isCurrentRestrictedCandidate(candidate: RestrictedNetworkCandidate): Boolean {
+        val network = findActiveUpstreamNetwork() ?: return false
+        val snapshot = physicalNetworkSnapshots?.current(network) ?: return false
+        return generation == candidate.generation && currentNetwork == network &&
+            snapshot.generation == candidate.generation && snapshot.networkId == candidate.networkId &&
+            snapshot.revision == candidate.revision && snapshot.isProbeReady &&
+            snapshot.transport == UpstreamTransport.Cellular && !snapshot.captive
+    }
+
+    internal suspend fun stopBridgeKeepingTun(pfd: ParcelFileDescriptor): Boolean {
+        if (vpnInterface !== pfd) return false
+        val oldThread = tun2socksThread
+        stopTun2socks()
+        oldThread?.interrupt()
+        val stopped = waitForTun2socksStopped(oldThread)
+        if (stopped && tun2socksThread === oldThread) tun2socksThread = null
+        return stopped && vpnInterface === pfd
+    }
+
+    private suspend fun startBridgeOnHeldTun(pfd: ParcelFileDescriptor): Boolean {
+        if (vpnInterface !== pfd || !startTun2socks(pfd)) return false
+        val ready = withTimeoutOrNull(TUN2SOCKS_STOP_WAIT_MS) {
+            while (!isTunBridgeReadyForActiveTransport()) delay(SOCKS_RELEASE_POLL_MS)
+            true
+        } ?: false
+        return ready && vpnInterface === pfd
+    }
+
+    private fun personalLocation(bootstrap: PersonalBootstrapV1): LocationConfig = LocationConfig(
+        name = "Ограниченная сеть",
+        id = bootstrap.roomId,
+        key = bootstrap.roomKey,
+        bypassProvider = bootstrap.provider,
+        transport = bootstrap.transport,
+        kind = LocationKind.Olcrtc
+    )
+
+    private fun freshPersonalClaims(bootstrap: PersonalBootstrapV1): String? = try {
+        if (!bootstrap.isUsableAt(System.currentTimeMillis())) null else {
+            val installation = AndroidKeystoreInstallationIdentity.forApp(applicationContext).loadOrCreate()
+            PersonalJoinProofFactory(installation).create(bootstrap.roomId, bootstrap.country).toJsonString()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Both bridge generations use duplicates of this same open VPN descriptor. */
+    private suspend fun handoffToPersonal(
+        candidate: RestrictedNetworkCandidate,
+        bootstrap: PersonalBootstrapV1,
+        url: String
+    ) {
+        val pfd = vpnInterface ?: return
+        val ordinary = OlcboxVpnState.activeLocation ?: return
+        val storageId = connectedStorageId ?: return
+        val network = findActiveUpstreamNetwork() ?: return
+        val selectedMatches = selectedSubscriptionStillMatches(storageId, url)
+        if (!selectedMatches) {
+            stopForPersonalSelectionDrift()
+            return
+        }
+        if (SubscriptionTunnelAccess.denial(repository.getBundle(), storageId,
+                System.currentTimeMillis(), runtimePolicy) != null) {
+            denyConnectedSubscriptionIfNeeded()
+            return
+        }
+        if (!isCurrentRestrictedCandidate(candidate) || connectedPersonalSubscriptionUrl != url ||
+            ordinary.kind == LocationKind.Olcrtc
+        ) {
+            abortPersonalPreflight()
+            return
+        }
+        val claims = freshPersonalClaims(bootstrap)
+        val alternate = personalLocation(bootstrap)
+        if (claims == null || !alternate.isComplete()) {
+            abortPersonalPreflight()
+            return
+        }
+        val expectedGeneration = generation
+        val current: suspend () -> Boolean = {
+            generation == expectedGeneration && vpnInterface === pfd &&
+                connectedStorageId == storageId && connectedPersonalSubscriptionUrl == url &&
+                findActiveUpstreamNetwork() == network && currentNetwork == network &&
+                selectedSubscriptionStillMatches(storageId, url)
+        }
+        watchdogJob?.cancel()
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Switching, PersonalActivePath.OlcRtc)
+        setStatus(VpnStatus.Reconnecting)
+        updateNotification("Ограниченная сеть · Переключаемся")
+        val handoff = PersonalBridgeHandoff(
+            isCurrent = current,
+            stopCurrentBridge = { stopBridgeKeepingTun(pfd) },
+            stopCurrentTransport = { stopMobileAndWait() },
+            startTargetTransport = {
+                startTransport(alternate, network, expectedGeneration, false, personalClaimsJson = claims)
+            },
+            startTargetBridge = { startBridgeOnHeldTun(pfd) },
+            verifyTarget = { isTunBridgeReadyForActiveTransport() && verifyTunnel() != null },
+            restoreSource = {
+                stopBridgeKeepingTun(pfd) && stopMobileAndWait() &&
+                    startTransport(ordinary, network, expectedGeneration, false) &&
+                    startBridgeOnHeldTun(pfd) && verifyTunnel() != null
+            }
+        )
+        val outcome = try {
+            handoff.switch()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            settlePersonalFailure(pfd, "Restricted handoff failed", RESTRICTED_ALTERNATE_UNAVAILABLE)
+            return
+        }
+        when (outcome) {
+            PersonalBridgeOutcome.TargetReady -> {
+                personalOrdinaryLocation = ordinary
+                personalActiveBootstrap = bootstrap
+                OlcboxVpnState.activeLocation = alternate
+                // SOCKS and bridge readiness are not independent-UID TUN proof.
+                // Keep the UI in verification until the on-device gate is present.
+                setStatus(VpnStatus.Reconnecting)
+                OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Checking, PersonalActivePath.OlcRtc)
+                updateNotification("Ограниченная сеть · Проверяем")
+                addLog("Personal transport ready; full-tunnel verification pending")
+                startWatchdog()
+            }
+            PersonalBridgeOutcome.SourceRestored -> {
+                OlcboxVpnState.activeLocation = ordinary
+                setStatus(VpnStatus.Connected)
+                OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Ordinary)
+                updateNotification(connectedNotificationText())
+                startWatchdog()
+                addLog("Restricted transport unavailable; ordinary tunnel restored")
+            }
+            PersonalBridgeOutcome.TunHeld -> {
+                settlePersonalFailure(pfd, "Restricted handoff incomplete", RESTRICTED_ALTERNATE_UNAVAILABLE)
+            }
+            PersonalBridgeOutcome.Superseded -> {
+                if (generation == expectedGeneration && vpnInterface === pfd) {
+                    if (!selectedSubscriptionStillMatches(storageId, url)) {
+                        stopForPersonalSelectionDrift()
+                        return
+                    }
+                    val latest = findActiveUpstreamNetwork()
+                    val recovered = latest != null && recoverOrdinaryOnHeldTun(pfd, ordinary, latest, expectedGeneration)
+                    if (recovered) {
+                        OlcboxVpnState.activeLocation = ordinary
+                        setStatus(VpnStatus.Connected)
+                        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Inactive, PersonalActivePath.Unknown)
+                        updateNotification(connectedNotificationText())
+                        startWatchdog()
+                    } else {
+                        settlePersonalFailure(pfd, "Network changed during handoff", RESTRICTED_ALTERNATE_UNAVAILABLE)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun selectedSubscriptionStillMatches(storageId: String, url: String): Boolean {
+        val bundle = repository.getBundle()
+        return bundle.activeLocationId == storageId &&
+            bundle.locations.singleOrNull { it.storageId == storageId }?.subscriptionUrl == url
+    }
+
+    private suspend fun stopForPersonalSelectionDrift() {
+        ++generation
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Unknown)
+        setStatus(VpnStatus.Error("Selected subscription changed; reconnect"))
+        updateNotification("Selected subscription changed; reconnect")
+        addLog("Selected subscription changed; personal tunnel stopped")
+        stopTransportProcesses(closeTun = true, waitForSocksPort = false)
+    }
+
+    private fun abortPersonalPreflight() {
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Ordinary)
+        setStatus(VpnStatus.Reconnecting)
+        updateNotification(RESTRICTED_ALTERNATE_UNAVAILABLE)
+        requestTransportRecovery("Personal handoff preflight unavailable", fullRestart = false,
+            delayMs = NETWORK_STABILITY_GRACE_MS)
+    }
+
+    private fun schedulePersonalReturn() {
+        if (personalReturnJob?.isActive == true || personalOrdinaryLocation == null) return
+        val expectedGeneration = generation
+        personalReturnJob = scope.launch {
+            delay(NETWORK_STABILITY_GRACE_MS)
+            tunnelMutex.withLock {
+                if (generation == expectedGeneration && personalOrdinaryLocation != null) {
+                    returnFromPersonal(expectedGeneration)
+                }
+            }
+        }
+    }
+
+    /** On a usable Wi-Fi path, restore the selected ordinary host without releasing the VPN TUN. */
+    private suspend fun returnFromPersonal(expectedGeneration: Long) {
+        val pfd = vpnInterface ?: return
+        val ordinary = personalOrdinaryLocation ?: return
+        val bootstrap = personalActiveBootstrap ?: return
+        val alternate = OlcboxVpnState.activeLocation ?: return
+        val storageId = connectedStorageId ?: return
+        val url = connectedPersonalSubscriptionUrl ?: return
+        val network = findActiveUpstreamNetwork() ?: return
+        val snapshot = physicalNetworkSnapshots?.current(network) ?: return
+        if (!selectedSubscriptionStillMatches(storageId, url)) {
+            stopForPersonalSelectionDrift()
+            return
+        }
+        if (SubscriptionTunnelAccess.denial(repository.getBundle(), storageId,
+                System.currentTimeMillis(), runtimePolicy) != null) {
+            denyConnectedSubscriptionIfNeeded()
+            return
+        }
+        if (snapshot.transport != UpstreamTransport.Wifi || !snapshot.usable ||
+            alternate.kind != LocationKind.Olcrtc || expectedGeneration != generation
+        ) return
+        recoveryJob?.cancel()
+        recoveryJob = null
+        watchdogJob?.cancel()
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Switching, PersonalActivePath.Ordinary)
+        setStatus(VpnStatus.Reconnecting)
+        updateNotification("Восстанавливаем обычное подключение")
+        val current: suspend () -> Boolean = {
+            generation == expectedGeneration && vpnInterface === pfd &&
+                connectedStorageId == storageId && findActiveUpstreamNetwork() == network &&
+                currentNetwork == network && selectedSubscriptionStillMatches(storageId, url)
+        }
+        val handoff = PersonalBridgeHandoff(
+            isCurrent = current,
+            stopCurrentBridge = { stopBridgeKeepingTun(pfd) },
+            stopCurrentTransport = { stopMobileAndWait().also { unbindProcessFromNetwork() } },
+            startTargetTransport = { startTransport(ordinary, network, expectedGeneration, false) },
+            startTargetBridge = { startBridgeOnHeldTun(pfd) },
+            verifyTarget = {
+                isTunBridgeReadyForActiveTransport() && verifyTunnel() != null &&
+                    markVerifiedOrdinaryNetwork(network, ordinary)
+            },
+            restoreSource = {
+                val claims = freshPersonalClaims(bootstrap)
+                stopBridgeKeepingTun(pfd) && stopMobileAndWait() && claims != null &&
+                    startTransport(alternate, network, expectedGeneration, false, personalClaimsJson = claims) &&
+                    startBridgeOnHeldTun(pfd) && verifyTunnel() != null
+            }
+        )
+        val outcome = try {
+            handoff.switch()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            settlePersonalFailure(pfd, "Ordinary return failed", "Подключение недоступно")
+            return
+        }
+        when (outcome) {
+            PersonalBridgeOutcome.TargetReady -> {
+                OlcboxVpnState.activeLocation = ordinary
+                personalOrdinaryLocation = null
+                personalActiveBootstrap = null
+                setStatus(VpnStatus.Connected)
+                OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Inactive, PersonalActivePath.Unknown)
+                updateNotification(connectedNotificationText())
+                startWatchdog()
+                addLog("Ordinary tunnel restored on Wi-Fi")
+            }
+            PersonalBridgeOutcome.SourceRestored -> {
+                OlcboxVpnState.activeLocation = alternate
+                setStatus(VpnStatus.Reconnecting)
+                OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Checking, PersonalActivePath.OlcRtc)
+                updateNotification("Ограниченная сеть · Проверяем")
+                addLog("Ordinary transport unavailable; personal tunnel restored")
+                startWatchdog()
+            }
+            PersonalBridgeOutcome.TunHeld -> {
+                settlePersonalFailure(pfd, "Ordinary return incomplete", "Подключение недоступно")
+            }
+            PersonalBridgeOutcome.Superseded -> {
+                if (generation == expectedGeneration && vpnInterface === pfd) {
+                    if (!selectedSubscriptionStillMatches(storageId, url)) {
+                        stopForPersonalSelectionDrift()
+                        return
+                    }
+                    val latest = findActiveUpstreamNetwork()
+                    val latestIsWifi = latest?.let {
+                        physicalNetworkSnapshots?.current(it)?.transport == UpstreamTransport.Wifi
+                    } == true
+                    val recovered = when {
+                        latest == null -> false
+                        latestIsWifi -> recoverOrdinaryOnHeldTun(pfd, ordinary, latest, expectedGeneration)
+                        else -> recoverPersonalOnHeldTun(pfd, alternate, bootstrap, latest, expectedGeneration)
+                    }
+                    if (recovered && latestIsWifi) {
+                        OlcboxVpnState.activeLocation = ordinary
+                        personalOrdinaryLocation = null
+                        personalActiveBootstrap = null
+                        setStatus(VpnStatus.Connected)
+                        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Inactive, PersonalActivePath.Unknown)
+                        updateNotification(connectedNotificationText())
+                        startWatchdog()
+                    } else if (recovered) {
+                        OlcboxVpnState.activeLocation = alternate
+                        setStatus(VpnStatus.Reconnecting)
+                        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Checking, PersonalActivePath.OlcRtc)
+                        updateNotification("Ограниченная сеть · Проверяем")
+                        startWatchdog()
+                    } else {
+                        settlePersonalFailure(pfd, "Network changed during ordinary return", "Подключение недоступно")
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun recoverOrdinaryOnHeldTun(
+        pfd: ParcelFileDescriptor,
+        ordinary: LocationConfig,
+        network: Network,
+        expectedGeneration: Long
+    ): Boolean {
+        if (generation != expectedGeneration || vpnInterface !== pfd) return false
+        updateUnderlyingNetwork(network)
+        if (!stopBridgeKeepingTun(pfd) || !stopMobileAndWait()) return false
+        unbindProcessFromNetwork()
+        return startTransport(ordinary, network, expectedGeneration, false) &&
+            startBridgeOnHeldTun(pfd) && isTunBridgeReadyForActiveTransport() &&
+            verifyTunnel() != null && markVerifiedOrdinaryNetwork(network, ordinary) &&
+            generation == expectedGeneration && vpnInterface === pfd &&
+            findActiveUpstreamNetwork() == network
+    }
+
+    /** True means both paths stopped and the existing TUN remains open. False is not a closed-path claim. */
+    internal suspend fun holdTunWithoutTransport(pfd: ParcelFileDescriptor): Boolean =
+        withContext(NonCancellable) {
+            if (vpnInterface !== pfd) return@withContext false
+            val bridgeStopped = stopBridgeKeepingTun(pfd)
+            val transportStopped = stopMobileAndWait()
+            unbindProcessFromNetwork()
+            val heldClosed = bridgeStopped && transportStopped &&
+                !isActiveTransportRunning() && !isTunBridgeReadyForActiveTransport()
+            if (!heldClosed) {
+                // Do not advertise a safely held TUN if either native stop timed
+                // out. Release the parent descriptor and leave an explicit Error
+                // requiring Stop/retry; the stale native worker may still exist.
+                cleanupVpnInterface()
+            }
+            heldClosed
+        }
+
+    private suspend fun settlePersonalFailure(
+        pfd: ParcelFileDescriptor,
+        reason: String,
+        unavailableText: String
+    ) {
+        val heldClosed = holdTunWithoutTransport(pfd)
+        OlcboxVpnState.setPersonalPhase(PersonalTunnelPhase.Unavailable, PersonalActivePath.Unknown)
+        if (heldClosed) {
+            setStatus(VpnStatus.Reconnecting)
+            updateNotification(unavailableText)
+            addLog("$reason; VPN tunnel held closed")
+        } else {
+            setStatus(VpnStatus.Error("VPN stop incomplete"))
+            updateNotification("VPN stop incomplete")
+            addLog("$reason; VPN stop incomplete, retry Stop")
+        }
+    }
+
+    private suspend fun recoverPersonalOnHeldTun(
+        pfd: ParcelFileDescriptor,
+        alternate: LocationConfig,
+        bootstrap: PersonalBootstrapV1,
+        network: Network,
+        expectedGeneration: Long
+    ): Boolean {
+        val claims = freshPersonalClaims(bootstrap) ?: return false
+        if (generation != expectedGeneration || vpnInterface !== pfd) return false
+        updateUnderlyingNetwork(network)
+        if (!stopBridgeKeepingTun(pfd) || !stopMobileAndWait()) return false
+        return startTransport(alternate, network, expectedGeneration, false, personalClaimsJson = claims) &&
+            startBridgeOnHeldTun(pfd) && isTunBridgeReadyForActiveTransport() &&
+            verifyTunnel() != null && generation == expectedGeneration && vpnInterface === pfd &&
+            findActiveUpstreamNetwork() == network
     }
 
     /** Records the exact DNS list passed to the direct-routing front, not a later callback value. */
@@ -2009,7 +2718,32 @@ class OlcboxVpnService : VpnService() {
         lastConnectedOrdinaryNetworkId = applied?.networkId ?: latest?.networkId
         lastConnectedOrdinaryTransport = transport
         lastConnectedOrdinaryDns = dns
+        schedulePersonalBootstrapPrefetch(upstream)
         return true
+    }
+
+    /** A verified ordinary path may refresh its private room in the background; its failure never blocks VLESS/HY2. */
+    private fun schedulePersonalBootstrapPrefetch(upstream: Network) {
+        val url = connectedPersonalSubscriptionUrl ?: return
+        if (connectionMode != AndroidConnectionMode.Tun || upstream != currentNetwork ||
+            personalBootstrapPrefetchJob?.isActive == true
+        ) return
+        val now = SystemClock.elapsedRealtime()
+        if (lastPersonalPrefetchAtElapsedMs != 0L &&
+            now - lastPersonalPrefetchAtElapsedMs < PERSONAL_PREFETCH_MIN_INTERVAL_MS
+        ) return
+        lastPersonalPrefetchAtElapsedMs = now
+        val selectedGeneration = generation
+        personalBootstrapPrefetchJob = scope.launch(Dispatchers.IO) {
+            try {
+                if (selectedGeneration != generation || connectedPersonalSubscriptionUrl != url) return@launch
+                personalBootstrapPrefetcher(url)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Private bootstrap is optional until handoff is physically proven; ordinary traffic stays intact.
+            }
+        }
     }
 
     private fun retryAfterVerifiedNetworkChange(requestedGeneration: Long) {
@@ -2194,10 +2928,15 @@ class OlcboxVpnService : VpnService() {
 
     private fun localized(text: String): String = notificationWords[text] ?: text
 
+    private fun notificationText(status: String): String =
+        if (restrictedNoticeActive && status in RESTRICTED_NOTICE_RECONNECT_TEXTS) {
+            RESTRICTED_ALTERNATE_UNAVAILABLE
+        } else status
+
     private fun buildNotification(status: String) =
         NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("${applicationInfo.loadLabel(packageManager)} ${localized(activeModeLabel())}")
-            .setContentText(localized(status))
+            .setContentText(localized(notificationText(status)))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .setContentIntent(getAppPendingIntent())
@@ -2224,6 +2963,9 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun setStatus(status: VpnStatus) {
+        if (status !is VpnStatus.Connecting && status !is VpnStatus.Reconnecting) {
+            restrictedNoticeActive = false
+        }
         if (status is VpnStatus.Connected) {
             val (username, password) = upstreamLogin()
             OlcboxVpnState.channelProxy = org.olcbox.app.data.repository.SubscriptionFetchProxy(
@@ -2476,6 +3218,7 @@ class OlcboxVpnService : VpnService() {
         private const val WAKE_LOCK_REFRESH_INTERVAL_MS = 30_000L
         private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 1000L
         private const val TUN_MTU = 1500
+        private const val PERSONAL_PREFETCH_MIN_INTERVAL_MS = 60_000L
 
         /** Under filesDir, so a cache sweep cannot take the lists out from under a running core. */
         private const val RULE_SETS_DIR = "rulesets"
@@ -2484,6 +3227,12 @@ class OlcboxVpnService : VpnService() {
         private const val IPV4_PREFIX_LENGTH = 24
         private const val NOTIFICATION_CHANNEL_ID = "olcbox_vpn"
         private const val NOTIFICATION_ID = 100
+        private const val RESTRICTED_ALTERNATE_UNAVAILABLE = "Ограниченная сеть · Режим недоступен"
+        private const val PERSONAL_TEST_PACKAGE = "tech.gatealtas.rga.personal"
+        private val RESTRICTED_NOTICE_RECONNECT_TEXTS = setOf(
+            "Protecting your connection", "Connecting...", "Reconnecting...", "Waiting for network...",
+            "Waiting for transport...", "Verifying tunnel..."
+        )
         private const val TAG = "OlcboxVpnService"
 
         private fun addLog(msg: String) {
@@ -2495,6 +3244,82 @@ class OlcboxVpnService : VpnService() {
 /** A chained transport fails when either required child exits. */
 internal fun coreChainAlive(requiresBoth: Boolean, singBoxAlive: Boolean, xrayAlive: Boolean): Boolean =
     if (requiresBoth) singBoxAlive && xrayAlive else singBoxAlive || xrayAlive
+
+/** Reserve one bounded assessment window before ordinary recovery replaces its network generation. */
+internal object PersonalRestrictedRecoveryDelay {
+    private const val ASSESSMENT_WINDOW_MS = 45_000L
+
+    fun apply(baseMs: Long, personalEligible: Boolean, transport: UpstreamTransport?): Long =
+        if (personalEligible && transport == UpstreamTransport.Cellular) {
+            maxOf(baseMs, ASSESSMENT_WINDOW_MS)
+        } else baseMs
+}
+
+/** A transport swap never owns or closes the VpnService TUN. The caller keeps its PFD open. */
+internal enum class PersonalBridgeOutcome { TargetReady, SourceRestored, TunHeld, Superseded }
+
+internal class PersonalBridgeHandoff(
+    private val isCurrent: suspend () -> Boolean,
+    private val stopCurrentBridge: suspend () -> Boolean,
+    private val stopCurrentTransport: suspend () -> Boolean,
+    private val startTargetTransport: suspend () -> Boolean,
+    private val startTargetBridge: suspend () -> Boolean,
+    private val verifyTarget: suspend () -> Boolean,
+    private val restoreSource: suspend () -> Boolean
+) {
+    suspend fun switch(): PersonalBridgeOutcome {
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        if (!stopCurrentBridge()) return PersonalBridgeOutcome.TunHeld
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        if (!stopCurrentTransport()) return rollback()
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        if (!startTargetTransport()) return rollback()
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        if (!startTargetBridge()) return rollback()
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        if (!verifyTarget()) return rollback()
+        return if (isCurrent()) PersonalBridgeOutcome.TargetReady else PersonalBridgeOutcome.Superseded
+    }
+
+    private suspend fun rollback(): PersonalBridgeOutcome {
+        if (!isCurrent()) return PersonalBridgeOutcome.Superseded
+        return if (restoreSource()) PersonalBridgeOutcome.SourceRestored else PersonalBridgeOutcome.TunHeld
+    }
+}
+
+/** Claims are one-shot native input. Never leave an old proof queued after start fails. */
+internal object PersonalManagedJoinStarter {
+    fun start(runtime: AndroidOlcRtcRuntime, claimsJson: String) {
+        require(claimsJson.isNotBlank()) { "Personal join proof unavailable" }
+        runtime.setClaimsJSON(claimsJson)
+        try {
+            runtime.start()
+        } catch (error: Exception) {
+            runCatching { runtime.setClaimsJSON("") }
+            throw error
+        }
+    }
+}
+
+/** Never borrow another subscription's bearer or a manually imported room for the personal mode. */
+internal fun selectPersonalSubscriptionUrl(
+    packageName: String,
+    policy: RuntimeLocationPolicy,
+    mode: AndroidConnectionMode,
+    bundle: LocationBundleV4,
+    selectedStorageId: String?
+): String? {
+    if (packageName != "tech.gatealtas.rga.personal" ||
+        policy != RuntimeLocationPolicy.ExperimentalDebug ||
+        mode != AndroidConnectionMode.Tun ||
+        selectedStorageId == null || bundle.activeLocationId != selectedStorageId
+    ) return null
+    val selected = bundle.locations.singleOrNull { it.storageId == selectedStorageId } ?: return null
+    if (selected.location.kind != LocationKind.Vless &&
+        selected.location.kind != LocationKind.Hysteria2
+    ) return null
+    return selected.subscriptionUrl?.takeIf { RemnawavePersonalBearer.parse(it) != null }
+}
 
 /** Each English text the notification can show, and the resource that says it. */
 private val NOTIFICATION_TEXTS: Map<String, StringResource> = mapOf(

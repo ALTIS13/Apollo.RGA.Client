@@ -12,6 +12,8 @@ interface AndroidOlcRtcRuntime {
     fun setRoom(value: String)
     fun setDeviceID(value: String)
     fun setKey(value: String)
+    /** One-shot flat join proof for the next native Start; errors must propagate to the caller. */
+    fun setClaimsJSON(value: String)
     fun setSocksPort(value: Long)
     fun setSocksCredentials(username: String, password: String)
     fun setTransport(value: String)

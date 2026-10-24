@@ -103,6 +103,9 @@ import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.util.formatByteSize
 import org.olcbox.app.util.formatDate
 import org.olcbox.app.ui.theme.LocalPkPalette
+import org.olcbox.app.vpn.PersonalActivePath
+import org.olcbox.app.vpn.PersonalTunnelPhase
+import org.olcbox.app.vpn.PersonalTunnelUiState
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -119,6 +122,7 @@ internal fun ApolloHomeContent(
     subscription: SubscriptionPresentation,
     isConnected: Boolean,
     isConnecting: Boolean,
+    personalTunnel: PersonalTunnelUiState = PersonalTunnelUiState(),
     canStartVpn: Boolean,
     isRefreshing: Boolean,
     showSettings: Boolean,
@@ -148,6 +152,16 @@ internal fun ApolloHomeContent(
     val selectedPair = ordinary.firstOrNull { it.first.storageId == selectedLocationId }
     val selected = selectedPair?.second
     val selectedExperimental = experimental.any { it.storageId == selectedLocationId }
+    val personalActive = personalTunnel.phase != PersonalTunnelPhase.Inactive
+    val visualConnected = if (personalActive) personalTunnel.phase == PersonalTunnelPhase.Working else isConnected
+    val visualConnecting = if (personalActive) {
+        personalTunnel.phase == PersonalTunnelPhase.Switching || personalTunnel.phase == PersonalTunnelPhase.Checking
+    } else isConnecting
+    val activePathTitle = when (personalTunnel.activePath) {
+        PersonalActivePath.OlcRtc -> "Активный путь: OlcRTC"
+        PersonalActivePath.Ordinary -> "Активный путь: обычный узел"
+        PersonalActivePath.Unknown -> "Активный путь: не подтверждён"
+    }
     val statusTitle = when (subscription.state) {
         SubscriptionDisplayState.ACTIVE -> stringResource(Res.string.apollo_status_active)
         SubscriptionDisplayState.EXPIRING -> stringResource(Res.string.apollo_status_expiring)
@@ -158,12 +172,17 @@ internal fun ApolloHomeContent(
         SubscriptionDisplayState.REFRESH_FAILED -> stringResource(Res.string.apollo_status_refresh_failed)
     }
     val connectionTitle = when {
+        personalTunnel.phase == PersonalTunnelPhase.Switching -> "Переключаемся"
+        personalTunnel.phase == PersonalTunnelPhase.Checking -> "Проверяем"
+        personalTunnel.phase == PersonalTunnelPhase.Working -> "Работает"
+        personalTunnel.phase == PersonalTunnelPhase.Unavailable -> "Недоступен"
         isConnected && isConnecting -> stringResource(Res.string.apollo_reconnecting)
         isConnected -> stringResource(Res.string.apollo_connected)
         isConnecting -> stringResource(Res.string.apollo_connecting)
         else -> stringResource(Res.string.apollo_disconnected)
     }
     val linkCode = when {
+        personalActive -> "OLCRTC // ${connectionTitle.uppercase()}"
         notice == ApolloConnectionNotice.FAILED || notice == ApolloConnectionNotice.BLOCKED ->
             stringResource(Res.string.apollo_link_failed)
         isConnected && isConnecting -> stringResource(Res.string.apollo_link_reconnecting)
@@ -172,18 +191,24 @@ internal fun ApolloHomeContent(
         else -> stringResource(Res.string.apollo_link_idle)
     }
     val actionTitle = when {
+        personalActive -> "Остановить"
         isConnected -> stringResource(Res.string.apollo_disconnect)
         isConnecting -> stringResource(Res.string.apollo_cancel)
         else -> stringResource(Res.string.apollo_connect)
     }
-    val compactActionTitle = if (isConnecting && !isConnected)
+    val compactActionTitle = if (!personalActive && isConnecting && !isConnected)
         stringResource(Res.string.apollo_cancel_short) else actionTitle
     val accessBlocked = subscription.state in setOf(SubscriptionDisplayState.EXPIRED,
         SubscriptionDisplayState.LIMITED, SubscriptionDisplayState.DEVICE_DENIED)
-    val actionEnabled = isConnected || isConnecting || (canStartVpn && !accessBlocked && selectedLocationId != null)
+    val actionEnabled = personalActive || isConnected || isConnecting ||
+        (canStartVpn && !accessBlocked && selectedLocationId != null)
     val unknownCountry = stringResource(Res.string.apollo_country_unknown)
     val selectedCountry = selected?.let { localizedCountry(it.country, unknownCountry) }
-    val actionDescription = listOfNotNull(actionTitle, selectedCountry).joinToString(", ")
+    val actionFlag = if (personalActive && personalTunnel.activePath != PersonalActivePath.Ordinary) {
+        null
+    } else selected?.flag
+    val actionDescription = if (personalActive) "Остановить VPN" else
+        listOfNotNull(actionTitle, selectedCountry).joinToString(", ")
     val route = when {
         selected?.relay != null -> stringResource(Res.string.apollo_route_configured,
             localizedCountry(selected.country, unknownCountry))
@@ -192,6 +217,9 @@ internal fun ApolloHomeContent(
     val palette = LocalPkPalette.current
     val signalColor by animateColorAsState(
         targetValue = when {
+            personalTunnel.phase == PersonalTunnelPhase.Unavailable -> MaterialTheme.colorScheme.error
+            personalActive && visualConnecting -> palette.warning
+            personalActive && visualConnected -> palette.success
             notice == ApolloConnectionNotice.FAILED -> MaterialTheme.colorScheme.error
             isConnecting -> palette.warning
             isConnected -> palette.success
@@ -200,14 +228,20 @@ internal fun ApolloHomeContent(
         animationSpec = tween(240), label = "connection signal"
     )
     val heroColor by animateColorAsState(
-        targetValue = if (isConnected) MaterialTheme.colorScheme.surfaceContainerHigh
+        targetValue = if (visualConnected) MaterialTheme.colorScheme.surfaceContainerHigh
             else MaterialTheme.colorScheme.surfaceContainer,
         animationSpec = tween(280), label = "connection surface"
     )
     val scrollState = rememberScrollState()
     var heroHeightPx by remember { mutableIntStateOf(0) }
     var statusRowHeightPx by remember { mutableIntStateOf(0) }
-    val compactDestination = selected?.let { destination(it) }
+    val compactDestination = if (personalActive) {
+        when (personalTunnel.activePath) {
+            PersonalActivePath.OlcRtc -> "OlcRTC"
+            PersonalActivePath.Ordinary -> selected?.let { destination(it) } ?: "VPN"
+            PersonalActivePath.Unknown -> "VPN"
+        }
+    } else selected?.let { destination(it) }
         ?: if (selectedExperimental) stringResource(Res.string.apollo_experimental) else null
     val showCompactAction by remember(scrollState, compactDestination, heroHeightPx) {
         derivedStateOf {
@@ -279,8 +313,8 @@ internal fun ApolloHomeContent(
                                 }) {
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                if (!selected?.flag.isNullOrBlank()) {
-                                    ApolloActionFlag(selected?.flag, isConnecting, ambientMotionEnabled,
+                                if (!actionFlag.isNullOrBlank()) {
+                                    ApolloActionFlag(actionFlag, visualConnecting, ambientMotionEnabled,
                                         tag = "apollo-sticky-action-flag")
                                 }
                                 Text(compactActionTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -299,7 +333,7 @@ internal fun ApolloHomeContent(
             Surface(color = Color.Transparent,
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 shape = RoundedCornerShape(28.dp),
-                border = BorderStroke(1.dp, signalColor.copy(alpha = if (isConnected) 0.62f else 0.34f)),
+                border = BorderStroke(1.dp, signalColor.copy(alpha = if (visualConnected) 0.62f else 0.34f)),
                 modifier = Modifier.onSizeChanged { heroHeightPx = it.height }
                     .semantics { testTag = "apollo-hero" }) {
                 Box(
@@ -309,7 +343,7 @@ internal fun ApolloHomeContent(
                         )
                     )
                 ) {
-                    ApolloHeroBackdrop(signalColor, ambientMotionEnabled, isConnecting, isConnected,
+                    ApolloHeroBackdrop(signalColor, ambientMotionEnabled, visualConnecting, visualConnected,
                         statusRowHeightPx, Modifier.matchParentSize())
                 Column(Modifier.fillMaxWidth().animateContentSize(animationSpec = tween(220)).padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -324,7 +358,7 @@ internal fun ApolloHomeContent(
                             Text(connectionTitle, style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.SemiBold, color = signalColor)
                         }
-                        ApolloStatusSignal(signalColor, isConnected, isConnecting, ambientMotionEnabled)
+                        ApolloStatusSignal(signalColor, visualConnected, visualConnecting, ambientMotionEnabled)
                     }
                     if (selected != null) {
                         Text(hostMode(selected, selectedPair.first.config?.kind),
@@ -359,8 +393,10 @@ internal fun ApolloHomeContent(
                     val actionGradient = Brush.linearGradient(
                         when {
                             !actionEnabled -> listOf(Color(0xFF39394C), Color(0xFF303447))
-                            isConnecting -> listOf(Color(0xFF795BCB), Color(0xFF5261BA), Color(0xFF5D48AA))
-                            isConnected -> listOf(Color(0xFF177F78), Color(0xFF176262), Color(0xFF24475D))
+                            personalTunnel.phase == PersonalTunnelPhase.Unavailable ->
+                                listOf(Color(0xFF985264), Color(0xFF713E55), Color(0xFF59405A))
+                            visualConnecting -> listOf(Color(0xFF795BCB), Color(0xFF5261BA), Color(0xFF5D48AA))
+                            visualConnected -> listOf(Color(0xFF177F78), Color(0xFF176262), Color(0xFF24475D))
                             else -> listOf(Color(0xFF825AE4), Color(0xFF634FD4), Color(0xFF465ABE))
                         }
                     )
@@ -400,28 +436,32 @@ internal fun ApolloHomeContent(
                         )
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            ApolloActionFlag(selected?.flag, isConnecting, ambientMotionEnabled,
+                            ApolloActionFlag(actionFlag, visualConnecting, ambientMotionEnabled,
                                 tag = "apollo-action-flag")
                             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(actionTitle, style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     textAlign = TextAlign.Center,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                selectedCountry?.let { country ->
+                                selectedCountry?.takeUnless { personalActive }?.let { country ->
                                     Text(country, style = MaterialTheme.typography.labelMedium,
                                         textAlign = TextAlign.Center, maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.semantics { testTag = "apollo-action-country" })
                                 }
                             }
-                            Text(if (isConnected || isConnecting) "×" else "→",
+                            Text(if (personalActive || isConnected || isConnecting) "×" else "→",
                                 style = MaterialTheme.typography.titleLarge,
                                 color = Color.White.copy(alpha = 0.78f),
                                 textAlign = TextAlign.Center, maxLines = 1,
                                 modifier = Modifier.width(32.dp).clearAndSetSemantics { })
                         }
                     }
-                    if (selected != null || selectedExperimental) {
+                    if (personalActive) {
+                        Text(activePathTitle, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.semantics { testTag = "apollo-active-path" })
+                    } else if (selected != null || selectedExperimental) {
                         if (selected?.relay != null) {
                             ApolloRoutePath(
                                 description = route,
