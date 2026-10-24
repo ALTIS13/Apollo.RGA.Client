@@ -24,6 +24,9 @@ import org.olcbox.app.net.LocationKind
 import org.olcbox.app.ui.SubscriptionDisplayState
 import org.olcbox.app.ui.SubscriptionPresentation
 import org.olcbox.app.ui.features.locations.LocationItem
+import org.olcbox.app.vpn.PersonalActivePath
+import org.olcbox.app.vpn.PersonalTunnelPhase
+import org.olcbox.app.vpn.PersonalTunnelUiState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -58,6 +61,75 @@ class ApolloHomeContentTest {
         expiresAtEpochMs = null,
         refreshError = null
     )
+
+    @Test fun personalCheckingKeepsStopAvailableWithoutClaimingConnection() = runComposeUiTest {
+        var stops = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = emptyList(), selectedLocationId = null,
+                    subscription = active.copy(state = SubscriptionDisplayState.EXPIRED),
+                    isConnected = true, isConnecting = true, canStartVpn = false,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(PersonalTunnelPhase.Checking, PersonalActivePath.OlcRtc),
+                    onAction = { stops++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Проверяем").assertExists()
+        onNodeWithText("Работает").assertDoesNotExist()
+        onNodeWithTag("apollo-active-path").assertTextEquals("Активный путь: OlcRTC")
+        onNodeWithTag("apollo-action").performClick()
+        assertEquals(1, stops)
+    }
+
+    @Test fun personalSwitchingAndUnavailableBothOfferStopWithoutSelectedLocation() = runComposeUiTest {
+        val phase = mutableStateOf(PersonalTunnelPhase.Switching)
+        var stops = 0
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = emptyList(), selectedLocationId = null,
+                    subscription = active.copy(state = SubscriptionDisplayState.DEVICE_DENIED),
+                    isConnected = false, isConnecting = false, canStartVpn = false,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(phase.value, PersonalActivePath.Unknown),
+                    onAction = { stops++ }, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Переключаемся").assertExists()
+        onNodeWithTag("apollo-action").performClick()
+        runOnIdle { phase.value = PersonalTunnelPhase.Unavailable }
+        onNodeWithText("Недоступен").assertExists()
+        onNodeWithTag("apollo-action").performClick()
+        assertEquals(2, stops)
+    }
+
+    @Test fun personalWorkingRequiresTheExplicitPhaseNotGenericVpnFlags() = runComposeUiTest {
+        val phase = mutableStateOf(PersonalTunnelPhase.Checking)
+        setContent {
+            MaterialTheme {
+                ApolloHomeContent(
+                    locations = listOf(finnish), selectedLocationId = finnish.storageId,
+                    subscription = active,
+                    isConnected = true, isConnecting = false, canStartVpn = true,
+                    isRefreshing = false, showSettings = false,
+                    personalTunnel = PersonalTunnelUiState(phase.value, PersonalActivePath.OlcRtc),
+                    onAction = {}, onRefresh = {}, onAdd = {}, onSettings = {},
+                    onLocationSelected = {}, snackbarHostState = SnackbarHostState()
+                )
+            }
+        }
+        onNodeWithText("Проверяем").assertExists()
+        onNodeWithText("Работает").assertDoesNotExist()
+        onNodeWithTag("apollo-action-flag", useUnmergedTree = true).assertDoesNotExist()
+        runOnIdle { phase.value = PersonalTunnelPhase.Working }
+        onNodeWithText("Работает").assertExists()
+        onNodeWithTag("apollo-action").assertTextEquals("Остановить")
+    }
 
     @Test fun heroThenSubscriptionThenCountryGroupsWithHumanModesAndExplicitSelection() = runComposeUiTest {
         setContent {

@@ -93,6 +93,7 @@ class HomeScreenViewModel(
     )
     val state get() = _state.asStateFlow()
     val logs get() = vpnManager.logs
+    val personalTunnel get() = vpnManager.personalTunnel
 
     /**
      * Passed straight through rather than copied into [HomeScreenState]: it is
@@ -524,6 +525,12 @@ class HomeScreenViewModel(
     /** The user has read the last failure and waved it away. */
     fun dismissFailure() {
         _state.update { it.copy(failure = null) }
+    }
+
+    /** Stop never toggles into Start while a personal TUN or failed cleanup may remain. */
+    fun stopPersonalVpn() {
+        cancelAutomaticSelection()
+        vpnManager.stopVpn()
     }
 
     fun ToggleVpn() {

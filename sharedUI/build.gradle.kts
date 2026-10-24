@@ -81,6 +81,10 @@ val olcboxCryptKeyV1 = providers.environmentVariable("OLCBOX_CRYPT_KEY_V1")
     .orElse(localBuildProperty("olcbox.cryptKeyV1").orEmpty())
 val olcboxAdminPassSha256 = providers.environmentVariable("OLCBOX_ADMIN_PASS_SHA256")
     .orElse(localBuildProperty("olcbox.adminPassSha256").orEmpty())
+// Public certificate fingerprint for the A063 USB-only HTTPS bridge. Empty in
+// ordinary builds; no bearer, room key or private key is a build input.
+val rgaPersonalBridgeCertSha256 = providers.environmentVariable("RGA_PERSONAL_BRIDGE_CERT_SHA256")
+    .orElse(localBuildProperty("rga.personalBridgeCertSha256").orEmpty())
 val generatedAppInfoDir = layout.buildDirectory.dir("generated/source/olcboxAppInfo/commonMain")
 
 val olcrtcRepoPath = providers.environmentVariable("OLCRTC_REPO")
@@ -104,6 +108,9 @@ abstract class GenerateAppInfoTask : DefaultTask() {
 
     @get:Input
     abstract val adminPassSha256: Property<String>
+
+    @get:Input
+    abstract val personalBridgeCertSha256: Property<String>
 
     /** True for an Xcode Release build — an archive headed for the App Store. */
     @get:Input
@@ -168,6 +175,7 @@ abstract class GenerateAppInfoTask : DefaultTask() {
                 const val BUILD: String = "${esc(buildId.get())}"
                 const val CRYPT_KEY_V1: String = "${esc(cryptKeyV1.get())}"
                 const val ADMIN_PASS_SHA256: String = "${esc(adminPassSha256.get())}"
+                const val PERSONAL_BRIDGE_CERT_SHA256: String = "${esc(personalBridgeCertSha256.get())}"
             }
             """.trimIndent() + "\n"
         )
@@ -186,6 +194,7 @@ val generateAppInfo by tasks.registering(GenerateAppInfoTask::class) {
     buildId.set(olcboxBuildIdValue)
     cryptKeyV1.set(olcboxCryptKeyV1)
     adminPassSha256.set(olcboxAdminPassSha256)
+    personalBridgeCertSha256.set(rgaPersonalBridgeCertSha256)
     shippingBuild.set(xcodeIsReleaseBuild)
     outputDir.set(generatedAppInfoDir)
 }

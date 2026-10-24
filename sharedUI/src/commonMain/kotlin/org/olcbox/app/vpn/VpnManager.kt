@@ -1,6 +1,7 @@
 package org.olcbox.app.vpn
 
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.olcbox.app.data.model.LocationConfig
@@ -8,6 +9,17 @@ import org.olcbox.app.data.repository.SubscriptionFetchProxy
 
 /** Bytes carried by the current session, as the platform counts them. */
 data class TrafficCounters(val bytesIn: Long, val bytesOut: Long)
+
+/** Sanitized personal-test UI state. It never carries room, endpoint or credential data. */
+enum class PersonalTunnelPhase { Inactive, Switching, Checking, Working, Unavailable }
+enum class PersonalActivePath { Unknown, Ordinary, OlcRtc }
+data class PersonalTunnelUiState(
+    val phase: PersonalTunnelPhase = PersonalTunnelPhase.Inactive,
+    val activePath: PersonalActivePath = PersonalActivePath.Unknown
+)
+
+private val inactivePersonalTunnel: StateFlow<PersonalTunnelUiState> =
+    MutableStateFlow(PersonalTunnelUiState())
 
 sealed class VpnStatus {
     object Disconnected : VpnStatus()
@@ -22,6 +34,9 @@ interface VpnManager {
     val logs: StateFlow<List<String>>
     val status: StateFlow<VpnStatus>
     val isConnected: StateFlow<Boolean>
+
+    /** Only the personal Android package exposes this test-phase channel. */
+    val personalTunnel: StateFlow<PersonalTunnelUiState> get() = inactivePersonalTunnel
 
     /**
      * Things the tunnel did on its own that the person should be told about,
