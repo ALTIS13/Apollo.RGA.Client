@@ -19,7 +19,7 @@ Apollo.RGA is an Android-first client for an existing Remnawave subscription, wi
 
 Remnawave remains the source of the existing subscription, hosts, expiry, and ordinary limits. The personal node binds one installation, subject, room, and country; its PostgreSQL journal is isolated QA state and does not debit the ordinary Remnawave cycle. HomeNode uses protected configuration, a loopback-only TLS bootstrap behind the existing Caddy route, an internal database network, and an isolated egress gateway.
 
-Never commit subscription URLs, room keys, tokens, DSNs, signing material, protected configs, dumps, or private acceptance evidence. Keep `.ops-private/`, `.remnawave-ops/`, `.worktrees/`, dependencies, build outputs, and caches out of commits. `origin` retains the Ghostlane/upstream identity; `rga` is the Apollo RGA remote. Do not push Apollo work to `origin`.
+Never commit subscription URLs, room keys, tokens, DSNs, signing material, protected configs, dumps, or private acceptance evidence. The historical Play signing/encryption key must be rotated; future workflows must use GitHub Secrets instead of literals. Keep `.ops-private/`, `.remnawave-ops/`, `.worktrees/`, dependencies, build outputs, and caches out of commits. `origin` retains the Ghostlane/upstream identity; `rga` is the Apollo RGA remote. Do not push Apollo work to `origin`.
 
 ## Verification
 
