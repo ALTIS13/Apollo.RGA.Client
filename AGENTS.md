@@ -49,6 +49,17 @@ go vet ./...
 
 Materialize that source with `scripts/materialize-olcrtc-managed.py` from a clean checkout at the authoritative pin; do not add a tracked `replace`. For a pinned personal-node build, follow `access-bridge/cmd/rga-personal-node/build-verified.ps1`; it requires a clean checkout at the pin in `scripts/olcrtc-managed-patch.json`. HomeNode input validation and Linux Docker checks are documented in `access-bridge/deploy/personal-homenode/README.md`. Do not label unavailable SDK, native, device, Linux Docker, or deployment checks as passes.
 
+### Consolidation verification: targeted greens are not release gates
+
+The Task 4 targeted checks passed: 31 Python tests with 10 skipped, all 14 Access Bridge Go packages plus `go vet`, 6 HomeNode input tests, 7 socket-owner and 39 IPv4-parser Java cases, 12 focused localization JVM tests, and the changed managed OlcRTC client/tunnel/mobile packages. These results do not make the broader release suites green:
+
+- The full shared JVM run retains the baseline Xray pinned-geodata mismatch; desktop compilation retains the two baseline unresolved `siteUrl` errors.
+- Android-host testing ran 1,294 tests with 97 failures and 1 skip. Android assembly is unverified without the configured sibling OlcRTC checkout.
+- The personal update publisher test fails in the available Windows PowerShell runtime. Gate-script tests also hit WSL and Windows temporary-Git cleanup failures.
+- The full managed OlcRTC suite retains four `internal/gate` failures and provider-default expectation failures, despite the changed-package passes above.
+
+Treat these as open release/acceptance limitations. Do not substitute targeted green checks for full JVM, desktop, Android, publisher, managed-native, physical-device, or deployment acceptance.
+
 ## Unfinished acceptance work
 
 - Complete cold start directly on restricted LTE, HomeNode SIGTERM-under-traffic, full provider-peer attribution, and remaining physical network checks.
