@@ -395,12 +395,12 @@ kotlin {
 
         named("androidHostTest") { dependencies {
             implementation(kotlin("test"))
-            implementation("org.robolectric:robolectric:4.16.1")
+            implementation("org.robolectric:robolectric:4.17")
         } }
 
         androidMain.dependencies {
             if (rgaGeneralRuntimeAar != null) api(files(rgaGeneralRuntimeAar))
-            implementation("app.rive:rive-android:11.9.2")
+            implementation("app.rive:rive-android:11.14.3")
             implementation(libs.androidx.activityCompose)
             implementation(libs.androidx.core)
             implementation(libs.androidx.camera.camera2)
